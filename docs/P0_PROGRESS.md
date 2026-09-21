@@ -145,3 +145,91 @@ HUNT GATE FAILED — 5 violation(s).
 - لم أُشغِّل أي شيء يعتمد على Docker؛ مسودة P0.1 غير مُتحقَّق منها وتُوسَم `[UNVERIFIED]`.
 - `PHASE_GATE.md` يبقى `P0: BLOCKED`.
 
+---
+
+## R2 — جولة تدقيق رقم 2 (إصلاح B1–B7 وE1)
+
+> التاريخ: 2026-09-21. ما لا يحتاج Docker شُغِّل فعلاً هنا؛ ما يعتمد على Docker بقي `[UNVERIFIED]`. لا تُعدّ أي خطوة P0.x منجزة.
+
+### جدول: ما شُغِّل فعلاً مقابل ما لم يُشغَّل
+
+| البند | الحالة | الدليل |
+|---|---|---|
+| B1 قاعدة CR في `hunt_gate.mjs` + اختبارها | ✅ شُغِّل | `node --test scripts/__tests__/hunt_gate.test.mjs` → **12/12 ناجح** |
+| B1 تحويل LF + `.gitattributes`/`.editorconfig` | ✅ شُغِّل | `grep` يعادل `[char]13` عبر كل الملفات → **صفر CR** |
+| B6 `check_env.mjs` + اختباره | ✅ شُغِّل | `node --test scripts/__tests__/check_env.test.mjs` → **6/6 ناجح** |
+| B6 `gen_secrets.mjs` (اختياري) | ✅ شُغِّل | توليد `.env` ثم `check_env` عليه → `OK` (خروج 0) |
+| E1 إصلاح `identity.js` | ✅ شُغِّل | `node --test gateway/src/__tests__/identity.test.js` → **8/8 ناجح** |
+| مجموعة `gateway` كاملة | ✅ شُغِّل | `cd gateway && node --test "src/__tests__/*.test.js"` → **22/22 ناجح** |
+| تشغيل Hunt Gate على المستودع | ✅ شُغِّل | `node scripts/hunt_gate.mjs` → **5 مخالفات موروثة** (خروج 1) |
+| B2/B3/B4/B5/B7 (ملفات المسودة) | ❌ لم يُشغَّل | لا Docker — `[UNVERIFIED]` |
+
+### مخرج `node --test scripts/__tests__/hunt_gate.test.mjs` (12/12)
+```
+✔ a clean codebase passes with zero violations
+✔ rule1 (H1): TODO/FIXME/dummy/foo/bar markers are flagged
+✔ A3: placeholder= attribute is allowed; placeholder as a word/variable is banned
+✔ A1: catch {} (no binding) and catch (err) {} are both flagged as empty catch
+✔ A2: .catch(() => {}) and .catch(() => undefined) are flagged as swallowed rejections
+✔ rule2 (H1): standalone pass and bare except are flagged in Python
+✔ rule4 (H12): console.log (JS) and print() (Python) outside tests are flagged
+✔ rule5 (H7): .skip/.only (JS) and pytest skip/xfail (Python) are flagged in tests
+✔ rule6 (H2): psycopg/asyncpg import outside core/app/db/ is flagged
+✔ rule7 (H5): AWS access key and a committed .env file are flagged
+✔ A4/rule8 (H2): uppercase SQL inside a string is flagged; lowercase prose is not
+✔ B1: CRLF (\r) in LF-required files is flagged; LF-only files pass
+ℹ tests 12
+ℹ pass 12
+ℹ fail 0
+```
+
+### مخرج `node scripts/hunt_gate.mjs` (خروج 1)
+```
+gateway\src\index.js:116: [H12/rule4] console.log outside test files (use pino)
+gateway\src\sessions.js:481: [H3/rule3-swallowed] swallowed promise rejection (.catch with empty/undefined body)
+gateway\src\sessions.js:445: [H12/rule4] console.log outside test files (use pino)
+gateway\src\sessions.js:474: [H12/rule4] console.log outside test files (use pino)
+gateway\src\sessions.js:482: [H12/rule4] console.log outside test files (use pino)
+HUNT GATE FAILED — 5 violation(s).
+```
+
+### مخرج `node --test gateway/src/__tests__/identity.test.js` (8/8)
+```
+✔ isLidJid / isPnJid classify addressing schemes
+✔ normalizeE164 emits real E.164 (+digits) and rejects non-phone values
+✔ toE164 accepts bare digits and JIDs, strips :device/_agent, never from @lid
+✔ normalizeJid: pn JID strips device suffix and emits +e164; lid yields null
+✔ resolvePhoneE164: sender_pn (digits OR JID) wins; lidmap accepts digits OR JID
+✔ normalizeIdentity: full G12 priority and E.164 output
+✔ property: every non-null phone_e164 matches +digits; never derived from @lid digits
+✔ audit §5 scenario: @lid null -> phoneNumberShare updates map -> number present
+ℹ tests 8
+ℹ pass 8
+ℹ fail 0
+```
+
+### مخرج `node --test scripts/__tests__/check_env.test.mjs` (6/6)
+```
+✔ checkEnv accepts strong, unique passwords
+✔ checkEnv rejects the change-me stub value
+✔ checkEnv rejects short passwords
+✔ checkEnv rejects a password reused across roles
+✔ checkEnv rejects missing passwords
+✔ parseEnv parses KEY=VALUE and skips comments/blank lines, strips quotes
+ℹ tests 6
+ℹ pass 6
+ℹ fail 0
+```
+
+### مخرج `check_env`/`gen_secrets` (تشغيل فعلي)
+```
+gen_secrets exit: 0          (كتب .env عشوائي)
+check_env(good) exit: 0      → check_env: OK
+check_env(bad)  exit: 1      → يرفض change-me (17 مشكلة: stub/قصير/مكرر)
+```
+
+### ملاحظات صادقة (H8)
+- B2 (نمط `\gexec`)، B3 (ذاكرة redis)، B4 (pgbouncer)، B5 (`spatial_ref_sys`)، B7 (كلمة مرور redis عبر env) عُدِّلت في ملفات المسودة فقط ولم تُشغَّل (لا Docker) — `[UNVERIFIED]`.
+- `PHASE_GATE.md` يبقى `P0: BLOCKED`.
+
+

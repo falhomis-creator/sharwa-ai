@@ -50,6 +50,9 @@ const CODE_EXTS = new Set([
   '.yml', '.yaml', '.conf', '.ini', '.toml',
 ]);
 
+// File types that MUST use LF line endings (executed/parsed in Linux containers).
+const LF_REQUIRED_EXTS = new Set(['.sh', '.yml', '.conf', '.ini', '.sql']);
+
 // Rule 1 — H1 placeholders. Forbidden in every non-test file.
 const H1_PATTERNS = [
   { name: 'TODO', re: /\bTODO\b/ },
@@ -115,6 +118,20 @@ function readLines(full) {
   }
 }
 
+function isLfRequired(full) {
+  const base = path.basename(full);
+  if (base === 'Dockerfile') return true;
+  return LF_REQUIRED_EXTS.has(path.extname(full).toLowerCase());
+}
+
+function hasCR(full) {
+  try {
+    return fs.readFileSync(full, 'utf8').includes('\r');
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Scan every file under `root` and return all Hunt Gate violations.
  * Pure with respect to stdout: it returns results and never prints. The CLI
@@ -148,6 +165,15 @@ export function runGate(root = ROOT) {
             });
           }
         }
+      });
+    }
+
+    // Rule 9 (B1) — CRLF line endings are forbidden in files executed/parsed
+    // inside Linux containers (shell scripts, Dockerfile, YAML, configs, SQL).
+    if (raw && isLfRequired(full) && hasCR(full)) {
+      violations.push({
+        file: rel, line: 1, rule: 'CRLF/rule9',
+        detail: 'CRLF line endings (use LF; see .gitattributes/.editorconfig)',
       });
     }
 

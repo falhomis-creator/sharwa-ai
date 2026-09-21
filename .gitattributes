@@ -1,0 +1,6 @@
+# Normalize line endings: store LF for all text files (audit B1).
+* text=auto eol=lf
+
+# Force LF for files executed/parsed in Linux containers.
+*.sh text eol=lf
+Dockerfile text eol=lf

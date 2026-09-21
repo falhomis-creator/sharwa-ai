@@ -184,3 +184,30 @@ test('A4/rule8 (H2): uppercase SQL inside a string is flagged; lowercase prose i
     cleanup(clean);
   }
 });
+
+test('B1: CRLF (\\r) in LF-required files is flagged; LF-only files pass', () => {
+  const dirty = tmpDir();
+  try {
+    write(dirty, 'crlf.sh', '#!/bin/bash\r\nset -euo pipefail\r\n');
+    write(dirty, 'crlf.yml', 'services:\r\n  x: {}\r\n');
+    write(dirty, 'Dockerfile', 'FROM alpine:3.19\r\n');
+    const { violations } = runGate(dirty);
+    const cr = violations.filter((v) => v.rule === 'CRLF/rule9');
+    assert.equal(cr.length, 3);
+  } finally {
+    cleanup(dirty);
+  }
+
+  const clean = tmpDir();
+  try {
+    write(clean, 'clean.sh', '#!/bin/bash\nset -euo pipefail\n');
+    write(clean, 'clean.yml', 'services:\n  x: {}\n');
+    write(clean, 'clean.conf', 'maxmemory 128mb\n');
+    write(clean, 'clean.ini', '[pgbouncer]\npool_mode = transaction\n');
+    write(clean, 'clean.sql', 'SELECT 1;\n');
+    write(clean, 'Dockerfile', 'FROM alpine:3.19\n');
+    assert.equal(runGate(clean).violations.filter((v) => v.rule === 'CRLF/rule9').length, 0);
+  } finally {
+    cleanup(clean);
+  }
+});
