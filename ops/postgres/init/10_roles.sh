@@ -42,19 +42,19 @@ BEGIN
   END IF;
 END $$;
 
+-- PostGIS's spatial_ref_sys is owned by the extension; grant read to sharwa_app
+-- explicitly (audit B5) so geo lookups work under RLS.
+GRANT SELECT ON spatial_ref_sys TO sharwa_app;
+
 -- LOGIN roles from .env, inheriting the base roles (least privilege).
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'app_user') THEN
-    CREATE ROLE :"app_user" LOGIN PASSWORD :'app_password' NOBYPASSRLS;
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'system_user') THEN
-    CREATE ROLE :"system_user" LOGIN PASSWORD :'system_password' NOBYPASSRLS;
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'migration_user') THEN
-    CREATE ROLE :"migration_user" LOGIN PASSWORD :'migration_password' NOBYPASSRLS;
-  END IF;
-END $$;
+-- psql variables are NOT substituted inside `DO $$ ... $$`, so create the roles
+-- via SELECT format(...) + \gexec (audit B2, pattern verified by the auditor).
+SELECT format('CREATE ROLE %I LOGIN PASSWORD %L NOBYPASSRLS', :'app_user', :'app_password')
+  WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'app_user') \gexec
+SELECT format('CREATE ROLE %I LOGIN PASSWORD %L NOBYPASSRLS', :'system_user', :'system_password')
+  WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'system_user') \gexec
+SELECT format('CREATE ROLE %I LOGIN PASSWORD %L NOBYPASSRLS', :'migration_user', :'migration_password')
+  WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'migration_user') \gexec
 
 -- Membership: app user is subject to RLS as sharwa_app; system user may only run
 -- SECURITY DEFINER functions as sharwa_system; the migration user owns objects.

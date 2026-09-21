@@ -18,7 +18,7 @@
 #     reference is recorded in docs/P0_DEVIATIONS.md).
 #
 # Memory budget (data tier only): postgres 1536 + pgbouncer 64 +
-# redis-durable 192 + redis-cache 128 = 1920 MB, leaving ~6.1 GB of an 8 GB host
+# redis-durable 320 + redis-cache 128 = 2048 MB, leaving ~6.0 GB of an 8 GB host
 # for the OS, page cache, and the (later) gateway/forwarder/api/prometheus tiers.
 # =============================================================================
 
@@ -95,19 +95,20 @@ services:
   redis-durable:                         # streams (inbound WAL) + lidmap + wake-ups. Never evicts.
     image: redis:7.4-alpine              # explicit tag (reference used :7-alpine)
     command:
-      - redis-server
-      - /etc/redis/redis.conf
-      - --requirepass
-      - ${REDIS_DURABLE_PASSWORD:?REDIS_DURABLE_PASSWORD is required (see .env)}
+      - sh
+      - -c
+      - exec redis-server /etc/redis/redis.conf --requirepass "$$REDIS_PASSWORD"
     environment:
-      # Lets the healthcheck authenticate without -a on the command line.
+      # B7: password via env (not argv). REDISCLI_AUTH lets the healthcheck
+      # authenticate without -a on the command line.
+      REDIS_PASSWORD: ${REDIS_DURABLE_PASSWORD:?REDIS_DURABLE_PASSWORD is required (see .env)}
       REDISCLI_AUTH: ${REDIS_DURABLE_PASSWORD:?REDIS_DURABLE_PASSWORD is required (see .env)}
     volumes:
       - ./ops/redis-durable.conf:/etc/redis/redis.conf:ro
       - redis_durable:/data
     networks: [data]
-    mem_limit: 192m
-    memswap_limit: 192m
+    mem_limit: 320m                       # B3: AOF rewrite headroom above maxmemory 128mb
+    memswap_limit: 320m
     cpus: 0.5
     pids_limit: 50
     healthcheck:
@@ -121,11 +122,11 @@ services:
   redis-cache:                           # dedupe fast-path, rate limits, pub/sub, read cache. Losable.
     image: redis:7.4-alpine
     command:
-      - redis-server
-      - /etc/redis/redis.conf
-      - --requirepass
-      - ${REDIS_CACHE_PASSWORD:?REDIS_CACHE_PASSWORD is required (see .env)}
+      - sh
+      - -c
+      - exec redis-server /etc/redis/redis.conf --requirepass "$$REDIS_PASSWORD"
     environment:
+      REDIS_PASSWORD: ${REDIS_CACHE_PASSWORD:?REDIS_CACHE_PASSWORD is required (see .env)}
       REDISCLI_AUTH: ${REDIS_CACHE_PASSWORD:?REDIS_CACHE_PASSWORD is required (see .env)}
     volumes:
       - ./ops/redis-cache.conf:/etc/redis/redis.conf:ro
