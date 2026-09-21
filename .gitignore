@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Local session/credential state (never commit Baileys auth state)
+auth_sessions/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Build output
+dist/
+coverage/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Node
+npm-debug.log*
+
+# OS
+Thumbs.db
+.DS_Store
