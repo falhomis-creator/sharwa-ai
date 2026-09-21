@@ -1,0 +1,22 @@
+{
+  "name": "sharwa-ai-gateway",
+  "version": "0.1.0",
+  "description": "Sharwa AI WhatsApp gateway (Baileys) - tenant-isolated sessions, FIFO send queue, signed webhooks to Django",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/index.js",
+    "test": "node --test \"src/__tests__/*.test.js\""
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1136.0",
+    "@whiskeysockets/baileys": "6.7.24",
+    "express": "^4.21.2",
+    "qrcode": "^1.5.4"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}

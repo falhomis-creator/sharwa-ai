@@ -1,0 +1,269 @@
+# =============================================================================
+# Sharwa AI - reference Docker Compose (single VPS, assumed 8 GB RAM / 4 vCPU)
+#
+# What this file enforces (see docs/00_ARCHITECTURE.md §6 and docs/02_RISK_SOLUTIONS_21.md):
+#   #16  every container has mem_limit + memswap_limit + cpus + pids_limit; PostgreSQL gets oom_score_adj -900
+#        so the kernel OOM killer takes application containers first (they restart), the database last.
+#   #3   realtime / bulk / batch run in SEPARATE containers with their own limits (physical bulkheads).
+#   #17  Redis broker with AOF fsync=always + noeviction; graceful stop periods so workers drain.
+#   #2   nobody talks to PostgreSQL except through PgBouncer (postgres is only on the internal `data` network).
+#   #18  Uvicorn WebSocket ping/pong + high nofile ulimit on the api container.
+#   #21  Docker log rotation, tmpfs with a size cap, no local media storage (MinIO is external).
+#   #16  Node heap capped below the container limit.
+#
+# The numbers are STARTING POINTS: measure in Phase 0 and adjust. Sum of mem_limit below = ~5.3 GB,
+# leaving ~2.7 GB for the OS and page cache on an 8 GB host.
+# Secrets come from env files that are NOT committed (.env.gateway, .env.core, .env.postgres).
+# =============================================================================
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-core-common: &core-common
+  build: ./core
+  env_file: [.env.core]
+  networks: [backend, data]
+  logging: *default-logging
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m
+  depends_on:
+    pgbouncer:      { condition: service_healthy }
+    redis-durable:  { condition: service_healthy }
+    redis-cache:    { condition: service_healthy }
+
+services:
+  # ---------------------------------------------------------------- data tier
+  postgres:
+    build: ./infra/postgres            # postgres:16 + postgis + pgvector + pg_trgm
+    env_file: [.env.postgres]
+    command:
+      - postgres
+      - -c
+      - max_connections=60
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - work_mem=8MB                   # work_mem x active connections must stay << mem_limit
+      - -c
+      - maintenance_work_mem=128MB
+      - -c
+      - effective_cache_size=1GB
+      - -c
+      - idle_in_transaction_session_timeout=10000   # kill transactions left open (e.g. across an LLM call)
+      - -c
+      - log_min_duration_statement=500
+      - -c
+      - password_encryption=scram-sha-256
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [data]                    # internal only: reachable through PgBouncer, never from outside
+    mem_limit: 1536m
+    memswap_limit: 1536m
+    cpus: 2.0
+    pids_limit: 300
+    oom_score_adj: -900                 # the kernel kills everything else first
+    stop_grace_period: 60s
+    shm_size: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    logging: *default-logging
+    restart: unless-stopped
+
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    env_file: [.env.pgbouncer]         # DB_HOST=postgres, POOL_MODE=transaction, DEFAULT_POOL_SIZE=25,
+                                       # RESERVE_POOL_SIZE=5, MAX_CLIENT_CONN=400, SERVER_RESET_QUERY=DISCARD ALL
+    networks: [data]
+    mem_limit: 64m
+    memswap_limit: 64m
+    cpus: 0.5
+    pids_limit: 50
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    depends_on:
+      postgres: { condition: service_healthy }
+    logging: *default-logging
+    restart: unless-stopped
+
+  redis-durable:                        # streams (inbound WAL) + Celery broker + wake-ups. Never evicts.
+    image: redis:7-alpine
+    command: >
+      redis-server --appendonly yes --appendfsync always
+      --maxmemory 160mb --maxmemory-policy noeviction
+      --save "" --tcp-keepalive 60
+    volumes:
+      - redis_durable:/data
+    networks: [data]
+    mem_limit: 192m
+    memswap_limit: 192m
+    cpus: 0.5
+    pids_limit: 50
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging: *default-logging
+    restart: unless-stopped
+
+  redis-cache:                          # dedupe fast-path, rate limits, kill-switch mirror, pub/sub, read cache. Losable.
+    image: redis:7-alpine
+    command: >
+      redis-server --save "" --appendonly no
+      --maxmemory 96mb --maxmemory-policy allkeys-lru
+    networks: [data]
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: 0.5
+    pids_limit: 50
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging: *default-logging
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------- channel tier (Node)
+  gateway:
+    build: ./gateway
+    env_file: [.env.gateway]           # SHARWA_AI_GATEWAY_API_KEY, SHARWA_AI_GATEWAY_WEBHOOK_SECRET, MINIO_*, REDIS_*, MAX_SESSIONS
+    environment:
+      NODE_ENV: production
+      NODE_OPTIONS: "--max-old-space-size=900"     # heap cap BELOW mem_limit so Node fails fast instead of being OOM-killed
+    ports:
+      - "127.0.0.1:4001:4001"          # never the public internet
+    volumes:
+      - auth_sessions:/app/auth_sessions
+    tmpfs:
+      - /tmp:size=64m                  # media is streamed to MinIO; no local media storage
+    read_only: true
+    networks: [edge, backend, data]
+    mem_limit: 1200m
+    memswap_limit: 1200m
+    cpus: 1.5
+    pids_limit: 200
+    stop_grace_period: 30s             # flush, release session leases, close sockets WITHOUT logging out
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4001/readyz >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      redis-durable: { condition: service_healthy }
+      redis-cache:   { condition: service_healthy }
+    logging: *default-logging
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------- brain tier (Python, one image, many roles)
+  api:
+    <<: *core-common
+    command: >
+      uvicorn sharwa_ai_core.api:app --host 0.0.0.0 --port 8080 --workers 1
+      --ws-ping-interval 20 --ws-ping-timeout 20 --timeout-graceful-shutdown 30
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks: [edge, backend, data]
+    ulimits:
+      nofile: { soft: 65535, hard: 65535 }          # WebSockets consume file descriptors
+    mem_limit: 384m
+    memswap_limit: 384m
+    cpus: 1.0
+    pids_limit: 200
+    stop_grace_period: 40s
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/readyz',timeout=3)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  worker-realtime:                      # ingest consumer, conversation turns, outbound dispatcher. NEVER runs bulk work.
+    <<: *core-common
+    command: >
+      celery -A sharwa_ai_core.celery_app worker -n realtime@%h
+      -Q realtime,outbound_interactive --concurrency=4 --prefetch-multiplier=1 -O fair
+      --max-tasks-per-child=200 --max-memory-per-child=150000
+    mem_limit: 640m
+    memswap_limit: 640m
+    cpus: 1.5
+    pids_limit: 200
+    stop_grace_period: 60s              # finish in-flight turns; acks_late + idempotency cover the rest
+
+  worker-bulk:                          # campaigns, cart reminders, review requests. Pacing enforced by the Send Policy.
+    <<: *core-common
+    command: >
+      celery -A sharwa_ai_core.celery_app worker -n bulk@%h
+      -Q bulk --concurrency=2 --prefetch-multiplier=1 -O fair
+      --max-tasks-per-child=100 --max-memory-per-child=150000
+    mem_limit: 384m
+    memswap_limit: 384m
+    cpus: 0.75
+    pids_limit: 100
+    stop_grace_period: 60s
+
+  worker-batch:                         # embeddings, catalog sync/reconcile, summaries, gift precompute (CPU pool, separate process)
+    <<: *core-common
+    command: >
+      celery -A sharwa_ai_core.celery_app worker -n batch@%h
+      -Q batch --concurrency=2 --prefetch-multiplier=1 -O fair
+      --max-tasks-per-child=50 --max-memory-per-child=250000
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 1.0
+    pids_limit: 150
+    stop_grace_period: 60s
+
+  scheduler:                            # sweeper: scheduled_jobs, outbox recovery, auto-resume, kill-switch watchdog. Exactly ONE replica.
+    <<: *core-common
+    command: python -m sharwa_ai_core.scheduler
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: 0.25
+    pids_limit: 50
+    stop_grace_period: 30s
+
+  # ---------------------------------------------------------------- observability
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+      - --storage.tsdb.retention.size=2GB
+    volumes:
+      - ./infra/prometheus:/etc/prometheus:ro
+      - prom_data:/prometheus
+    networks: [backend]
+    mem_limit: 192m
+    memswap_limit: 192m
+    cpus: 0.5
+    pids_limit: 100
+    logging: *default-logging
+    restart: unless-stopped
+
+networks:
+  edge:
+    driver: bridge                     # published only on 127.0.0.1; a reverse proxy (TLS) sits in front
+  backend:
+    driver: bridge
+  data:
+    driver: bridge
+    internal: true                     # no route to the outside world: databases and Redis cannot be reached externally
+
+volumes:
+  pgdata:
+  redis_durable:
+  auth_sessions:
+  prom_data:

@@ -1,0 +1,45 @@
+# P0 Open Questions — أسئلة وعراقيل مفتوحة
+
+> حكم: القاعدة 2 من «قواعد الاشتباك» و§3 H15 و§8 بند 9. أي غموض يُسجَّل هنا ويُتابَع بالخيار الأكثر أماناً.
+
+---
+
+## OQ-1 (حاسم — عرقلة بيئية) Docker/Compose غير متوفّر
+
+- **الواقع:** `docker` و`docker compose` غير مثبّتين على هذا الجهاز (Windows). لا Docker Desktop، لا WSL (`wsl.exe --status` → "WSL is not installed")، لا podman.
+- **الأثر:** معظم معايير قبول P0.1–P0.8 غير قابلة للتحقق حرفياً:
+  - P0.1: `docker compose config`، `docker inspect postgres`، `docker stats --no-stream`.
+  - P0.3: MinIO حقيقية في `docker-compose.test.yml`.
+  - P0.6: `docker stop gateway`، Prometheus/`promtool check rules`.
+  - P0.8: `docker-compose.test.yml` + `fake-django` + اختبارات الفوضى `kill -9`/`docker stop`.
+- **القرار المتّخذ (الأكثر أماناً):** التوقف عند حدود P0.0 وعدم محاكاة هذه البنى (قاعدة P0.0 خطوة 5: «ما ينقص وتعذّر تثبيته: أوقف واكتب السبب (لا تلتفّ بمحاكاة)»).
+- **الحل المقترح (للمالك/المدقق):** توفير بيئة Docker (تثبيت Docker Desktop + WSL2، أو جهاز Linux) ثم إعادة تشغيل `scripts/hunt_gate.mjs` والانطلاق من P0.1.
+
+## OQ-2 PostgreSQL المحلي: إصدار 18 بلا امتدادات كاملة وبلا كلمة مرور
+
+- **الواقع:** خادم `postgresql-x64-18` يعمل (PostgreSQL 18.6). مدير الامتدادات يحوي `pg_trgm.control` فقط — **لا `vector.control` (pgvector) ولا `postgis.control`**.
+- **الأثر:** `docs/reference/schema.sql` يبدأ بـ `CREATE EXTENSION vector` و`CREATE EXTENSION postgis` — **لن يعمل** على هذا الخادم، و`schema_selftest.sql` (34 بنداً) غير قابل للتشغيل.
+- **كلمة المرور:** `pg_hba.conf` = `scram-sha-256` وكلمة مرور `postgres` غير معروفة في هذه الجلسة.
+- **القرار:** عدم ادّعاء نجاح `schema_selftest`. يُطلب توفير PostgreSQL 16 + pgvector + PostGIS + pg_trgm (يفضَّل عبر الصورة في `docker-compose.test.yml`).
+
+## OQ-3 Redis المحلي: 5.0.14.1 (Windows) أقدم من المطلوب
+
+- **الواقع:** خدمة `Redis` تعمل، `redis-cli ping` → `PONG`، الإصدار `5.0.14.1`.
+- **الأثر:** الأوامر المطلوبة في P0.2/P0.4/P0.5 — `XAUTOCLAIM` (6.2+)، `BLMOVE` (6.2+)، بعض خيارات `XGROUP/XTRIM` — غير مدعومة في 5.0. Streams الأساسية (XADD/XREADGROUP/XACK) مدعومة منذ 5.0 لكنها لا تغطي الاشتراطات.
+- **القرار:** عدم البناء على Redis 5.0 للتحقق. يُطلب Redis ≥ 6.2 (عبر الحاوية).
+
+## OQ-4 Python 3.12 غير متوفّر
+
+- **الواقع:** `python`/`py` = 3.13.15 فقط.
+- **الأثر:** الحزمة `core/` مطلوبة على 3.12 (FastAPI/psycopg). 3.13 غالباً متوافقة لكن لم تُختبر على 3.12.
+- **القرار:** تسجيل انحراف (انظر P0_DEVIATIONS) وتثبيت 3.12 عند توفر البيئة.
+
+## OQ-5 `C:\sharwa_ai` ليس مستودع git
+
+- **الواقع:** `git status` → "not a git repository". لا `.git`.
+- **الأثر:** لا يمكن تنفيذ بند §8 رقم 8 (commit بعد كل خطوة). لم ألمس إعدادات git (بند محظورات رقم 8 يمنع تعديل إعدادات git).
+- **القرار:** تسجيله هنا؛ تهيئة المستودع (إن أراد المالك) خارج نطاق تعديلي الحالي.
+
+## OQ-6 العزل المادي عن `sharwa_saas`
+
+- **التأكيد:** لم ألمس `sharwa_saas` ولم أحاول الاتصال به أو بقاعدة بياناته (بند §8 رقم 1). كلمة مرور PostgreSQL المحلية غير معروفة أصلاً، ولم أحاول تخمينها.
