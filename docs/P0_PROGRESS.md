@@ -517,4 +517,38 @@ SET + FLUSHALL   -> DBSIZE = 0         (التفريغ يعمل)
 
 أما الخمس الباقية فهي **ديون موروثة** في `gateway/` (`console.log` ×4 + `.catch(()=>{})` ×1) تُصلَح عند لمس `index.js`/`sessions.js` في P0.2+ (توجيه التدقيق §3 وR3)، لا تُلمَس الآن. لا عيب آخر ظهر في `docker-compose.yml`/`ops/*`/Dockerfile/`schema.sql`/`pgbouncer.ini`/`redis*.conf` عند التشغيل الحقيقي.
 
+---
+
+## P0.2 — استيعاب البوابة الدائم (G1، G2، G4، G11، G12) + الـForwarder
+
+> التاريخ: 2026-09-22. استئناف بعد كلمة **"GO P0.2"** من المالك. الحاكم: `PROMPT_P0_foundation_for_deepseek.md` §6 P0.2 + التدقيقات 01–03 + `docs/R3_DIRECTIVE.md`.
+
+### قرارات معمارية ملزِمة من المالك (تفتح أسئلة C1)
+
+1. **Dedupe في كتابة واحدة fsync'd:** دمج علامة dedupe مع `XADD` في عملية ذرّية واحدة على `redis-durable` (سكربت Lua) — لا نقل dedupe إلى `redis-cache` (فاقد، سيسمح بالتكرار عند إعادة تشغيل الكاش). قيد UNIQUE في PostgreSQL يبقى خط الدفاع الأخير.
+2. **تزامن الاستيعاب:** مسار الاستيعاب **لا** يُسلسِل الرسائل عبر سلسلة `XADD` تتابعية واحدة؛ بل مجمّع محدود (bounded pool) من `XADD` متزامنة عبر شظايا `in:{shard}` (حسب هـ.3.3) لتفعيل دمج fsync في Redis.
+3. **سقف قيمة F4 من الطرفين:**
+   - البوابة: ترفض/تحوّل أي حمولة رسالة واحدة > **64KB** قبل وصولها لـ`redis-durable`؛ الوسائط الكبيرة لا تُكتب كقيمة Redis — يذهب مرجع/مفتاح صغير إلى Redis والكائن نفسه إلى تخزين الكائنات.
+   - Redis: `proto-max-bulk-len 8mb` + `client-query-buffer-limit 8mb` على `redis-durable` (سقف صلب دون حدّ الحاوية 320m) لرفض الكتابة الجامحة كخطأ بروتوكول بدل تضخيم الذاكرة. اختبار يحاول `SET`/`XADD` زائدَي الحجم ويثبت الرفض بلا OOM.
+
+### 2.1 سقف قيمة F4 على `redis-durable` — **مُتحقَّق على الحاوية الحقيقية**
+
+عدّلت `ops/redis-durable.conf` بإضافة السطرين (أعدت التشغيل والتُقطا بـ`CONFIG GET`):
+```
+proto-max-bulk-len       8388608   (8mb)
+client-query-buffer-limit 8388608   (8mb)
+```
+
+**اختبار الرفض (قيمة 9MB > 8mb) — مخرجات حقيقية:**
+```
+SET  (9MB)  -> Error: Connection reset by peer      ; EXISTS(f4:bigkey)=0   (لم يُخزَّن)
+XADD (9MB)  ->                                       ; XLEN(f4:stream)=0     (لم يُكتب)
+سجل Redis (loglevel debug):
+  1:M ... - Protocol error (invalid bulk length) from client: ...
+      qbuf=20474 ... Query buffer during protocol error: '$9000000..xxx...'
+```
+> **`qbuf=20474`** هو الدليل الحاسم: مخزن الاستعلام حمل ~20KB فقط (الترويسة)، لأن redis رفض الأمر لحظة قراءة طول الـbulk `$9000000` **قبل** تخزين الجسم في المخزن — لا تضخيم لمخزن الاستعلام، ولا مسار OOM. بعد الاختبار: `DBSIZE=0`, `used_memory=1.06M`, `restart=0`, `OOMKilled=false`, `health=healthy`.
+
+> ملاحظة H8: "Connection reset by peer" هو السلوك الموثّق لانتهاك `proto-max-bulk-len` — يغلق redis الاتصال فور اكتشاف الطول الزائد؛ سطر `Protocol error (invalid bulk length)` يظهر في السجل عند `loglevel debug` (أعدته إلى `notice` بعد الالتقاط).
+
 
