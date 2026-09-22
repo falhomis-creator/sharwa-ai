@@ -1,10 +1,11 @@
 # =============================================================================
 # Sharwa AI - docker-compose.yml (P0.1 data tier DRAFT - NOT run: no Docker yet)
 #
-# Derived from docs/reference/docker-compose.reference.yml, scoped to the P0.1
-# data layer only (PROMPT_P0 §6 P0.1 step 1). worker-*/scheduler and all
-# application code (gateway/forwarder/api/prometheus) are intentionally ABSENT:
-# they are app code and are forbidden this round.
+# Derived from docs/reference/docker-compose.reference.yml. Originally scoped to
+# the P0.1 data layer only (PROMPT_P0 §6 P0.1 step 1); P0.1 was verified on real
+# Docker at C1 (docs/P0_C1_REPORT.md) - this file is no longer a "not run" draft.
+# P0.2 (R3_DIRECTIVE) adds the `gateway`/`gateway-forwarder` app tier below.
+# worker-*/scheduler/api/prometheus remain ABSENT - still out of scope.
 #
 # Rules applied:
 #   - every container has mem_limit + memswap_limit + cpus + pids_limit + log cap
@@ -17,9 +18,12 @@
 #   - every image tag is an explicit version - NO `latest` (deviation from the
 #     reference is recorded in docs/P0_DEVIATIONS.md).
 #
-# Memory budget (data tier only): postgres 1536 + pgbouncer 64 +
-# redis-durable 320 + redis-cache 128 = 2048 MB, leaving ~6.0 GB of an 8 GB host
-# for the OS, page cache, and the (later) gateway/forwarder/api/prometheus tiers.
+# Memory budget: data tier (postgres 1536 + pgbouncer 64 + redis-durable 320 +
+# redis-cache 128 = 2048 MB) + app tier (gateway 512 + gateway-forwarder 128 =
+# 640 MB) = 2688 MB, leaving ~5.3 GB of an 8 GB host for the OS, page cache, and
+# the still-absent api/prometheus tiers. The gateway/gateway-forwarder limits
+# are a FIRST-PASS ESTIMATE (Baileys per-session memory not yet load-tested
+# under P0.2) - revisit once real WhatsApp sessions run under load.
 # =============================================================================
 
 x-logging: &default-logging
@@ -143,11 +147,93 @@ services:
     logging: *default-logging
     restart: unless-stopped
 
+  # ---------------------------------------------------------------- app tier
+  # P0.2 (R3_DIRECTIVE, disaster #4/G1 + #5/#17): the WA socket (gateway) and
+  # the Django delivery path (gateway-forwarder) are separate containers/
+  # processes so a slow/down Django never blocks inbound message receipt.
+  gateway:
+    build:
+      context: ./gateway
+    image: sharwa-ai-gateway:p0.2          # tag shared with gateway-forwarder below (built once)
+    environment:
+      PORT: "4001"
+      NODE_ENV: production
+      SHARWA_AI_GATEWAY_API_KEY: ${SHARWA_AI_GATEWAY_API_KEY:?SHARWA_AI_GATEWAY_API_KEY is required (see .env)}
+      SHARWA_AI_GATEWAY_WEBHOOK_SECRET: ${SHARWA_AI_GATEWAY_WEBHOOK_SECRET:?SHARWA_AI_GATEWAY_WEBHOOK_SECRET is required (see .env)}
+      # host.docker.internal (below) is what makes these reachable when Django/
+      # MinIO run on the VPS host itself rather than in this compose file -
+      # "localhost" from INSIDE the container would mean the container itself.
+      DJANGO_BASE_URL: ${DJANGO_BASE_URL:-http://host.docker.internal:8000}
+      MINIO_ENDPOINT_URL: ${MINIO_ENDPOINT_URL:-http://host.docker.internal:9000}
+      # Optional (owner decision, P0.2): MinIO deployment status was unknown when
+      # this was written. Left EMPTY here rather than :?required so `gateway` can
+      # still start and handle text messages - sessions.js already degrades a
+      # media upload gracefully (object_key: null, Arabic fallback text) when
+      # these are unset/wrong. Set real values in .env once MinIO is confirmed.
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-}
+      MINIO_BUCKET_NAME: ${MINIO_BUCKET_NAME:-sharwa-ai}
+      MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
+      AUTH_SESSIONS_DIR: /app/auth_sessions
+      REDIS_DURABLE_HOST: redis-durable
+      REDIS_DURABLE_PORT: "6379"
+      REDIS_DURABLE_PASSWORD: ${REDIS_DURABLE_PASSWORD:?REDIS_DURABLE_PASSWORD is required (see .env)}
+    volumes:
+      - gateway_auth_sessions:/app/auth_sessions   # WhatsApp session credentials survive restarts
+    networks: [data, app]                  # data: reach redis-durable. app: reach the internet (WhatsApp) + host
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:4001:4001"              # loopback only (Dockerfile: never published to the public internet)
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 1.0
+    pids_limit: 200
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:4001/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    depends_on:
+      redis-durable: { condition: service_healthy }
+    logging: *default-logging
+    restart: unless-stopped
+
+  gateway-forwarder:                       # same image as `gateway`, different command - reads in:{shard}
+    image: sharwa-ai-gateway:p0.2          # via the legacy-forwarder consumer group and delivers to Django
+    command: ["node", "src/forwarder.js"]
+    environment:
+      NODE_ENV: production
+      SHARWA_AI_GATEWAY_WEBHOOK_SECRET: ${SHARWA_AI_GATEWAY_WEBHOOK_SECRET:?SHARWA_AI_GATEWAY_WEBHOOK_SECRET is required (see .env)}
+      DJANGO_BASE_URL: ${DJANGO_BASE_URL:-http://host.docker.internal:8000}
+      REDIS_DURABLE_HOST: redis-durable
+      REDIS_DURABLE_PORT: "6379"
+      REDIS_DURABLE_PASSWORD: ${REDIS_DURABLE_PASSWORD:?REDIS_DURABLE_PASSWORD is required (see .env)}
+    networks: [data, app]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: 0.5
+    pids_limit: 50
+    # No process-level healthcheck: this image's alpine base has no verified
+    # pgrep/procps, and a wrong CMD here would flap the container needlessly
+    # (H3: don't guess a healthcheck we haven't proven). restart: unless-stopped
+    # plus the forwarder's own structured logs (logger.info '[forwarder] started')
+    # are the liveness signal for now - revisit if we add a tiny /healthz shim.
+    logging: *default-logging
+    restart: unless-stopped
+
 networks:
   data:
     driver: bridge
     internal: true                       # databases/Redis cannot be reached from outside
+  app:
+    driver: bridge                       # NOT internal: gateway needs outbound internet (WhatsApp)
+                                          # and a route to Django/MinIO on the host (host.docker.internal)
 
 volumes:
   pgdata:
   redis_durable:
+  gateway_auth_sessions:

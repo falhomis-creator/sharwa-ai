@@ -32,6 +32,9 @@ const TEMPLATE = [
   ['SHARWA_MIGRATION_PASSWORD', randomSecret],
   ['REDIS_DURABLE_PASSWORD', randomSecret],
   ['REDIS_CACHE_PASSWORD', randomSecret],
+  // P0.2 (R3_DIRECTIVE): gateway app tier (docker-compose.yml gateway/gateway-forwarder).
+  ['SHARWA_AI_GATEWAY_API_KEY', randomSecret],
+  ['SHARWA_AI_GATEWAY_WEBHOOK_SECRET', randomSecret],
 ];
 
 function main() {
