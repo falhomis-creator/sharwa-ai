@@ -18,7 +18,19 @@ import { createRedisClient, closeRedisClient } from './redis.js';
 import { postInboundMessage } from './webhook.js';
 
 const CONSUMER_NAME = `forwarder-${process.pid}`;
-const BLOCK_MS = 5000;
+// XREADGROUP's own BLOCK parameter is a SERVER-side wait; redis.js's
+// createRedisClient() also sets a CLIENT-side `commandTimeout` (from
+// config.redis.timeoutMs, default 5000ms) that aborts ANY command - including
+// this intentionally-blocking one - if it doesn't get a reply in time. Setting
+// BLOCK_MS equal to (or above) that timeout means the client-side watchdog
+// fires at essentially the same instant the server would naturally return an
+// empty result, so on an idle stream EVERY cycle raced and lost: ioredis threw
+// "Command timed out", the outer loop logged "[forwarder] loop error; backing
+// off" and slept 1s, over and over (observed on real Docker - not a crash, but
+// a permanent noisy poll instead of a real long-poll, plus an extra Redis round
+// trip every ~6s). Keeping a safety margin below the command timeout lets the
+// command return (with or without data) before that watchdog can fire.
+const BLOCK_MS = Math.max(1000, config.redis.timeoutMs - 1500);
 const CLAIM_IDLE_MS = 30_000; // claim entries idle for this long from dead consumers
 const BATCH_SIZE = 50;
 
@@ -32,6 +44,40 @@ async function ensureGroup(client, stream) {
   } catch (err) {
     if (!String(err.message).includes('BUSYGROUP')) throw err;
   }
+}
+
+/**
+ * Wait for the redis-durable client to finish its TCP+AUTH handshake before
+ * issuing the first command.
+ *
+ * redis.js's createRedisClient() deliberately uses `lazyConnect: false` +
+ * `enableOfflineQueue: false` (H3: fail fast rather than silently buffer a
+ * command in memory). That is the right choice for a per-message operation
+ * with a spool fallback (sessions.js's defaultAppendToWal) - but ensureGroup()
+ * below is this process's FIRST command, called synchronously right after
+ * createRedisClient(). The handshake can never complete before that next line
+ * of synchronous code runs, so without this wait the command was NOT racing
+ * occasionally - it was guaranteed to fail on every single startup with
+ * "Stream isn't writeable and enableOfflineQueue options is false", crash the
+ * process (main().catch -> process.exit(1)), and crash-loop forever under
+ * `restart: unless-stopped` (observed on real Docker: every restart, no
+ * exceptions, regardless of backoff delay - confirming it was ordering, not
+ * timing).
+ */
+function waitForReady(client) {
+  if (client.status === 'ready') return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const onReady = () => {
+      client.off('error', onError);
+      resolve();
+    };
+    const onError = (err) => {
+      client.off('ready', onReady);
+      reject(err);
+    };
+    client.once('ready', onReady);
+    client.once('error', onError);
+  });
 }
 
 /**
@@ -149,6 +195,8 @@ async function main() {
     logger.error({ err: err.message }, '[forwarder] redis-durable client error');
   });
 
+  await waitForReady(client);
+
   for (const stream of streamKeys()) {
     await ensureGroup(client, stream);
   }
@@ -178,7 +226,7 @@ async function main() {
   process.exit(0);
 }
 
-export { toWebhookPayload, deliverOne, streamKeys, shouldForwardToLegacy };
+export { toWebhookPayload, deliverOne, streamKeys, shouldForwardToLegacy, waitForReady, BLOCK_MS };
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch((err) => {
