@@ -13,6 +13,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -132,6 +133,18 @@ function hasCR(full) {
   }
 }
 
+// Rule 7 (.env) must only flag a .env that would actually be committed, i.e. one
+// that is NOT ignored by git. A gitignored `.env` (the project's normal, required
+// local config) is legitimate and must not fail the gate on a real host.
+function isGitIgnored(root, rel) {
+  try {
+    execFileSync('git', ['-C', root, 'check-ignore', '--quiet', '--', rel], { stdio: 'ignore' });
+    return true; // exit 0: ignored
+  } catch {
+    return false; // exit 1 (not ignored) / 128 (not a repo) / git missing => not proven ignored
+  }
+}
+
 /**
  * Scan every file under `root` and return all Hunt Gate violations.
  * Pure with respect to stdout: it returns results and never prints. The CLI
@@ -177,9 +190,10 @@ export function runGate(root = ROOT) {
       });
     }
 
-    // Rule 7 (.env committed): any real .env that is not the documented example.
+    // Rule 7 (.env committed): a real .env that is not the documented example
+    // and is not git-ignored (i.e. would be committed).
     const base = path.basename(full);
-    if (/^\.env(\.|$)/.test(base) && base !== '.env.example') {
+    if (/^\.env(\.|$)/.test(base) && base !== '.env.example' && !isGitIgnored(root, rel)) {
       violations.push({
         file: rel, line: 1, rule: 'H5/rule7-env',
         detail: 'real .env file present (use .env.example, keep secrets out of the repo)',

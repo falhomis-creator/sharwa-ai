@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 import { runGate } from '../hunt_gate.mjs';
 
@@ -160,6 +161,29 @@ test('rule7 (H5): AWS access key and a committed .env file are flagged', () => {
     assert.ok(violations.some((v) => v.rule === 'H5/rule7-env'));
   } finally {
     cleanup(dir);
+  }
+});
+
+test('rule7-env: a gitignored .env is not flagged; a non-ignored .env is', () => {
+  const ignored = tmpDir();
+  try {
+    execFileSync('git', ['init', '-q'], { cwd: ignored, stdio: 'ignore' });
+    write(ignored, '.gitignore', '.env\n');
+    write(ignored, '.env', 'POSTGRES_PASSWORD=secret\n');
+    const clean = runGate(ignored);
+    assert.equal(clean.violations.filter((v) => v.rule === 'H5/rule7-env').length, 0);
+  } finally {
+    cleanup(ignored);
+  }
+
+  const notIgnored = tmpDir();
+  try {
+    execFileSync('git', ['init', '-q'], { cwd: notIgnored, stdio: 'ignore' });
+    write(notIgnored, '.env', 'POSTGRES_PASSWORD=secret\n');
+    const dirty = runGate(notIgnored);
+    assert.equal(dirty.violations.filter((v) => v.rule === 'H5/rule7-env').length, 1);
+  } finally {
+    cleanup(notIgnored);
   }
 });
 
