@@ -16,9 +16,11 @@ import QRCode from 'qrcode';
 import { postSessionStatus } from './webhook.js';
 import { logger } from './logger.js';
 import { normalizeMessage, shouldIgnoreInbound as normalizeShouldIgnore, detectMedia as normalizeDetectMedia, extractText as normalizeExtractText } from './ingest/normalize.js';
-import { appendEvent } from './ingest/wal.js';
+import { appendEvent, dedupeKeyFor } from './ingest/wal.js';
+import { markDone } from './ingest/dedupe.js';
 import { spool } from './ingest/spool.js';
-import { createLidMap, recordPhoneNumberShare } from './ingest/lidmap.js';
+import { createLidMap, recordPhoneNumberShare, buildIdentityUpdateEvent } from './ingest/lidmap.js';
+import { config } from './config.js';
 
 // ---------------------------------------------------------------------------
 // Tenant-isolated Baileys session manager.
@@ -412,10 +414,27 @@ export async function createSession(sessionId) {
     });
   });
 
-  // G12: record lid -> phone_e164 mappings as WhatsApp discloses them.
+  // G12: record lid -> phone_e164 mappings as WhatsApp discloses them, and
+  // (R3_DIRECTIVE) append an identity_update WAL entry so a future P1 core
+  // consumer can react to the resolution without re-deriving it from raw
+  // messages. Mirrors processInboundMessage's spool-on-failure path (F2) via
+  // the same defaultAppendToWal helper.
   sock.ev.on('chats.phoneNumberShare', ({ lid, jid } = {}) => {
     if (!redisClient) return;
-    recordPhoneNumberShare(redisClient, sessionId, lid, jid).catch((err) => {
+    (async () => {
+      const res = await recordPhoneNumberShare(redisClient, sessionId, lid, jid);
+      if (!res.stored) return; // non-resolvable jid, or bounded out at lidmapMax (H4)
+
+      const event = buildIdentityUpdateEvent(lid, res.phone_e164);
+      const appendRes = await defaultAppendToWal({ sessionId, event });
+      if (appendRes.status === 'appended') {
+        // No separate "delivery confirmed" step exists for identity_update
+        // (unlike messages, which wait for forwarder.js to reach Django) -
+        // the entry is fully durable the moment it lands on the stream, so
+        // extend its dedupe marker to the long TTL right away (G2-equivalent).
+        await markDone(redisClient, dedupeKeyFor(sessionId, event.provider_message_id), config.dedupeDoneTtlS * 1000);
+      }
+    })().catch((err) => {
       logger.error({ sessionId, err: err.message }, '[sessions] failed to record phoneNumberShare (G12)');
     });
   });

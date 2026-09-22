@@ -34,6 +34,20 @@ async function ensureGroup(client, stream) {
   }
 }
 
+/**
+ * identity_update entries (G12/R3_DIRECTIVE) are bookkeeping for a future P1
+ * core consumer reading the stream directly - the legacy Django webhook has
+ * no field for a lid/phone resolution, so the forwarder ACKs these without
+ * calling postInboundMessage rather than sending a garbage payload (F2: this
+ * is a deliberate, logged skip, not a silent drop - see processStream).
+ *
+ * @param {object} entry
+ * @returns {boolean}
+ */
+function shouldForwardToLegacy(entry) {
+  return entry.type !== 'identity_update';
+}
+
 /** Build the Django webhook payload from a normalized WAL entry. */
 function toWebhookPayload(sessionId, entry) {
   return {
@@ -108,6 +122,13 @@ async function processStream(client, stream) {
       await client.xack(stream, config.legacyForwarderGroup, id);
       continue;
     }
+
+    if (!shouldForwardToLegacy(data)) {
+      logger.info({ stream, id, type: data.type }, '[forwarder] skipping legacy delivery for non-message entry');
+      await client.xack(stream, config.legacyForwarderGroup, id);
+      continue;
+    }
+
     let ok = false;
     try {
       ok = await deliverOne(client, stream, id, data);
@@ -157,7 +178,7 @@ async function main() {
   process.exit(0);
 }
 
-export { toWebhookPayload, deliverOne, streamKeys };
+export { toWebhookPayload, deliverOne, streamKeys, shouldForwardToLegacy };
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch((err) => {

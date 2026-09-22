@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createLidMap, recordPhoneNumberShare } from '../lidmap.js';
+import { createLidMap, recordPhoneNumberShare, buildIdentityUpdateEvent } from '../lidmap.js';
 
 function fakeRedis() {
   const hashes = new Map(); // key -> Map(field -> value)
@@ -54,3 +54,21 @@ test('recordPhoneNumberShare is bounded by lidmapMax (H4): new lid dropped at ca
   await client.hset(`lidmap:${key}`, 'lid-0@lid', '+201999999999');
   assert.equal(await client.hget(`lidmap:${key}`, 'lid-0@lid'), '+201999999999');
 });
+
+test('buildIdentityUpdateEvent produces a deterministic provider_message_id for the same lid/phone pair', () => {
+  const a = buildIdentityUpdateEvent('999@lid', '+201111112222');
+  const b = buildIdentityUpdateEvent('999@lid', '+201111112222');
+  assert.equal(a.type, 'identity_update');
+  assert.equal(a.provider_message_id, b.provider_message_id);
+  assert.equal(a.provider_message_id, 'identity:999@lid:+201111112222');
+  assert.equal(a.lid, '999@lid');
+  assert.equal(a.phone_e164, '+201111112222');
+  assert.equal(typeof a.ts, 'number');
+});
+
+test('buildIdentityUpdateEvent gives different lids different provider_message_ids', () => {
+  const a = buildIdentityUpdateEvent('111@lid', '+201111112222');
+  const b = buildIdentityUpdateEvent('222@lid', '+201111112222');
+  assert.notEqual(a.provider_message_id, b.provider_message_id);
+});
+

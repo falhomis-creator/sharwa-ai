@@ -59,3 +59,30 @@ export async function recordPhoneNumberShare(client, sessionId, lid, jid) {
   await client.hset(key, lid, phone_e164);
   return { stored: true, phone_e164 };
 }
+
+/**
+ * Build the WAL entry recording a lid -> phone_e164 resolution (R3_DIRECTIVE:
+ * "lidmap على redis-durable ومدخل identity_update"). This is bookkeeping for a
+ * future P1 core consumer reading the stream directly - the legacy Django
+ * webhook has no field for it, so forwarder.js recognizes type ===
+ * 'identity_update' and ACKs it without calling postInboundMessage (see
+ * forwarder.js::shouldForwardToLegacy).
+ *
+ * provider_message_id is DETERMINISTIC (lid + phone_e164, not random/ts-based)
+ * so a repeated `chats.phoneNumberShare` for an already-known pair dedupes via
+ * the normal wal.js::dedupeKeyFor path instead of appending a fresh stream
+ * entry every time Baileys re-emits the event (which it does on reconnects).
+ *
+ * @param {string} lid
+ * @param {string} phone_e164
+ * @returns {object} normalized entry, ready for wal.js::appendEvent
+ */
+export function buildIdentityUpdateEvent(lid, phone_e164) {
+  return {
+    type: 'identity_update',
+    provider_message_id: `identity:${lid}:${phone_e164}`,
+    ts: Date.now(),
+    lid,
+    phone_e164,
+  };
+}
