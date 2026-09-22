@@ -19,6 +19,13 @@ ENV NODE_ENV=production \
     PORT=4001
 
 # Persistent WhatsApp credentials (auth_sessions/) survive container restarts.
+# The directory must exist and be owned by the non-root `app` user BEFORE the
+# VOLUME instruction: Docker seeds a fresh named volume by copying this
+# directory's content AND ownership from the image the first time a container
+# uses it. Without this, a fresh volume comes back root:root and `app` (USER
+# app, below) gets EACCES on its very first mkdir under it (observed on real
+# Docker: "EACCES: permission denied, mkdir '/app/auth_sessions/<id>'").
+RUN mkdir -p /app/auth_sessions && chown -R app:app /app/auth_sessions
 VOLUME ["/app/auth_sessions"]
 
 # Deliberately different from SharwaConnect's 4000 to avoid any port clash if
