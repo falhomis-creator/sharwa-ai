@@ -35,8 +35,6 @@ async function waitUntil(cond, timeoutMs = 5000) {
   }
 }
 
-// Test 1: sign() is deterministic, matches the documented HMAC formula, and a
-// single-character body change completely changes the signature.
 test('sign() is deterministic and changes completely when the body changes', () => {
   withSecret(() => {
     const rawBody = '{"session_id":"tenant-a"}';
@@ -58,12 +56,15 @@ test('sign() is deterministic and changes completely when the body changes', () 
   });
 });
 
-// Test 2: inbound filtering - fromMe / group / broadcast / no-text messages
-// must never invoke the outbound webhook (postInboundMessage).
-test('inbound filtering: fromMe/group/broadcast/empty messages never emit a webhook', async () => {
+// P0.2: inbound filtering now gates the WAL append (appendFn), not a direct
+// Django webhook call - the filtering guarantee itself (fromMe/group/
+// broadcast/empty never reach ANY delivery path) is unchanged and still the
+// point of this test.
+test('inbound filtering: fromMe/group/broadcast/empty messages never reach the WAL append path', async () => {
   let calls = 0;
-  const sendFn = async () => {
+  const appendFn = async () => {
     calls += 1;
+    return { status: 'appended', id: '1-0' };
   };
 
   const fromMe = {
@@ -71,7 +72,7 @@ test('inbound filtering: fromMe/group/broadcast/empty messages never emit a webh
     message: { conversation: 'hello from merchant' },
   };
   assert.equal(shouldIgnoreInbound(fromMe), true);
-  assert.equal(await processInboundMessage('s1', fromMe, sendFn), null);
+  assert.equal(await processInboundMessage('s1', fromMe, appendFn), null);
   assert.equal(calls, 0);
 
   const group = {
@@ -79,7 +80,7 @@ test('inbound filtering: fromMe/group/broadcast/empty messages never emit a webh
     message: { conversation: 'group chatter' },
   };
   assert.equal(shouldIgnoreInbound(group), true);
-  assert.equal(await processInboundMessage('s1', group, sendFn), null);
+  assert.equal(await processInboundMessage('s1', group, appendFn), null);
   assert.equal(calls, 0);
 
   const broadcast = {
@@ -87,30 +88,31 @@ test('inbound filtering: fromMe/group/broadcast/empty messages never emit a webh
     message: { conversation: 'broadcast' },
   };
   assert.equal(shouldIgnoreInbound(broadcast), true);
-  assert.equal(await processInboundMessage('s1', broadcast, sendFn), null);
+  assert.equal(await processInboundMessage('s1', broadcast, appendFn), null);
   assert.equal(calls, 0);
 
-  const noText = {
+  // No `message` at all (e.g. a protocol-only upsert) is the genuine "nothing
+  // to record" case - an empty-string `conversation` is, by contrast, a real
+  // (if empty) text message and is NOT filtered (see normalize.test.js: "text
+  // type (even empty) is still content").
+  const noContent = {
     key: { fromMe: false, remoteJid: '201234567890@s.whatsapp.net', id: 'AAA4' },
-    message: { conversation: '' },
   };
-  assert.equal(extractText(noText), '');
-  assert.equal(shouldIgnoreInbound(noText), true);
-  assert.equal(await processInboundMessage('s1', noText, sendFn), null);
+  assert.equal(shouldIgnoreInbound(noContent), true);
+  assert.equal(await processInboundMessage('s1', noContent, appendFn), null);
   assert.equal(calls, 0);
 
   // A legitimate inbound message MUST pass through exactly once.
   const valid = {
     key: { fromMe: false, remoteJid: '201234567890@s.whatsapp.net', id: 'AAA5' },
+    messageTimestamp: Math.floor(Date.now() / 1000),
     message: { conversation: 'hi' },
   };
-  const resultId = await processInboundMessage('s1', valid, sendFn);
+  const resultId = await processInboundMessage('s1', valid, appendFn);
   assert.equal(resultId, 'AAA5');
   assert.equal(calls, 1);
 });
 
-// Test 3: send queue - two messages for the same session are never sent
-// simultaneously (serialized by the FIFO queue + jitter gap).
 test('send queue: two messages for the same session are never sent simultaneously', async () => {
   let active = 0;
   let maxActive = 0;
@@ -121,7 +123,7 @@ test('send queue: two messages for the same session are never sent simultaneousl
       active += 1;
       maxActive = Math.max(maxActive, active);
       sent.push({ to, text: content.text, at: Date.now() });
-      await new Promise((resolve) => setTimeout(resolve, 20)); // simulated network latency
+      await new Promise((resolve) => setTimeout(resolve, 20));
       active -= 1;
     },
   };
@@ -144,9 +146,6 @@ test('send queue: two messages for the same session are never sent simultaneousl
   assert.ok(gap >= 50, `expected a jitter gap >= 50ms between sends, got ${gap}ms`);
 });
 
-// Test 4: postInboundMessage must forward the text field under the key Django
-// actually reads (`message_text`), not `text` — this is the contract mismatch that
-// previously dropped every real customer message before the AI reply engine.
 test('postInboundMessage forwards text as message_text (Django contract)', async () => {
   const base = 'http://localhost:8000';
   const prevBase = process.env.DJANGO_BASE_URL;
@@ -191,9 +190,6 @@ test('postInboundMessage forwards text as message_text (Django contract)', async
   assert.equal(body.media_type, 'image');
 });
 
-// Test 5 (new): both outgoing webhook paths must match Django's public routes —
-// `/webhooks/sharwa-ai/session-status/` and `/webhooks/sharwa-ai/inbound-message/`
-// (no `/api/` prefix, WITH the trailing slash).
 test('outgoing webhook paths match Django public routes (no /api/, trailing slash)', async () => {
   const base = 'http://localhost:8000';
   const prevBase = process.env.DJANGO_BASE_URL;

@@ -13,19 +13,27 @@ import makeWASocket, {
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import QRCode from 'qrcode';
 
-import { postSessionStatus, postInboundMessage } from './webhook.js';
+import { postSessionStatus } from './webhook.js';
+import { logger } from './logger.js';
+import { normalizeMessage, shouldIgnoreInbound as normalizeShouldIgnore, detectMedia as normalizeDetectMedia, extractText as normalizeExtractText } from './ingest/normalize.js';
+import { appendEvent } from './ingest/wal.js';
+import { spool } from './ingest/spool.js';
+import { createLidMap, recordPhoneNumberShare } from './ingest/lidmap.js';
 
 // ---------------------------------------------------------------------------
 // Tenant-isolated Baileys session manager.
 //
-// Constitution guarantees implemented here:
-//  - One session per merchant (session_id); sessions never share state.
-//  - session_id is ALWAYS supplied by Django. This gateway never generates or
-//    guesses one, so an external party cannot predict a session id.
-//  - Per-session FIFO send queue with jitter (2000-3000ms): two messages are
-//    never transmitted for the same session at the same instant.
-//  - Inbound messages are filtered (fromMe / group / broadcast / no-text)
-//    BEFORE any webhook is emitted, preventing an infinite loop from day one.
+// P0.2 change (R3_DIRECTIVE): inbound messages are no longer posted to Django
+// synchronously from here (disaster #4/G1 - "a webhook hang blocks the model").
+// processInboundMessage now normalizes the message (G4/G12) and appends it to
+// the durable WAL (redis-durable, dedupe-protected, F4-capped). A separate
+// process (forwarder.js) reads the WAL and delivers to Django with its own
+// bounded retry. If the WAL append fails for any reason, the entry is spooled
+// to disk (disaster #5/#17) rather than dropped (F2: never fail silently).
+//
+// Session-status updates (postSessionStatus) remain a direct, low-frequency
+// control-plane webhook call - out of scope for G1 (that disaster is about the
+// high-volume inbound message path, not connection state transitions).
 // ---------------------------------------------------------------------------
 
 const AUTH_DIR = process.env.AUTH_SESSIONS_DIR
@@ -44,44 +52,25 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /** @type {Map<string, object>} sessionId -> session record */
 const sessions = new Map();
 
-// --- pure helpers (exported for unit tests) --------------------------------
+/** Shared redis-durable client, set once by index.js at startup (H3: never
+ * guessed - a null client means "not configured", and every write path treats
+ * that as an immediate spool, never a silent drop). */
+let redisClient = null;
+
+/** @param {import('ioredis').Redis|null} client */
+export function setRedisClient(client) {
+  redisClient = client;
+}
+
+// --- pure helpers (exported for unit tests / kept for backward compat) -----
 
 export function isGroupJid(jid) {
   return typeof jid === 'string' && (jid.endsWith('@g.us') || jid.endsWith('@broadcast'));
 }
 
-export function extractText(msg) {
-  if (!msg || !msg.message) return '';
-  const m = msg.message;
-  if (typeof m.conversation === 'string') return m.conversation;
-  if (m.extendedTextMessage?.text) return m.extendedTextMessage.text;
-  if (m.imageMessage?.caption) return m.imageMessage.caption;
-  if (m.videoMessage?.caption) return m.videoMessage.caption;
-  if (m.documentMessage?.caption) return m.documentMessage.caption;
-  if (m.buttonsResponseMessage?.selectedDisplayText) return m.buttonsResponseMessage.selectedDisplayText;
-  if (m.listResponseMessage?.title) return m.listResponseMessage.title;
-  if (m.templateButtonReplyMessage?.selectedDisplayText) return m.templateButtonReplyMessage.selectedDisplayText;
-  return '';
-}
-
-export function detectMedia(msg) {
-  if (!msg || !msg.message) return null;
-  const m = msg.message;
-  if (m.imageMessage) return { mediaType: 'image', content: m.imageMessage };
-  if (m.audioMessage) return { mediaType: 'audio', content: m.audioMessage };
-  if (m.videoMessage) return { mediaType: 'video', content: m.videoMessage };
-  if (m.documentMessage) return { mediaType: 'document', content: m.documentMessage };
-  return null;
-}
-
-export function shouldIgnoreInbound(msg) {
-  if (!msg) return true;
-  if (msg.key?.fromMe === true) return true; // merchant's own outgoing messages
-  if (isGroupJid(msg.key?.remoteJid)) return true; // group (@g.us) or broadcast (@broadcast)
-  if (detectMedia(msg)) return false; // media messages are processed even with no text
-  if (!extractText(msg)) return true; // no actual text
-  return false;
-}
+export const extractText = normalizeExtractText;
+export const detectMedia = normalizeDetectMedia;
+export const shouldIgnoreInbound = normalizeShouldIgnore;
 
 // --- media handling (MinIO upload) ------------------------------------------
 
@@ -112,7 +101,6 @@ const MIME_EXTENSION_MAP = {
 function extensionFor(content) {
   const mime = (content.mimetype || '').split(';')[0].trim().toLowerCase();
   if (MIME_EXTENSION_MAP[mime]) return MIME_EXTENSION_MAP[mime];
-  // Fallback: use the document's own filename extension when present.
   const fileName = content.fileName || content.filename || '';
   const ext = fileName.split('.').pop();
   if (ext && /^[a-z0-9]{1,10}$/i.test(ext)) return ext.toLowerCase();
@@ -124,8 +112,6 @@ export function mediaObjectKey(sessionId, ext) {
 }
 
 export async function downloadMediaToBuffer(msg) {
-  // Official Baileys download API (verified in @whiskeysockets/baileys@6.7.24):
-  // downloadMediaMessage(message, 'buffer') -> Buffer (decrypted, ready to store).
   return downloadMediaMessage(msg, 'buffer');
 }
 
@@ -150,7 +136,7 @@ function getS3Client() {
     region: 'us-east-1',
     endpoint,
     credentials: { accessKeyId, secretAccessKey },
-    forcePathStyle: true, // MinIO requires path-style addressing
+    forcePathStyle: true,
   });
   return _s3Client;
 }
@@ -179,8 +165,8 @@ async function uploadWithRetry(buffer, objectKey, contentType, uploadFn) {
     } catch (err) {
       lastError = err;
       if (attempt < UPLOAD_MAX_ATTEMPTS) {
-        const delay = UPLOAD_BASE_DELAY_MS * 2 ** (attempt - 1); // 500, 1000
-        console.error(`[sessions] MinIO upload attempt ${attempt}/${UPLOAD_MAX_ATTEMPTS} failed (${err.message}); retrying in ${delay}ms`);
+        const delay = UPLOAD_BASE_DELAY_MS * 2 ** (attempt - 1);
+        logger.warn({ err: err.message, attempt, maxAttempts: UPLOAD_MAX_ATTEMPTS, delay }, '[sessions] MinIO upload attempt failed; retrying');
         await sleep(delay);
       }
     }
@@ -193,8 +179,6 @@ export function mapConnectionStatus(update) {
   if (update.connection === 'open') return 'CONNECTED';
   if (update.connection === 'close') {
     const statusCode = update.lastDisconnect?.error?.output?.statusCode;
-    // WhatsApp officially bans a number with HTTP 403. In Baileys this
-    // surfaces as DisconnectReason.forbidden (=== 403).
     if (statusCode === DisconnectReason.forbidden) {
       return 'BANNED';
     }
@@ -208,7 +192,6 @@ function extractPhoneNumber(userId) {
   const match = String(userId).match(/^(\d+)/);
   return match ? match[1] : null;
 }
-
 
 // --- session registry -------------------------------------------------------
 
@@ -237,53 +220,79 @@ export function getSession(sessionId) {
   return sessions.get(sessionId) ?? null;
 }
 
-// --- inbound handling -------------------------------------------------------
+// --- inbound handling (P0.2: normalize -> WAL, spool on failure) -----------
 
-export async function processInboundMessage(
-  sessionId,
-  msg,
-  sendFn = postInboundMessage,
-  deps = {},
-) {
-  if (shouldIgnoreInbound(msg)) return null;
+/**
+ * Default append path: write the normalized record to the durable WAL. Any
+ * failure (Redis down, unexpected error) is spooled to disk rather than
+ * dropped (F2). A PAYLOAD_TOO_LARGE rejection is permanent (F4) - logged and
+ * NOT spooled, since it can never fit regardless of retries.
+ *
+ * @param {{ sessionId: string, event: object }} record
+ */
+async function defaultAppendToWal(record) {
+  if (!redisClient) {
+    // No redis client configured (unit tests, or startup race): spool.
+    await spool(record);
+    return { status: 'spooled' };
+  }
+  try {
+    return await appendEvent(redisClient, record);
+  } catch (err) {
+    if (err.code === 'PAYLOAD_TOO_LARGE') {
+      logger.error({ sessionId: record.sessionId, err: err.message }, '[sessions] message rejected: payload too large (F4)');
+      throw err;
+    }
+    logger.error({ sessionId: record.sessionId, err: err.message }, '[sessions] WAL append failed; spooling (disaster #5/#17)');
+    await spool(record);
+    return { status: 'spooled' };
+  }
+}
 
-  const from = msg.key.remoteJid;
-  const text = extractText(msg);
-  const message_id = msg.key.id ?? null;
-  const media = detectMedia(msg);
+/**
+ * Normalize an inbound Baileys message (G4/G12), resolve media if present,
+ * and append it to the WAL. Returns the provider_message_id, or null when the
+ * message was filtered (fromMe/group/broadcast/no content).
+ *
+ * @param {string} sessionId
+ * @param {object} msg
+ * @param {(record: { sessionId: string, event: object }) => Promise<unknown>} [appendFn]
+ * @param {{ downloadFn?: Function, uploadFn?: Function, lidMap?: object }} [deps]
+ * @returns {Promise<string|null>}
+ */
+export async function processInboundMessage(sessionId, msg, appendFn = defaultAppendToWal, deps = {}) {
+  const lidMap = deps.lidMap ?? (redisClient ? createLidMap(redisClient, sessionId) : undefined);
+  const entry = normalizeMessage(msg, { lidMap });
+  if (entry === null) return null;
 
-  if (media) {
+  const isMedia = entry.type === 'image' || entry.type === 'audio' || entry.type === 'video' || entry.type === 'document';
+  if (isMedia) {
     const { downloadFn = downloadMediaToBuffer, uploadFn = uploadToMinio } = deps;
+    const media = detectMedia(msg);
     const ext = extensionFor(media.content);
     const objectKey = mediaObjectKey(sessionId, ext);
     const contentType = (media.content.mimetype || '').split(';')[0].trim() || 'application/octet-stream';
-
-    let media_object_key;
-    let outText;
     try {
       const buffer = await downloadFn(msg);
       await uploadWithRetry(buffer, objectKey, contentType, uploadFn);
-      media_object_key = objectKey;
-      outText = text; // caption if present, otherwise empty
+      entry.media.object_key = objectKey;
     } catch (err) {
-      console.error(`[sessions] media processing failed for ${message_id}: ${err.message}`);
-      media_object_key = null;
-      outText = 'تعذّر معالجة المرفق المرسل.';
+      logger.error({ sessionId, message_id: entry.provider_message_id, err: err.message }, '[sessions] media processing failed');
+      entry.media.object_key = null;
+      entry.media.failed = true;
+      entry.text = 'تعذّر معالجة المرفق المرسل.';
     }
-
-    await sendFn({
-      session_id: sessionId,
-      from,
-      text: outText,
-      message_id,
-      media_object_key,
-      media_type: media.mediaType,
-    });
-    return message_id;
   }
 
-  await sendFn({ session_id: sessionId, from, text, message_id });
-  return message_id;
+  try {
+    await appendFn({ sessionId, event: entry });
+  } catch (err) {
+    if (err.code !== 'PAYLOAD_TOO_LARGE') throw err;
+    // Permanent rejection: already logged by appendFn. Nothing more to do -
+    // the message is intentionally not delivered (F4).
+  }
+
+  return entry.provider_message_id;
 }
 
 // --- send queue (FIFO, per session, jitter between messages) ----------------
@@ -294,7 +303,7 @@ export function enqueueSend(sessionId, to, text) {
     throw new Error(`Unknown session: ${sessionId}`);
   }
   if (session.queue.length >= MAX_QUEUE_SIZE) {
-    return null; // signal a full queue (caller responds 503)
+    return null;
   }
 
   const message_id = crypto.randomUUID();
@@ -310,8 +319,6 @@ async function processQueue(session) {
     while (session.queue.length > 0) {
       const item = session.queue.shift();
       await sendOne(session, item);
-      // Jitter between consecutive messages is the single line of defense
-      // against WhatsApp rate-limit bans for this number.
       if (session.queue.length > 0) {
         await sleep(session.sendDelayMs());
       }
@@ -323,27 +330,18 @@ async function processQueue(session) {
 
 async function sendOne(session, item) {
   if (!session.sock) {
-    console.error(`[sessions] session ${session.id} has no socket; dropping message ${item.message_id}`);
+    logger.error({ sessionId: session.id, message_id: item.message_id }, '[sessions] session has no socket; dropping message');
     return;
   }
   try {
     await session.sock.sendMessage(item.to, { text: item.text });
   } catch (err) {
-    console.error(`[sessions] failed to send message ${item.message_id} on session ${session.id}: ${err.message}`);
+    logger.error({ sessionId: session.id, message_id: item.message_id, err: err.message }, '[sessions] failed to send message');
   }
 }
 
-
 // --- query helpers for index.js --------------------------------------------
 
-/**
- * Convert Baileys' raw QR string (update.qr) into a base64 PNG image WITHOUT
- * the "data:image/png;base64," prefix. Django's frontend (sharwa_ai_connect.html)
- * adds the prefix itself when missing, so we must never send the prefix here.
- *
- * @param {string|null|undefined} rawQr
- * @returns {Promise<string|null>}
- */
 export async function toQrImageBase64(rawQr) {
   if (!rawQr) return null;
   const dataUrl = await QRCode.toDataURL(rawQr, { type: 'image/png' });
@@ -384,7 +382,7 @@ export async function createSession(sessionId) {
   try {
     ({ version } = await fetchLatestBaileysVersion());
   } catch (err) {
-    console.error(`[sessions] could not fetch latest Baileys version (${err.message}); using library default`);
+    logger.warn({ err: err.message }, '[sessions] could not fetch latest Baileys version; using library default');
   }
 
   const sock = makeWASocket({
@@ -404,14 +402,21 @@ export async function createSession(sessionId) {
       session.phoneNumber = extractPhoneNumber(sock.user?.id);
     }
 
-    // Fire-and-forget: the webhook layer already handles retries + backoff.
     postSessionStatus({
       session_id: sessionId,
       status: session.status,
       phone_number: session.phoneNumber,
       detail: update.lastDisconnect?.error?.message ?? update.connection ?? null,
     }).catch((err) => {
-      console.error(`[sessions] session-status webhook threw unexpectedly: ${err.message}`);
+      logger.error({ sessionId, err: err.message }, '[sessions] session-status webhook threw unexpectedly');
+    });
+  });
+
+  // G12: record lid -> phone_e164 mappings as WhatsApp discloses them.
+  sock.ev.on('chats.phoneNumberShare', ({ lid, jid } = {}) => {
+    if (!redisClient) return;
+    recordPhoneNumberShare(redisClient, sessionId, lid, jid).catch((err) => {
+      logger.error({ sessionId, err: err.message }, '[sessions] failed to record phoneNumberShare (G12)');
     });
   });
 
@@ -419,7 +424,7 @@ export async function createSession(sessionId) {
     if (type !== 'notify') return;
     for (const msg of messages) {
       processInboundMessage(sessionId, msg).catch((err) => {
-        console.error(`[sessions] inbound message processing failed: ${err.message}`);
+        logger.error({ sessionId, err: err.message }, '[sessions] inbound message processing failed');
       });
     }
   });
@@ -436,13 +441,13 @@ export async function logoutSession(sessionId) {
       await session.sock.logout();
     }
   } catch (err) {
-    console.error(`[sessions] logout for ${sessionId} failed: ${err.message}`);
+    logger.error({ sessionId, err: err.message }, '[sessions] logout failed');
   }
 
   sessions.delete(sessionId);
   const authPath = session.authPath ?? path.join(AUTH_DIR, sessionId);
   await fs.rm(authPath, { recursive: true, force: true });
-  console.log(`[sessions] logged out and removed session ${sessionId}`);
+  logger.info({ sessionId }, '[sessions] logged out and removed session');
 }
 
 export async function rehydrateSessions() {
@@ -450,7 +455,7 @@ export async function rehydrateSessions() {
   try {
     entries = await fs.readdir(AUTH_DIR, { withFileTypes: true });
   } catch {
-    return; // no auth_sessions directory yet - nothing to rehydrate
+    return;
   }
 
   for (const entry of entries) {
@@ -465,21 +470,21 @@ export async function rehydrateSessions() {
       const creds = JSON.parse(raw);
       registered = creds?.registered === true;
     } catch {
-      registered = false; // missing / corrupt creds -> orphan
+      registered = false;
     }
 
     if (registered) {
       try {
         await createSession(sessionId);
-        console.log(`[sessions] rehydrated registered session ${sessionId}`);
+        logger.info({ sessionId }, '[sessions] rehydrated registered session');
       } catch (err) {
-        console.error(`[sessions] failed to rehydrate ${sessionId}: ${err.message}`);
+        logger.error({ sessionId, err: err.message }, '[sessions] failed to rehydrate');
       }
     } else {
-      // Orphan: QR was shown but never scanned. A resurrected session would
-      // mint a fresh QR that no known session_id on Django could match.
-      await fs.rm(dirPath, { recursive: true, force: true }).catch(() => {});
-      console.log(`[sessions] removed orphan session folder ${sessionId}`);
+      await fs.rm(dirPath, { recursive: true, force: true }).catch((err) => {
+        logger.warn({ sessionId, err: err.message }, '[sessions] failed to remove orphan session folder (non-fatal)');
+      });
+      logger.info({ sessionId }, '[sessions] removed orphan session folder');
     }
   }
 }

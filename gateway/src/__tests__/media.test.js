@@ -25,11 +25,11 @@ function mediaMsg(kind, innerOverrides = {}) {
   };
   return {
     key: { fromMe: false, remoteJid: '201234567890@s.whatsapp.net', id: `MEDIA-${kind}-1` },
+    messageTimestamp: Math.floor(Date.now() / 1000),
     message: { [field]: inner },
   };
 }
 
-// Test: detectMedia identifies each supported media kind and ignores plain text.
 test('detectMedia identifies image/audio/video/document', () => {
   assert.equal(detectMedia(mediaMsg('image')).mediaType, 'image');
   assert.equal(detectMedia(mediaMsg('audio')).mediaType, 'audio');
@@ -38,47 +38,49 @@ test('detectMedia identifies image/audio/video/document', () => {
   assert.equal(detectMedia({ key: {}, message: { conversation: 'hi' } }), null);
 });
 
-// Test: a media message is never ignored, even with an empty caption.
 test('a media message with no caption is not ignored', () => {
   const msg = mediaMsg('image', { caption: '' });
   assert.equal(shouldIgnoreInbound(msg), false);
 });
 
-// Test: object key follows the sharwa-ai/{session_id}/{uuid}.{ext} shape.
 test('mediaObjectKey produces sharwa-ai/{session}/{uuid}.{ext}', () => {
   const key = mediaObjectKey('sess-1', 'jpg');
   assert.match(key, /^sharwa-ai\/sess-1\/[0-9a-f-]{36}\.jpg$/);
 });
 
-// Test: successful upload forwards media_object_key and media_type in the payload.
-test('successful media upload forwards media_object_key and media_type', async () => {
+// P0.2: processInboundMessage now appends a normalized WAL record (not a
+// direct Django webhook call). This test verifies the media upload wiring
+// still runs and the object key lands in the appended record's `event.media`.
+test('successful media upload is reflected in the appended WAL record', async () => {
   const msg = mediaMsg('image');
-  const captured = [];
-  const sendFn = async (payload) => { captured.push(payload); };
+  const appended = [];
+  const appendFn = async (record) => { appended.push(record); return { status: 'appended', id: '1-0' }; };
   const downloadFn = async () => Buffer.from('fake-image-bytes');
   const uploadFn = async (_buffer, objectKey) => objectKey;
 
-  const resultId = await processInboundMessage('sess-1', msg, sendFn, { downloadFn, uploadFn });
+  const resultId = await processInboundMessage('sess-1', msg, appendFn, { downloadFn, uploadFn });
 
   assert.equal(resultId, 'MEDIA-image-1');
-  assert.equal(captured.length, 1);
-  assert.equal(captured[0].media_type, 'image');
-  assert.match(captured[0].media_object_key, /^sharwa-ai\/sess-1\/[0-9a-f-]{36}\.jpg$/);
+  assert.equal(appended.length, 1);
+  assert.equal(appended[0].sessionId, 'sess-1');
+  assert.equal(appended[0].event.type, 'image');
+  assert.match(appended[0].event.media.object_key, /^sharwa-ai\/sess-1\/[0-9a-f-]{36}\.jpg$/);
 });
 
-// Test: failed upload (after retries) yields media_object_key null, never throws.
-test('failed media upload yields media_object_key null without throwing', async () => {
+// P0.2: a failed upload (after retries) yields object_key: null + failed: true
+// on the appended record, never throws, and still reaches the WAL (F2).
+test('failed media upload yields object_key null in the appended record, never throws', async () => {
   const msg = mediaMsg('audio');
-  const captured = [];
-  const sendFn = async (payload) => { captured.push(payload); };
+  const appended = [];
+  const appendFn = async (record) => { appended.push(record); return { status: 'appended', id: '1-0' }; };
   const downloadFn = async () => Buffer.from('fake-audio-bytes');
   const uploadFn = async () => { throw new Error('MinIO down'); };
 
-  const resultId = await processInboundMessage('sess-1', msg, sendFn, { downloadFn, uploadFn });
+  const resultId = await processInboundMessage('sess-1', msg, appendFn, { downloadFn, uploadFn });
 
   assert.equal(resultId, 'MEDIA-audio-1');
-  assert.equal(captured.length, 1);
-  assert.equal(captured[0].media_object_key, null);
-  assert.equal(captured[0].media_type, 'audio');
-  assert.equal(captured[0].text, 'تعذّر معالجة المرفق المرسل.');
+  assert.equal(appended.length, 1);
+  assert.equal(appended[0].event.media.object_key, null);
+  assert.equal(appended[0].event.media.failed, true);
+  assert.equal(appended[0].event.text, 'تعذّر معالجة المرفق المرسل.');
 });
