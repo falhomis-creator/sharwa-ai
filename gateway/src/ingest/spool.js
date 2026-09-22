@@ -35,7 +35,8 @@ export async function spool(record, opts = {}) {
   let size = 0;
   try {
     size = (await stat(file)).size;
-  } catch {
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
     // no spool file yet — start at 0.
   }
   if (size >= maxMb * 1024 * 1024) {
