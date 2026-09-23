@@ -604,3 +604,62 @@ tests 3 / pass 3 / fail 0
 
 **الحالة: ✅ P0.2 مكتملة — معيار قبول P0.2 محقَّق بالكامل (اختبارات وحدة + (أ)/(ب)/(ج) الثلاثة تكاملاً حقيقياً ضد `redis-durable` فعلي + (د) 65/65 ناجح). اتصال واتساب حقيقي فعلي (P0.5/تشغيلي) خارج نطاق قبول P0.2 حسب النص الرسمي، ومؤجَّل — راجع §2.5.**
 
+
+
+## P0.3 — تعامل الوسائط الآمن (G3، الكارثتان #16/#21)
+
+> التاريخ: 2026-09-23. إغلاق فعلي بعد اكتشاف أن معيار القبول الرسمي (اختبارات MinIO حقيقية E1-E4) لم يُشغَّل قط سابقاً رغم وجود الكود؛ راجع `docs/P0_DEVIATIONS.md` D-16 وD-17 و`docs/P0_OPEN_QUESTIONS.md` OQ-7 للتفاصيل الكاملة.
+
+### 3.1 معيار القبول الرسمي (§6 P0.3، بـMinIO حقيقية في `docker-compose.test.yml`) — محقَّق بالكامل
+
+أُضيف `docker-compose.test.yml` (إضافي فقط، لا يمسّ المكدّس الحي إلا بـ`-f` صريح) بخدمتَي `minio`/`minio-init` حقيقيتين، و`gateway/src/__tests__/media_e2e_minio.test.js` (مفعَّل بـ`RUN_MEDIA_E2E_TESTS=1`، لا `.skip`) يُشغَّل عبر `docker compose run --rm gateway` ضد `minio` وَ`redis-durable` الحقيقيَين معاً.
+
+**مخرجات التشغيل الحقيقي على الـVPS (لا محاكاة):**
+```
+[E1] baseline RSS=104.9MB, peak RSS=137.9MB, growth=33.0MB, samples(MB)=[121.6, 121.8, 121.8, 137.9, 136.9, 132.0, 137.3]
+✔ (P0.3-E1) 50MB streamed download+upload: RSS growth stays under 100MB above baseline (real MinIO + real redis-durable) (11439.665029ms)
+[E2] 10x50MB concurrent: peak RSS=199.7MB, max media_inflight observed=3
+✔ (P0.3-E2) 10 concurrent 50MB uploads: absolute peak RSS < 600MB and media_inflight never exceeds 3 (45739.264466ms)
+[E3] orphaned multipart uploads for p03e2e-e3-.../MSG-... after kill -9: 0
+✔ (P0.3-E3) kill -9 mid-upload of 50MB: after restart, exactly one complete object exists and no multipart upload is left orphaned (12983.052211ms)
+✔ (P0.3-E4a) over-cap file is rejected before any download call is made (zero bytes over the network) (3.151831ms)
+✔ (P0.3-E4b) image-extension file with non-image magic bytes is rejected as rejected_type, not uploaded (26.87695ms)
+tests 5 / pass 5 / fail 0
+```
+
+**التغطية مقابل النص الرسمي:**
+- **(1) 50MB streamed:** نمو RSS = **33.0MB** (الحد: <100MB). ✔
+- **(2) 10×50MB متزامنة:** ذروة RSS مطلقة = **199.7MB** (الحد: <600MB)، أقصى `media_inflight` مرصود = **3** (الحد: ≤3)، وعاد لصفر بعد الاكتمال. ✔
+- **(3) `kill -9` أثناء التنزيل + إعادة تشغيل:** **صفر** رفعات multipart يتيمة على MinIO حقيقي (`ListMultipartUploadsCommand`)، وإعادة المحاولة اكتملت بالحجم الكامل الصحيح. ✔
+- **(4) رفض الحجم الزائد بصفر بايت شبكة + رفض النوع المموَّه (magic-byte):** كلاهما محقَّق — `downloadFnCalled=false` للحالة الأولى (إثبات عدم استدعاء الشبكة إطلاقاً)، و`status: 'rejected_type'` لملف بترويسة ELF حقيقية متنكّرة بامتداد/mimetype صورة. ✔
+
+### 3.2 عيب حقيقي اكتُشف وأُصلح أثناء بناء اختبار القبول (لا في الاختبار نفسه)
+
+أثناء بناء اختبار E1، لاحظتُ أن نمو RSS استقرّ عند حدّ 100MB الحرج بالضبط (وليس أقل بهامش مريح) — بحث بدل تجاهل الرقم المريب كشف عيباً حقيقياً: `gateway/src/media.js` كان يكتب إلى `PassThrough` (بين تدفق التنزيل ورفع S3 متعدد الأجزاء) دون احترام backpressure — `stream.write()` تُعيد `false` عند امتلاء المخزن الداخلي، وتجاهل هذه القيمة يعني نمو المخزن بلا حدّ إذا كان الرفع أبطأ من التنزيل (بالضبط فئة الفشل التي وُجدت P0.3 لمنعها — الكارثتان #16/#21).
+
+**الإصلاح:** التحقق من قيمة الإرجاع وانتظار حدث `'drain'` (`node:events`) قبل متابعة الكتابة، فيتباطأ حلقة التنزيل نفسها لسرعة الرفع الحقيقية بدل تكديس الذاكرة. **الأثر المقاس (قبل/بعد، عدة تشغيلات):** نمو RSS لملف 50MB من ~100.0MB الحدّي إلى **~33-54MB** مستقر؛ ذروة 10 ملفات متزامنة من ~441-533MB إلى **~199-275MB**. التفاصيل الكاملة في `docs/P0_FINDINGS.md` F5.
+
+### 3.3 الانحدار — لا كسر لأي شيء قائم
+
+```
+✔ (أ) 1000x redelivery of the same provider_message_id against REAL redis-durable -> exactly one stream entry
+✔ (ب) redis-durable unreachable during ingest -> spool captures it -> drainSpool (real client) delivers with no loss
+✔ (ج) a real Baileys-shaped location message reaches the REAL stream with its coordinates
+✔ (P0.3) 200x concurrent media-quota reservations against REAL redis-durable respect a 20-file cap exactly, atomically
+tests 4 / pass 4 / fail 0
+```
+ومجموعة `node --test` الكاملة (السريعة/الحتمية، بلا MinIO): **79/79 ناجح**. hunt_gate بعد الكتابة: 3 مخالفات — كلها في سكربتات batch مؤقتة في جذر المستودع (`batch_p02_real_redis_integration.sh`, `batch_p03_close_minio_e2e.sh`, `batch_p03_hunt_gate_fix.sh`)، **لا شيء في `gateway/src`**. المكدّس الحي (`gateway`/`gateway-forwarder`/`postgres`/`pgbouncer`/`redis-*`) ظلّ يعمل بلا انقطاع طوال التشغيل (تحقَّق `docker compose ps` بعده).
+
+### 3.4 الانحرافات المسجَّلة (تفاصيلها الكاملة في `docs/P0_DEVIATIONS.md`)
+
+- **D-15:** مقاييس P0.3 الأربعة (`media_bytes_total`/`media_inflight`/`media_failures_total{reason}`/`media_duration_seconds`) مُنفَّذة كمحاسَبة داخلية حقيقية الآن (`getMediaMetrics()`)، مُستخدَمة فعلياً في اختبار القبول E2 لإثبات `media_inflight ≤ 3`. تعريض `/metrics` HTTP العام مؤجَّل إلى P0.6 (نص المرجع الرسمي يضعه هناك صراحة).
+- **D-16:** اختبارات القبول تستدعي `downloadAndUploadMedia` مباشرة بحمولات تدفق اصطناعية حقيقية بدل عبر `FakeWaDriver` — لأن `FakeWaDriver`/بنية `driver/` المنصوص عليها في P0.2 **غير موجودة فعلياً** في الكود (تعارض حقيقي مع `P0_PROGRESS.md` §2.5 القديم الذي افترض إنجازها؛ مسجَّل كسؤال مفتوح OQ-7).
+- **D-17:** خدمتا `minio`/`minio-init` الاختباريتان تسحبان من `quay.io` بدل Docker Hub (الذي أزال مستودعَي `minio/minio`/`minio/mc` بالكامل بتاريخ 2026-09-12) — مقصور على الخدمتين الاختباريتين المؤقتتين، لا أثر على المكدّس الحي.
+
+### 3.5 سؤال مفتوح لم يُحسَم (OQ-7)
+
+عدم وجود `FakeWaDriver` فعلياً في الكود (رغم ذكرها في `P0_PROGRESS.md` §2.5 القديم) يحتاج قراراً من المالك قبل P0.5، التي تفترض وجودها لاختبارات الحاملتين المزدوجتين وأكواد قطع الاتصال. التفاصيل الكاملة في `docs/P0_OPEN_QUESTIONS.md` OQ-7.
+
+---
+
+**الحالة: ✅ P0.3 مكتملة — معيار قبول P0.3 محقَّق بالكامل (اختبارات E1-E4 الأربعة ضد MinIO و`redis-durable` حقيقيَّين + انحدار 4/4 + المجموعة الكاملة 79/79). عيب backpressure حقيقي اكتُشف وأُصلح أثناء بناء الاختبار، بأثر مقاس قبل/بعد. لم يُنجَز بعد: commit التغييرات (media.js، ملفا الاختبار الجديدان، docker-compose.test.yml، توثيقات D-15/D-16/D-17/OQ-7/F5) — خطوة منفصلة تالية بعد مراجعتك.**

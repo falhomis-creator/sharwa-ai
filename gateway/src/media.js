@@ -12,6 +12,7 @@ import { downloadContentFromMessage } from '@whiskeysockets/baileys';
 import { Upload } from '@aws-sdk/lib-storage';
 import { fileTypeFromBuffer } from 'file-type';
 import { PassThrough } from 'node:stream';
+import { once } from 'node:events';
 import { logger } from './logger.js';
 
 // ---------------------------------------------------------------------------
@@ -114,6 +115,45 @@ let downloadSemaphore = new Semaphore(Number(process.env.MEDIA_DOWNLOAD_CONCURRE
 // to prove the concurrency cap actually blocks a 4th download.
 export function setDownloadConcurrency(max) {
   downloadSemaphore = new Semaphore(max);
+}
+
+// ---------------------------------------------------------------------------
+// In-process metrics accounting (P0.3 spec §"مقاييس": media_bytes_total,
+// media_inflight, media_failures_total{reason}, media_duration_seconds).
+//
+// This module owns the counters because it is the only place that knows the
+// true inflight/byte/failure counts; wiring these onto an authenticated
+// public `/metrics` Prometheus endpoint is P0.6 scope (that is where the
+// whole `/metrics` HTTP surface + METRICS_TOKEN auth is built per the spec's
+// own phase split) - see docs/P0_DEVIATIONS.md. `getMediaMetrics()` exists so
+// P0.3's own acceptance tests (media_inflight <= 3 under concurrent load) can
+// observe the real, live counters rather than re-deriving them.
+// ---------------------------------------------------------------------------
+
+let mediaMetrics = {
+  inflight: 0,
+  bytesTotal: 0,
+  failuresByReason: Object.create(null),
+  durationsMs: [],
+};
+
+export function getMediaMetrics() {
+  return {
+    inflight: mediaMetrics.inflight,
+    bytesTotal: mediaMetrics.bytesTotal,
+    failuresByReason: { ...mediaMetrics.failuresByReason },
+    durationsMs: [...mediaMetrics.durationsMs],
+  };
+}
+
+// Exposed for tests only - each test suite/process should start from a clean
+// slate rather than accumulating counts across unrelated test cases.
+export function resetMediaMetrics() {
+  mediaMetrics = { inflight: 0, bytesTotal: 0, failuresByReason: Object.create(null), durationsMs: [] };
+}
+
+function recordFailure(reason) {
+  mediaMetrics.failuresByReason[reason] = (mediaMetrics.failuresByReason[reason] || 0) + 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -260,6 +300,7 @@ export async function downloadAndUploadMedia({
   const cap = capBytesFor(type);
   const declaredLength = normalizeFileLength(content?.fileLength);
   if (cap != null && declaredLength != null && declaredLength > cap) {
+    recordFailure('too_large');
     return { status: 'too_large', size: declaredLength, cap };
   }
 
@@ -267,14 +308,19 @@ export async function downloadAndUploadMedia({
   const reserveEstimate = declaredLength != null ? declaredLength : (cap ?? DEFAULT_CAPS_BYTES[type] ?? 0);
   const quota = await reserveQuota(redisClient, scope, reserveEstimate);
   if (!quota.ok) {
+    recordFailure('quota_exceeded');
     return { status: 'quota_exceeded', files: quota.files, bytes: quota.bytes };
   }
 
   await downloadSemaphore.acquire();
+  mediaMetrics.inflight += 1;
+  const startedAt = Date.now();
   let released = false;
   const releaseOnce = () => {
     if (!released) {
       released = true;
+      mediaMetrics.inflight -= 1;
+      mediaMetrics.durationsMs.push(Date.now() - startedAt);
       downloadSemaphore.release();
     }
   };
@@ -324,7 +370,19 @@ export async function downloadAndUploadMedia({
           }
         }
       }
-      passthrough.write(chunk);
+      // Respect backpressure (H4: no unbounded buffer growth). If the S3
+      // multipart upload is slower than the source stream - a slow/loaded
+      // MinIO, or partSize/queueSize limiting how fast lib-storage drains
+      // us - PassThrough.write() returns false and, if ignored, its
+      // internal buffer accumulates every unconsumed chunk with no bound,
+      // silently reproducing the exact full-buffer-in-memory failure mode
+      // P0.3 exists to eliminate. Pausing the source read here until
+      // 'drain' throttles OUR OWN download loop to the upload's real
+      // speed, which is the actual point of streaming.
+      const canWriteMore = passthrough.write(chunk);
+      if (!canWriteMore) {
+        await once(passthrough, 'drain');
+      }
     }
 
     if (!rejected && !sniffed) {
@@ -346,6 +404,7 @@ export async function downloadAndUploadMedia({
         logger.warn({ err: err.message, sessionId, providerMessageId, status: rejected.status }, '[media] upload abort failed (best-effort, non-fatal)');
       }
       await releaseQuota(redisClient, scope, reserveEstimate);
+      recordFailure(rejected.status);
       return rejected;
     }
 
@@ -357,11 +416,13 @@ export async function downloadAndUploadMedia({
       await adjustQuotaBytes(redisClient, scope, byteDelta);
     }
 
+    mediaMetrics.bytesTotal += total;
     return { status: 'ok', object_key: objectKey, size: total };
   } catch (err) {
     await releaseQuota(redisClient, scope, reserveEstimate).catch((releaseErr) => {
       logger.warn({ err: releaseErr.message, sessionId, providerMessageId }, '[media] quota release failed after a download/upload error (best-effort, non-fatal)');
     });
+    recordFailure('failed');
     return { status: 'failed', error: err && err.message ? err.message : String(err) };
   } finally {
     releaseOnce();

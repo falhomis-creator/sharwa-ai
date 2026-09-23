@@ -1,0 +1,98 @@
+# =============================================================================
+# Sharwa AI - docker-compose.test.yml (P0.3 closure: real MinIO for the E2E
+# media acceptance tests required by prompts/P0_DEEPSEEK_PROMPT.md §6 P0.3:
+# "قبول P0.3 (بـMinIO حقيقية في docker-compose.test.yml)".
+#
+# ADDITIVE ONLY: this file never redefines or overrides a service from
+# docker-compose.yml, and is never picked up by a bare `docker compose ...`
+# (Compose's default file discovery is docker-compose.yml +
+# docker-compose.override.yml only) - so it has zero effect on the live
+# gateway/gateway-forwarder/postgres/etc. stack unless explicitly included
+# with `-f docker-compose.yml -f docker-compose.test.yml`.
+#
+# `minio` and `minio-init` join the existing internal `data` network (defined
+# in docker-compose.yml) so the gateway/test containers already on that
+# network can reach `minio:9000` by service name, exactly like they already
+# reach `redis-durable`. Neither service is published to the host - the E2E
+# test itself runs inside a `gateway` container via `docker compose run`
+# (same established pattern as gateway/src/__tests__/real_redis_integration.test.js).
+# =============================================================================
+
+x-test-logging: &test-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+# DEVIATION (docs/P0_DEVIATIONS.md D-17, updated): `minio`/`minio-init` pull
+# from quay.io, not Docker Hub. Docker Hub removed the `minio/minio` and
+# `minio/mc` repositories entirely on 2026-09-12 (MinIO Community Edition
+# went source-only; this is a real, dated registry removal, confirmed via
+# multiple independent, currently-open fix PRs in unrelated public repos
+# reporting the exact same "pull access denied ... repository does not
+# exist" error this project hit on its first run) - not a login/auth
+# problem and not fixable by choosing a different Docker Hub tag. MinIO's
+# last community-edition binaries remain mirrored on quay.io under their
+# original RELEASE.* tags. The tags below (RELEASE.2025-09-07T16-13-09Z for
+# the server, RELEASE.2025-08-13T08-35-41Z for `mc`) are cross-confirmed
+# across several independent real fix PRs dated within days of this file
+# being written - not guessed - but were not pulled and inspected from
+# inside this development environment (no Docker Hub/quay.io network access
+# here). The batch script that writes this file pulls both images for real
+# on first run and prints the resolved digest via `docker inspect`, so if
+# either tag has since been rotated or removed on quay.io too, that shows up
+# immediately in the script's own output rather than silently.
+services:
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: ["server", "/data"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_TEST_ACCESS_KEY:?MINIO_TEST_ACCESS_KEY is required for the P0.3 E2E test stack (see .env)}
+      MINIO_ROOT_PASSWORD: ${MINIO_TEST_SECRET_KEY:?MINIO_TEST_SECRET_KEY is required for the P0.3 E2E test stack (see .env)}
+    networks: [data]
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 1.0
+    pids_limit: 100
+    # No container-internal healthcheck here: the official `minio/minio`
+    # image's bundled tools (curl/wget/mc availability) are not something
+    # this environment can verify without guessing (H1 - same lesson as the
+    # image-tag deviation above). Readiness is instead proven by the
+    # `minio-init` service below actually connecting with `mc` - a tool
+    # `minio/mc` is guaranteed to have, since that is the whole image - via
+    # its own retry loop, which is a real connectivity proof rather than an
+    # assumption about what's inside the server image.
+    logging: *test-logging
+    restart: "no"                        # test-only service: never auto-restarted into the live stack
+
+  minio-init:                            # one-shot: creates the test bucket, then exits
+    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z   # see the D-17 deviation note above
+    depends_on: [minio]                  # container start only - readiness is proven below, not assumed
+    networks: [data]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_TEST_ACCESS_KEY:?MINIO_TEST_ACCESS_KEY is required for the P0.3 E2E test stack (see .env)}
+      MINIO_ROOT_PASSWORD: ${MINIO_TEST_SECRET_KEY:?MINIO_TEST_SECRET_KEY is required for the P0.3 E2E test stack (see .env)}
+      MINIO_TEST_BUCKET_NAME: ${MINIO_TEST_BUCKET_NAME:-sharwa-ai-test}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        for i in $(seq 1 24); do
+          if mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" >/tmp/mc_alias.log 2>&1; then
+            echo "P0.3_MINIO_REACHABLE after attempt $$i"
+            break
+          fi
+          if [ "$$i" = "24" ]; then
+            echo "P0.3_MINIO_UNREACHABLE after $$i attempts:"; cat /tmp/mc_alias.log; exit 1
+          fi
+          sleep 5
+        done
+        mc mb -p "local/$$MINIO_TEST_BUCKET_NAME" || true
+        echo "P0.3_BUCKET_READY: $$MINIO_TEST_BUCKET_NAME"
+    logging: *test-logging
+    restart: "no"
+
+networks:
+  data:
+    external: false                      # already declared (internal: true) in docker-compose.yml; Compose merges by name
