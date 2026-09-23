@@ -21,6 +21,7 @@ import { markDone } from './ingest/dedupe.js';
 import { spool } from './ingest/spool.js';
 import { createLidMap, recordPhoneNumberShare, buildIdentityUpdateEvent } from './ingest/lidmap.js';
 import { config } from './config.js';
+import { downloadAndUploadMedia } from './media.js';
 
 // ---------------------------------------------------------------------------
 // Tenant-isolated Baileys session manager.
@@ -267,22 +268,69 @@ export async function processInboundMessage(sessionId, msg, appendFn = defaultAp
   const entry = normalizeMessage(msg, { lidMap });
   if (entry === null) return null;
 
-  const isMedia = entry.type === 'image' || entry.type === 'audio' || entry.type === 'video' || entry.type === 'document';
+  const isMedia = entry.type === 'image' || entry.type === 'audio' || entry.type === 'video' || entry.type === 'document' || entry.type === 'sticker';
   if (isMedia) {
-    const { downloadFn = downloadMediaToBuffer, uploadFn = uploadToMinio } = deps;
     const media = detectMedia(msg);
     const ext = extensionFor(media.content);
-    const objectKey = mediaObjectKey(sessionId, ext);
     const contentType = (media.content.mimetype || '').split(';')[0].trim() || 'application/octet-stream';
-    try {
-      const buffer = await downloadFn(msg);
-      await uploadWithRetry(buffer, objectKey, contentType, uploadFn);
-      entry.media.object_key = objectKey;
-    } catch (err) {
-      logger.error({ sessionId, message_id: entry.provider_message_id, err: err.message }, '[sessions] media processing failed');
-      entry.media.object_key = null;
-      entry.media.failed = true;
-      entry.text = 'تعذّر معالجة المرفق المرسل.';
+
+    if (deps.downloadFn || deps.uploadFn) {
+      // Legacy buffer-based path (P0.2-era): kept only for callers/tests that
+      // inject the old-style deps.downloadFn(msg)->Buffer / deps.uploadFn(buffer,
+      // objectKey, contentType) shape. New callers should not set these - the
+      // streaming P0.3 path below (default) is the production path.
+      const { downloadFn = downloadMediaToBuffer, uploadFn = uploadToMinio } = deps;
+      const objectKey = mediaObjectKey(sessionId, ext);
+      try {
+        const buffer = await downloadFn(msg);
+        await uploadWithRetry(buffer, objectKey, contentType, uploadFn);
+        entry.media.object_key = objectKey;
+        entry.media.status = 'ok';
+      } catch (err) {
+        logger.error({ sessionId, message_id: entry.provider_message_id, err: err.message }, '[sessions] media processing failed');
+        entry.media.object_key = null;
+        entry.media.failed = true;
+        entry.media.status = 'failed';
+        entry.text = 'تعذّر معالجة المرفق المرسل.';
+      }
+    } else {
+      // P0.3 default: streaming download + streaming multipart upload, a
+      // per-type size cap, a per-session daily quota on redis-durable, and
+      // magic-byte content-type verification (see media.js). Falls back to
+      // the same graceful-degradation contract (object_key null, failed
+      // true, Arabic fallback text) on any rejection or error - never throws
+      // out to the caller.
+      try {
+        if (!redisClient) throw new Error('redis-durable client not configured');
+        const result = await downloadAndUploadMedia({
+          content: media.content,
+          type: entry.type,
+          sessionId,
+          providerMessageId: entry.provider_message_id,
+          ext,
+          mimeType: contentType,
+          redisClient,
+          s3Client: getS3Client(),
+          bucket: process.env.MINIO_BUCKET_NAME,
+          downloadFn: deps.mediaDownloadFn,
+        });
+        entry.media.status = result.status;
+        if (result.status === 'ok') {
+          entry.media.object_key = result.object_key;
+        } else {
+          entry.media.object_key = null;
+          entry.media.failed = true;
+          if (result.size !== undefined) entry.media.size = result.size;
+          entry.text = 'تعذّر معالجة المرفق المرسل.';
+          logger.warn({ sessionId, message_id: entry.provider_message_id, status: result.status }, '[sessions] media rejected (P0.3)');
+        }
+      } catch (err) {
+        logger.error({ sessionId, message_id: entry.provider_message_id, err: err.message }, '[sessions] media processing failed');
+        entry.media.object_key = null;
+        entry.media.failed = true;
+        entry.media.status = 'failed';
+        entry.text = 'تعذّر معالجة المرفق المرسل.';
+      }
     }
   }
 

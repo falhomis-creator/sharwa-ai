@@ -41,6 +41,7 @@ import { createRedisClient, closeRedisClient } from '../redis.js';
 import { appendEvent, streamKeyFor } from '../ingest/wal.js';
 import { normalizeMessage } from '../ingest/normalize.js';
 import { spool, drainSpool } from '../ingest/spool.js';
+import { reserveQuota, releaseQuota } from '../media.js';
 
 const RUN = process.env.RUN_REAL_REDIS_TESTS === '1';
 
@@ -204,6 +205,23 @@ if (RUN) {
     await client.xdel(streamKey, appendResult.id);
     await client.del(`dedupe:${sessionId}:${entry.provider_message_id}`);
   });
+
+       test('(P0.3) 200x concurrent media-quota reservations against REAL redis-durable respect a 20-file cap exactly, atomically', async () => {
+         const storeId = `test-media-quota-${randomUUID()}`;
+         process.env.MEDIA_QUOTA_DAILY_FILES = '20';
+         process.env.MEDIA_QUOTA_DAILY_BYTES = '999999999';
+         try {
+           const results = await Promise.all(
+             Array.from({ length: 200 }, () => reserveQuota(client, storeId, 1)),
+           );
+           const okCount = results.filter((r) => r.ok).length;
+           assert.equal(okCount, 20, `expected exactly 20 successful reservations under real Redis, got ${okCount}`);
+           await releaseQuota(client, storeId, 20);
+         } finally {
+           delete process.env.MEDIA_QUOTA_DAILY_FILES;
+           delete process.env.MEDIA_QUOTA_DAILY_BYTES;
+         }
+       });
 } else {
   test('real-redis P0.2 acceptance suite ((أ)/(ب)/(ج)) skipped: set RUN_REAL_REDIS_TESTS=1 and run against a real redis-durable to execute it', () => {
     assert.ok(true);
