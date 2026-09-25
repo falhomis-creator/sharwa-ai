@@ -50,6 +50,27 @@ export async function spool(record, opts = {}) {
 }
 
 /**
+ * Cheap, real spool status for GET /sessions/:id/health (P0.5) - a `stat()`
+ * only, never a full read (the drain path already reads the whole file when
+ * it actually needs to; a health check must stay O(1) regardless of how
+ * large the spool has grown, up to its own spoolMaxMb cap).
+ *
+ * @param {{ spoolDir?: string }} [opts]
+ * @returns {Promise<{ size_bytes: number, pending: boolean }>}
+ */
+export async function spoolStatus(opts = {}) {
+  const dir = opts.spoolDir ?? config.spoolDir;
+  const file = path.join(dir, SPOOL_FILE);
+  try {
+    const st = await stat(file);
+    return { size_bytes: st.size, pending: st.size > 0 };
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+    return { size_bytes: 0, pending: false };
+  }
+}
+
+/**
  * Replay every spooled record through the WAL, removing the ones that land.
  *
  * @param {import('ioredis').Redis} client

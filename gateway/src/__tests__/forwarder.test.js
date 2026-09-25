@@ -44,6 +44,10 @@ test('shouldForwardToLegacy skips identity_update entries (G12: no legacy field 
   assert.equal(shouldForwardToLegacy({ type: 'identity_update', lid: '1@lid', phone_e164: '+201111112222' }), false);
 });
 
+test('shouldForwardToLegacy skips human_takeover_signal entries (P0.5/G8: never a customer message)', () => {
+  assert.equal(shouldForwardToLegacy({ type: 'human_takeover_signal', text: 'ok merchant typed this', direction: 'outbound_human' }), false);
+});
+
 test('waitForReady resolves immediately when the client is already ready', async () => {
   const client = { status: 'ready' };
   await waitForReady(client); // must not hang/throw

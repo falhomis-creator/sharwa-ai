@@ -8,8 +8,11 @@ import {
   enqueueSend,
   getSessionQr,
   getSessionStatus,
+  getSessionHealth,
   logoutSession,
   setRedisClient,
+  startLeaseSweep,
+  releaseAllOwnedLeases,
 } from './sessions.js';
 import { drainSpool } from './ingest/spool.js';
 import { createRedisClient, closeRedisClient } from './redis.js';
@@ -55,6 +58,15 @@ app.post('/sessions', async (req, res) => {
     const status = await getSessionStatus(session_id);
     return res.status(201).json(status);
   } catch (err) {
+    // P0.5: MAX_SESSIONS capacity and a lease held by another instance are
+    // both expected, well-defined outcomes (spec, literal: capacity -> a
+    // clean 503) - never generic 500s.
+    if (err.code === 'CAPACITY') {
+      return res.status(503).json({ error: 'gateway at capacity (MAX_SESSIONS)' });
+    }
+    if (err.code === 'LEASE_HELD') {
+      return res.status(409).json({ error: 'session is active on another gateway instance' });
+    }
     logger.error({ session_id, err: err.message }, '[index] failed to create session');
     return res.status(500).json({ error: 'failed to create session' });
   }
@@ -69,6 +81,16 @@ app.get('/sessions/:id/status', async (req, res) => {
   const status = await getSessionStatus(req.params.id);
   if (!status) return res.status(404).json({ error: 'session not found' });
   return res.json(status);
+});
+
+// P0.5 (G6/G7/G8): additive endpoint - GET /sessions/:id/status's own
+// contract ({status, qr_image_base64, connected_phone_number}) is frozen and
+// unchanged. This surfaces the new lifecycle detail: reconnect/lease state,
+// queue depth, spool status, and the (P0.6-stub) kill-switch flag.
+app.get('/sessions/:id/health', async (req, res) => {
+  const health = await getSessionHealth(req.params.id);
+  if (!health) return res.status(404).json({ error: 'session not found' });
+  return res.json(health);
 });
 
 // P0.4: the send route now accepts an optional `client_msg_id` (idempotency
@@ -174,6 +196,12 @@ async function main() {
   drainTimer.unref?.();
 
   await rehydrateSessions();
+  // P0.5 (G7): once staged rehydrate has claimed every session this instance
+  // could grab immediately, keep periodically re-scanning for one whose
+  // lease has since expired elsewhere (the other instance died, or released
+  // it on its own graceful shutdown) - this is the actual failover mechanic.
+  const leaseSweep = startLeaseSweep();
+
   const server = app.listen(PORT, () => {
     logger.info({ port: PORT }, '[index] Sharwa AI gateway listening');
   });
@@ -181,7 +209,12 @@ async function main() {
   const shutdown = async (signal) => {
     logger.info({ signal }, '[index] shutting down');
     if (drainTimer) clearInterval(drainTimer);
+    leaseSweep.stop();
     server.close();
+    // P0.5-scoped subset of P0.6's fuller graceful-shutdown sequence: release
+    // every lease this instance owns so the next holder does not wait out
+    // the full TTL on an ordinary restart/deploy.
+    await releaseAllOwnedLeases();
     await closeRedisClient(client);
     process.exit(0);
   };

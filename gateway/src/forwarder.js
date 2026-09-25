@@ -87,11 +87,17 @@ function waitForReady(client) {
  * calling postInboundMessage rather than sending a garbage payload (F2: this
  * is a deliberate, logged skip, not a silent drop - see processStream).
  *
+ * P0.5 (G8): human_takeover_signal entries are, by spec, NEVER passed to the
+ * legacy customer-message webhook ("الـForwarder يتجاهلها" - the spec's own
+ * words) - they exist so a future P1 consumer can react to a human agent
+ * replying from the merchant's own phone, not as a customer message. Skipped
+ * the same deliberate/logged way as identity_update, never silently.
+ *
  * @param {object} entry
  * @returns {boolean}
  */
 function shouldForwardToLegacy(entry) {
-  return entry.type !== 'identity_update';
+  return entry.type !== 'identity_update' && entry.type !== 'human_takeover_signal';
 }
 
 /** Build the Django webhook payload from a normalized WAL entry. */

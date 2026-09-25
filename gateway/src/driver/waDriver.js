@@ -26,6 +26,7 @@ import makeWASocket, {
   Browsers,
   downloadMediaMessage,
 } from '@whiskeysockets/baileys';
+import { logger } from '../logger.js';
 
 function fakeDriverAllowed() {
   return process.env.WA_DRIVER === 'fake'
@@ -37,13 +38,22 @@ function fakeDriverAllowed() {
  * Construct a WhatsApp socket — real (Baileys) unless the fake driver is
  * both requested AND permitted (see fakeDriverAllowed above).
  *
+ * P0.5 fix: `fetchLatestBaileysVersion()` (a real network call to WhatsApp's
+ * version-check endpoint) is resolved IN HERE, only on the real-driver
+ * branch - never called at all under the fake driver. Before this it lived
+ * in sessions.js and ran unconditionally on every socket open/reconnect,
+ * including under FakeWaDriver - found while building P0.5's rehydrate/
+ * dual-instance tests, which are the first tests to actually exercise this
+ * full open-a-socket code path even in fake mode (every earlier P0.2-P0.4
+ * test injected a fake `sock` directly via createSessionRecord, bypassing
+ * this function entirely) - see docs/P0_DEVIATIONS.md for the full note.
+ *
  * @param {object} opts
  * @param {object} opts.authState    `{ state, saveCreds }` from useMultiFileAuthState.
- * @param {object} [opts.version]    Baileys protocol version, if resolved.
  * @param {object} [opts.fakeOptions] Passed through to makeFakeWaSocket (test only).
  * @returns {Promise<object>} a socket exposing { user, ev, sendMessage, logout }.
  */
-export async function createWaSocket({ authState, version, fakeOptions } = {}) {
+export async function createWaSocket({ authState, fakeOptions } = {}) {
   if (fakeDriverAllowed()) {
     // Dynamic import: keeps test-support/ out of the real driver's static
     // import graph entirely, so nothing in a production bundle/trace even
@@ -51,6 +61,16 @@ export async function createWaSocket({ authState, version, fakeOptions } = {}) {
     const { makeFakeWaSocket } = await import('../../test-support/fakeWaDriver.js');
     return makeFakeWaSocket(fakeOptions);
   }
+
+  let version;
+  try {
+    ({ version } = await fetchLatestBaileysVersion());
+  } catch (err) {
+    // A version-check outage must never block opening a session (H3) - fall
+    // back to the library's own bundled default.
+    logger.warn({ err: err.message }, '[waDriver] could not fetch latest Baileys version; using library default');
+  }
+
   return makeWASocket({
     ...(version ? { version } : {}),
     printQRInTerminal: false,

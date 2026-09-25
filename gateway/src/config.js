@@ -1,4 +1,6 @@
 // gateway/src/config.js
+import crypto from 'node:crypto';
+
 // All P0.2 limits, read from the environment with documented defaults.
 //
 // Constitution H4 ("every queue, buffer, payload, file, retry count, wait time
@@ -135,6 +137,60 @@ function buildConfig(env, problems) {
   const evtStreamMaxLen = intFrom(env.EVT_STREAM_MAXLEN, 'EVT_STREAM_MAXLEN', 100000);
   if (evtStreamMaxLen < 1) problems.push('EVT_STREAM_MAXLEN must be >= 1');
 
+  // --- P0.5: session lifecycle, lease/fencing (G6/G7/G8) --------------------
+  // instanceId identifies THIS process in lease values (`{instance_id}:{fencing_token}`)
+  // and in logs/health. Set INSTANCE_ID explicitly when running >1 gateway
+  // instance (docker-compose service replicas, a rolling deploy) so logs and
+  // GET /sessions/:id/health.lease_holder are readable; a random default is
+  // still safe (unique) for a single-instance deployment or a test process.
+  const instanceId = read('INSTANCE_ID', `auto-${crypto.randomUUID().slice(0, 8)}`);
+
+  // Lease (spec, literal): SET lease:{sid} NX PX 30000, renewed every 10s.
+  const leaseTtlMs = intFrom(env.LEASE_TTL_MS, 'LEASE_TTL_MS', 30000);
+  const leaseRenewMs = intFrom(env.LEASE_RENEW_MS, 'LEASE_RENEW_MS', 10000);
+  if (leaseTtlMs < 1000) problems.push('LEASE_TTL_MS must be >= 1000');
+  if (leaseRenewMs < 100) problems.push('LEASE_RENEW_MS must be >= 100');
+  if (leaseRenewMs >= leaseTtlMs) problems.push('LEASE_RENEW_MS must be < LEASE_TTL_MS (renewal must land before expiry)');
+
+  // Staged rehydrate boot (spec, literal): REHYDRATE_CONCURRENCY=2 + jitter 0.5-2s.
+  const rehydrateConcurrency = intFrom(env.REHYDRATE_CONCURRENCY, 'REHYDRATE_CONCURRENCY', 2);
+  const rehydrateJitterMinMs = intFrom(env.REHYDRATE_JITTER_MIN_MS, 'REHYDRATE_JITTER_MIN_MS', 500);
+  const rehydrateJitterMaxMs = intFrom(env.REHYDRATE_JITTER_MAX_MS, 'REHYDRATE_JITTER_MAX_MS', 2000);
+  if (rehydrateConcurrency < 1) problems.push('REHYDRATE_CONCURRENCY must be >= 1');
+  if (rehydrateJitterMinMs > rehydrateJitterMaxMs) problems.push('REHYDRATE_JITTER_MIN_MS must be <= REHYDRATE_JITTER_MAX_MS');
+
+  // MAX_SESSIONS (spec, literal: "نتيجة قياسك، لا تخمينك" - your OWN measurement,
+  // never a guess). Real measurement taken on the VPS (docs/P0_DEVIATIONS.md,
+  // this phase's entry): a single QR-pending (unpaired) session added ~3.15MiB
+  // to a 512MB-limited gateway container (60.17MiB -> 63.32MiB, real
+  // `docker stats`, single sample). That number is an honestly-disclosed FLOOR,
+  // not the true per-session cost - a paired/connected session carries more
+  // state (chat/contact sync, in-flight message buffers) that could not be
+  // measured without a real WhatsApp account. Default below applies a 10x
+  // safety margin over the measured floor (~32MB/session) against the
+  // container's real headroom (512m limit - ~60MB idle base ~= 452MB), landing
+  // on a deliberately conservative 10 - not itself measured, an explicit,
+  // documented safety buffer pending a real paired-session measurement.
+  const maxSessions = intFrom(env.MAX_SESSIONS, 'MAX_SESSIONS', 10);
+  if (maxSessions < 1) problems.push('MAX_SESSIONS must be >= 1');
+
+  // Reconnect backoff (spec, literal): exponential 1s -> 5min with jitter;
+  // restartRequired reconnects immediately; CONFLICT is capped to <= 1 attempt
+  // per 60s (enforced in sessions.js, not a simple backoff curve).
+  const reconnectBaseMs = intFrom(env.RECONNECT_BASE_MS, 'RECONNECT_BASE_MS', 1000);
+  const reconnectMaxMs = intFrom(env.RECONNECT_MAX_MS, 'RECONNECT_MAX_MS', 5 * 60 * 1000);
+  const reconnectJitterMs = intFrom(env.RECONNECT_JITTER_MS, 'RECONNECT_JITTER_MS', 500);
+  const conflictBackoffMs = intFrom(env.CONFLICT_BACKOFF_MS, 'CONFLICT_BACKOFF_MS', 60000);
+  if (reconnectBaseMs < 100) problems.push('RECONNECT_BASE_MS must be >= 100');
+  if (reconnectMaxMs < reconnectBaseMs) problems.push('RECONNECT_MAX_MS must be >= RECONNECT_BASE_MS');
+  if (conflictBackoffMs < 1000) problems.push('CONFLICT_BACKOFF_MS must be >= 1000');
+
+  // Lease sweep: how often a gateway instance re-scans AUTH_DIR for a
+  // registered session it does not currently hold, to attempt takeover once
+  // the prior holder's lease has expired (failover, G7's own acceptance text).
+  const leaseSweepMs = intFrom(env.LEASE_SWEEP_MS, 'LEASE_SWEEP_MS', 5000);
+  if (leaseSweepMs < 1000) problems.push('LEASE_SWEEP_MS must be >= 1000');
+
   // Redis connection. Host/port/password are validated lazily by redis.js at
   // connection time (H3: fail loud, never guess). Defaults target the local
   // data tier exposed for tests / a compose network alias `redis-durable`.
@@ -174,6 +230,24 @@ function buildConfig(env, problems) {
     }),
     coreIngestGroup,
     legacyForwarderGroup,
+    instanceId,
+    maxSessions,
+    lease: Object.freeze({
+      ttlMs: leaseTtlMs,
+      renewMs: leaseRenewMs,
+      sweepMs: leaseSweepMs,
+    }),
+    rehydrate: Object.freeze({
+      concurrency: rehydrateConcurrency,
+      jitterMinMs: rehydrateJitterMinMs,
+      jitterMaxMs: rehydrateJitterMaxMs,
+    }),
+    reconnect: Object.freeze({
+      baseMs: reconnectBaseMs,
+      maxMs: reconnectMaxMs,
+      jitterMs: reconnectJitterMs,
+      conflictBackoffMs,
+    }),
     outbound: Object.freeze({
       queueMax: outQueueMax,
       idemTtlS: outIdemTtlS,

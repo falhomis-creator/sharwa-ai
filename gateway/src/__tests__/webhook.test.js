@@ -171,7 +171,11 @@ test('send queue (P0.4, durable): two messages for the same session are never se
     const sessionId = `test-serialization-session-${crypto.randomUUID()}`;
     const session = createSessionRecord(sessionId, { sock: fakeSock });
     session.status = 'CONNECTED'; // the worker only reads session.sock while CONNECTED
-    startSessionOutboundWorker(session);
+    // P0.5: the worker now runs on its own dedicated Redis connection (never
+    // the shared `redis` client above) - see sessions.js's waitForRedisReady
+    // comment. Must be awaited so session.outboundWorkerClient exists before
+    // this test's own cleanup below tries to close it.
+    await startSessionOutboundWorker(session);
 
     const dest = `${crypto.randomUUID()}@s.whatsapp.net`;
     const r1 = await enqueueSend(sessionId, dest, 'message one');
@@ -187,6 +191,7 @@ test('send queue (P0.4, durable): two messages for the same session are never se
 
     session.outboundWorker.stop();
     await session.outboundWorker.done;
+    await closeRedisClient(session.outboundWorkerClient);
   } finally {
     setRedisClient(null);
     await closeRedisClient(redis);
