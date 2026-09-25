@@ -31,6 +31,18 @@ import {
 } from './outbound/queue.js';
 import { acquireLease, renewLease, releaseLease, getLeaseHolder, isLeaseOwner } from './lease.js';
 import { createRedisClient, closeRedisClient } from './redis.js';
+import { recordSessionStateTransition, untrackSessionState, sessionReconnectsTotal, leaseLostTotal } from './metrics.js';
+
+// P0.6/H12: session_state{state} only counts sessions this process is
+// currently tracking - when a record is removed from `sessions` (logout,
+// LOGGED_OUT cleanup), its last-known state must come OUT of the gauge too,
+// or a deleted session's state count lingers forever. 'UNKNOWN' is the
+// never-counted pre-tracking sentinel (see the connection.update handler).
+function untrackSessionStateMetric(session) {
+  if (session.status && session.status !== 'UNKNOWN') {
+    untrackSessionState(session.status);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Tenant-isolated Baileys session manager.
@@ -124,6 +136,11 @@ let redisClient = null;
 /** @param {import('ioredis').Redis|null} client */
 export function setRedisClient(client) {
   redisClient = client;
+}
+
+/** P0.6 (GET /readyz - 503 when at/over MAX_SESSIONS): count of sessions this process is currently tracking. */
+export function getSessionCount() {
+  return sessions.size;
 }
 
 // --- pure helpers (exported for unit tests / kept for backward compat) -----
@@ -620,7 +637,16 @@ function wireSocketEvents(session, sock, sessionId) {
     if (update.qr) session.lastQr = update.qr;
     const prevStatus = session.status;
     session.status = mapConnectionStatus(update); // contract-frozen vocabulary - unchanged by P0.5
-    if (session.status !== prevStatus) session.since = Date.now();
+    if (session.status !== prevStatus) {
+      session.since = Date.now();
+      // P0.6/H12: session_state{state} - a gauge, so only a genuine
+      // transition may fire this (never on every connection.update event).
+      // 'UNKNOWN' is createSessionRecord's synthetic pre-tracking sentinel -
+      // it was never counted into the gauge in the first place, so the very
+      // first real transition must only increment the new state, never
+      // decrement 'UNKNOWN' (that would drive it to -1).
+      recordSessionStateTransition(prevStatus === 'UNKNOWN' ? null : prevStatus, session.status);
+    }
 
     if (session.status === 'CONNECTED') {
       session.phoneNumber = extractPhoneNumber(sock.user?.id);
@@ -737,6 +763,7 @@ async function openSocketForSession(session, sessionId) {
 
 function scheduleReconnect(session, sessionId, delayMs, reason) {
   if (session.stopping) return;
+  sessionReconnectsTotal.labels(reason).inc();
   if (session.reconnectTimer) clearTimeout(session.reconnectTimer);
   session.reconnectTimer = setTimeout(() => {
     session.reconnectTimer = null;
@@ -769,6 +796,7 @@ async function finalizeSessionExit(session, sessionId, { wipeAuth }) {
     await fs.rm(authPath, { recursive: true, force: true }).catch((err) => {
       logger.warn({ sessionId, err: err.message }, '[sessions] failed to remove auth folder (non-fatal)');
     });
+    untrackSessionStateMetric(session);
     sessions.delete(sessionId);
   }
 }
@@ -783,6 +811,7 @@ function stopLeaseRenewal(session) {
 /** P0.5 (G7): lease loss during renewal - close the socket immediately WITHOUT logout() (spec, literal), and stop sending. Leaves the in-memory record so status queries still resolve and a later sweep on this instance can retake the lease. */
 async function handleLeaseLost(session, sessionId) {
   logger.warn({ sessionId }, '[sessions] LEASE LOST - closing socket immediately without logout (P0.5/G7)');
+  leaseLostTotal.inc();
   stopLeaseRenewal(session);
   if (session.reconnectTimer) { clearTimeout(session.reconnectTimer); session.reconnectTimer = null; }
   await stopOutboundWorker(session);
@@ -904,6 +933,7 @@ export async function logoutSession(sessionId) {
     });
   }
 
+  untrackSessionStateMetric(session);
   sessions.delete(sessionId);
   const authPath = session.authPath ?? path.join(AUTH_DIR, sessionId);
   await fs.rm(authPath, { recursive: true, force: true });

@@ -99,16 +99,26 @@ test('(P0.5 dual-instance) two real gateway processes on the same session: only 
     // two REAL OS child processes (node boot + ESM module resolution + a
     // real Redis round trip each). Run in isolation that easily lands well
     // under a second; run as part of the FULL suite - where `node --test`'s
-    // own default concurrency runs many other test files (including two
-    // other CPU/timing-sensitive chaos-style tests, P0.4's kill-9 queue
-    // test and P0.5's own rehydrate_staging test) at the same time - real
-    // CPU contention on a modest VPS pushed this past the original 5000ms
-    // margin and failed the test, even though the lease/fencing mechanism
-    // itself was never in question (lease.test.js's 6 unit tests, and this
-    // same test run in isolation, both passed). 20000ms gives real headroom
-    // for that contention without weakening what the test actually proves -
-    // see docs/P0_FINDINGS.md F9 for the full writeup.
-    await waitUntil(() => a.isHolder() || b.isHolder(), 20000, 'initial lease acquisition by either instance');
+    // own default concurrency runs many other test files at the same time -
+    // real CPU contention on a modest VPS pushed this past the original
+    // 5000ms margin and failed the test, even though the lease/fencing
+    // mechanism itself was never in question (lease.test.js's 6 unit tests,
+    // and this same test run in isolation, both passed).
+    //
+    // P0.6 finding (F10, also real-VPS-observed, not guessed): 20000ms - which
+    // held on the VPS's P0.5 full-suite run - was hit again (timed out at
+    // exactly 20000ms) once P0.6's own real-process tests
+    // (p06_operational_readiness.test.js) were added to the same suite: each
+    // node --test file is scheduled as one unit of the runner's own
+    // CPU-aware concurrency, but a file that ITSELF spawns 2-3 more real OS
+    // processes (as this test, and now p06_operational_readiness.test.js,
+    // both do) is invisible to that accounting - more heavy tests than node
+    // --test's own scheduler ever planned for. The real, durable fix
+    // (docs/P0_FINDINGS.md F10) is capping `--test-concurrency` in the
+    // suite's own run command, not an ever-growing timeout here; 40000ms is
+    // kept as a second line of defense on top of that cap, not the primary
+    // fix.
+    await waitUntil(() => a.isHolder() || b.isHolder(), 40000, 'initial lease acquisition by either instance');
     assert.notEqual(a.isHolder(), b.isHolder(), 'exactly one instance must hold the lease, never both, never neither');
 
     const [carrier, survivor] = a.isHolder() ? [a, b] : [b, a];
@@ -121,8 +131,8 @@ test('(P0.5 dual-instance) two real gateway processes on the same session: only 
     // The survivor must take over once the dead carrier's lease expires
     // (LEASE_TTL_MS) and its own next sweep tick (LEASE_SWEEP_MS) runs -
     // give it real margin above that sum (widened alongside the initial-
-    // acquisition wait above, same full-suite-contention reasoning).
-    await waitUntil(() => survivor.isHolder(), LEASE_TTL_MS + LEASE_SWEEP_MS + 10000, 'failover to the surviving instance');
+    // acquisition wait above; F10, same reasoning - see the comment there).
+    await waitUntil(() => survivor.isHolder(), LEASE_TTL_MS + LEASE_SWEEP_MS + 20000, 'failover to the surviving instance');
     assert.equal(survivor.isHolder(), true, 'the surviving instance must have taken over the lease after the TTL');
   } finally {
     for (const c of [a.child, b.child]) {

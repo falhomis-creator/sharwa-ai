@@ -13,11 +13,14 @@ import {
   setRedisClient,
   startLeaseSweep,
   releaseAllOwnedLeases,
+  getSessionCount,
 } from './sessions.js';
 import { drainSpool } from './ingest/spool.js';
 import { createRedisClient, closeRedisClient } from './redis.js';
 import { logger } from './logger.js';
 import { config } from './config.js';
+import { registry } from './metrics.js';
+import { getMediaMetrics } from './media.js';
 
 const PORT = Number.parseInt(process.env.PORT ?? '4001', 10);
 const API_KEY = process.env.SHARWA_AI_GATEWAY_API_KEY ?? '';
@@ -42,8 +45,53 @@ function requireGatewayKey(req, res, next) {
   return next();
 }
 
+// P0.6 (spec, literal): a bearer token in the SAME timing-safe-compare style
+// as requireGatewayKey above. isValidMetricsToken returning false whenever
+// config.metricsToken is empty is a second line of defense only - the real
+// enforcement is main() refusing to start at all with an empty token (H5).
+function isValidMetricsToken(provided) {
+  if (!provided || !config.metricsToken) return false;
+  const a = Buffer.from(provided, 'utf8');
+  const b = Buffer.from(config.metricsToken, 'utf8');
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+// P0.6: /healthz stays frozen (spec, literal) - liveness only, never gated on
+// dependencies. /readyz below is the new, additive readiness signal.
 app.get('/healthz', (req, res) => {
   res.status(200).json({ status: 'ok' });
+});
+
+// P0.6 (spec, literal): 503 if redis-durable is unreachable, OR the spool has
+// been non-empty for longer than SPOOL_STALE_S, OR MAX_SESSIONS is reached,
+// OR graceful shutdown has already started.
+app.get('/readyz', (req, res) => {
+  const reasons = [];
+  if (isShuttingDown) reasons.push('shutting_down');
+  if (!redisClientRef || redisClientRef.status !== 'ready') reasons.push('redis_durable_unreachable');
+  if (spoolNonEmptySince !== null && (Date.now() - spoolNonEmptySince) > config.readyz.spoolStaleS * 1000) {
+    reasons.push('spool_stale');
+  }
+  if (getSessionCount() >= config.maxSessions) reasons.push('at_capacity');
+
+  if (reasons.length > 0) {
+    return res.status(503).json({ status: 'not_ready', reasons });
+  }
+  return res.status(200).json({ status: 'ready' });
+});
+
+// P0.6 (spec, literal): Bearer-token-protected; an empty/missing METRICS_TOKEN
+// refuses gateway startup entirely (main(), below) rather than ever serving
+// this route unauthenticated.
+app.get('/metrics', async (req, res) => {
+  const auth = req.get('Authorization') || '';
+  const provided = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : '';
+  if (!isValidMetricsToken(provided)) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+  res.set('Content-Type', registry.contentType);
+  return res.send(await registry.metrics());
 });
 
 app.use('/sessions', requireGatewayKey);
@@ -171,23 +219,62 @@ app.use((err, req, res, next) => {
 });
 
 let drainTimer = null;
+// P0.6: module-level state the /readyz and /metrics routes (defined above,
+// before main() runs) read from - all null/false until main() sets them up.
+let redisClientRef = null;
+let spoolNonEmptySince = null;
+let isShuttingDown = false;
+
+/** P0.6 (spec, literal): poll GET_MEDIA_METRICS().inflight until it drains to 0 or timeoutMs elapses - never blocks shutdown forever on a stuck download. */
+async function waitForInflightDownloadsToDrain(timeoutMs) {
+  const start = Date.now();
+  for (;;) {
+    const { inflight } = getMediaMetrics();
+    if (inflight <= 0) return;
+    if (Date.now() - start > timeoutMs) {
+      logger.warn({ inflight, timeoutMs }, '[index] shutdown: in-flight downloads did not drain within budget, proceeding anyway');
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
 
 async function main() {
+  // P0.6 (spec, literal): "سرّ فارغ = رفض إقلاع" - refuse to start at all with
+  // an empty/missing METRICS_TOKEN (H5), the same posture already enforced
+  // for SHARWA_AI_GATEWAY_API_KEY. Deliberately NOT enforced inside
+  // config.js's eager loadConfig() - see that file's own comment on
+  // `metricsToken` for why; this is the one place it matters as a live
+  // security control.
+  if (!config.metricsToken) {
+    throw new Error('main: METRICS_TOKEN is required and must be non-empty (H5: empty secret refuses startup)');
+  }
+
   // P0.2: connect to redis-durable once at startup. sessions.js uses this
   // shared client for WAL appends and the lidmap; a connection failure here is
   // NOT fatal to startup (H3: fail loud per-operation, not the whole process) -
   // every inbound message simply spools to disk until Redis is reachable.
   const client = createRedisClient();
+  redisClientRef = client;
   client.on('error', (err) => {
     logger.error({ err: err.message }, '[index] redis-durable client error');
   });
   setRedisClient(client);
 
   // Periodically replay anything that was spooled while Redis was unreachable.
+  // P0.6: also tracks spoolNonEmptySince for GET /readyz's staleness check -
+  // set the moment the spool is first observed non-empty, cleared the moment
+  // it drains back to empty (drainSpool's own `remaining` count is the source
+  // of truth - no extra fs/Redis call needed here).
   drainTimer = setInterval(() => {
     drainSpool(client).then((res) => {
       if (res.replayed > 0 || res.dropped > 0) {
         logger.info(res, '[index] spool drain cycle');
+      }
+      if (res.remaining > 0) {
+        if (spoolNonEmptySince === null) spoolNonEmptySince = Date.now();
+      } else {
+        spoolNonEmptySince = null;
       }
     }).catch((err) => {
       logger.error({ err: err.message }, '[index] spool drain failed');
@@ -208,14 +295,37 @@ async function main() {
 
   const shutdown = async (signal) => {
     logger.info({ signal }, '[index] shutting down');
+    isShuttingDown = true; // flips GET /readyz to 503 immediately (spec, literal)
+
+    // P0.6 (spec, literal): whatever step below hangs, the process must still
+    // exit within its own configured budget - itself kept comfortably under
+    // the compose stop_grace_period (config.js) so Docker never has to
+    // SIGKILL it. A safety net, not the expected path.
+    const forceExitTimer = setTimeout(() => {
+      logger.error({ signal }, '[index] graceful shutdown exceeded its budget - forcing exit');
+      process.exit(1);
+    }, config.shutdown.timeoutMs);
+    forceExitTimer.unref?.();
+
+    // 1) Stop accepting new HTTP requests FIRST (spec, literal order).
     if (drainTimer) clearInterval(drainTimer);
     leaseSweep.stop();
-    server.close();
-    // P0.5-scoped subset of P0.6's fuller graceful-shutdown sequence: release
-    // every lease this instance owns so the next holder does not wait out
-    // the full TTL on an ordinary restart/deploy.
+    await new Promise((resolve) => server.close(() => resolve()));
+
+    // 2) Let in-flight media downloads finish, time-bounded.
+    await waitForInflightDownloadsToDrain(config.shutdown.downloadDrainTimeoutMs);
+
+    // 3) Close every session's socket WITHOUT logout() and release every
+    // lease this instance owns (releaseAllOwnedLeases does both - see its
+    // own doc comment), then flush the spool one last time so nothing
+    // spooled during shutdown is left stranded on disk.
     await releaseAllOwnedLeases();
+    await drainSpool(client).catch((err) => {
+      logger.error({ err: err.message }, '[index] final spool flush failed');
+    });
+
     await closeRedisClient(client);
+    clearTimeout(forceExitTimer);
     process.exit(0);
   };
   process.on('SIGTERM', () => { shutdown('SIGTERM').catch(() => process.exit(1)); });

@@ -191,6 +191,38 @@ function buildConfig(env, problems) {
   const leaseSweepMs = intFrom(env.LEASE_SWEEP_MS, 'LEASE_SWEEP_MS', 5000);
   if (leaseSweepMs < 1000) problems.push('LEASE_SWEEP_MS must be >= 1000');
 
+  // --- P0.6: operational readiness (G10, disasters 19/21 baseline) --------
+  // METRICS_TOKEN (spec, literal): "سرّ فارغ = رفض إقلاع" - an empty/missing
+  // token must refuse startup (H5), same posture as
+  // SHARWA_AI_GATEWAY_API_KEY. Deliberately NOT added to `problems` here:
+  // config.js is imported by nearly every module (including every test
+  // file, transitively, via sessions.js), so throwing here would force
+  // METRICS_TOKEN to be set in every single test file's environment just to
+  // import unrelated constants. The refusal that actually matters - the
+  // real gateway process declining to start - is enforced once, in
+  // index.js's main(), which is the only place this value is a live
+  // security control rather than a config constant. Read directly (not
+  // intFrom - it's a string).
+  const metricsToken = read('METRICS_TOKEN', '');
+
+  // /readyz (spec, literal): 503 if spool has been non-empty for longer than
+  // this. Reused as the same threshold for the Prometheus alert rule
+  // "spool غير فارغ > 5 دقائق" (ops/prometheus/alerts.yml) - one number, one
+  // meaning, instead of two separately-tuned thresholds for the same signal.
+  const spoolStaleS = intFrom(env.SPOOL_STALE_S, 'SPOOL_STALE_S', 300);
+  if (spoolStaleS < 1) problems.push('SPOOL_STALE_S must be >= 1');
+
+  // Graceful shutdown (spec, literal): exit within <= 25s, itself under the
+  // compose stop_grace_period (30s for gateway/gateway-forwarder). Kept
+  // comfortably under both so the process always exits on its own rather
+  // than being SIGKILLed by Docker. downloadDrainTimeoutMs bounds only the
+  // "let in-flight downloads finish" step within that budget.
+  const shutdownTimeoutMs = intFrom(env.SHUTDOWN_TIMEOUT_MS, 'SHUTDOWN_TIMEOUT_MS', 20000);
+  const downloadDrainTimeoutMs = intFrom(env.DOWNLOAD_DRAIN_TIMEOUT_MS, 'DOWNLOAD_DRAIN_TIMEOUT_MS', 8000);
+  if (shutdownTimeoutMs < 1000) problems.push('SHUTDOWN_TIMEOUT_MS must be >= 1000');
+  if (shutdownTimeoutMs > 25000) problems.push('SHUTDOWN_TIMEOUT_MS must be <= 25000 (spec: exit within <= 25s)');
+  if (downloadDrainTimeoutMs >= shutdownTimeoutMs) problems.push('DOWNLOAD_DRAIN_TIMEOUT_MS must be < SHUTDOWN_TIMEOUT_MS (it is only one step of the shutdown budget)');
+
   // Redis connection. Host/port/password are validated lazily by redis.js at
   // connection time (H3: fail loud, never guess). Defaults target the local
   // data tier exposed for tests / a compose network alias `redis-durable`.
@@ -230,6 +262,14 @@ function buildConfig(env, problems) {
     }),
     coreIngestGroup,
     legacyForwarderGroup,
+    metricsToken,
+    readyz: Object.freeze({
+      spoolStaleS,
+    }),
+    shutdown: Object.freeze({
+      timeoutMs: shutdownTimeoutMs,
+      downloadDrainTimeoutMs,
+    }),
     instanceId,
     maxSessions,
     lease: Object.freeze({
