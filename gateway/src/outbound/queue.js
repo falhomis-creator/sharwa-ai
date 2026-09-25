@@ -1,0 +1,311 @@
+// gateway/src/outbound/queue.js
+//
+// P0.4 — durable outbound send queue (G5, disasters #4/#5/#17). Replaces the
+// P0.2-era in-process array queue in sessions.js (which lived only in RAM and
+// was lost on any crash/restart) with a Redis-durable pipeline:
+//
+//   out:{sid}:queue     LIST   FIFO of not-yet-attempted items (RPUSH/BLMOVE)
+//   out:{sid}:inflight  LIST   items currently being sent (crash-recovery scans this)
+//   outidem:{sid}:{client_msg_id}   STRING  idempotency marker (NX claim)
+//   sent_ids:{sid}:{wa_message_id}  STRING  pre-registered WA message id (TTL)
+//   sent_marker:{sid}:{client_msg_id} = wa_message_id   STRING  proof-of-send (TTL)
+//   evt:{shard}         STREAM queued|sent|delivered|failed events (same shard
+//                        scheme as in:{shard}, reusing shardFor from ingest/wal.js)
+//
+// Ordering guarantee, stated honestly (H8): FIFO is NOT strict under token-
+// bucket throttling — a throttled item is pushed back to the TAIL of the
+// queue so later, unthrottled items are not blocked behind it (spec:
+// "الرفض ⇒ تأجيل داخل الطابور لا إسقاط" — deferred, never dropped). Ordering
+// IS strict for items that are never throttled.
+//
+// Duplicate-window guarantee, stated honestly (H8, spec's own words): a crash
+// between a successful sock.sendMessage() and the sent_marker write leaves no
+// way to know the send succeeded; recovery treats it as "unconfirmed" and
+// requeues it, so it is sent AGAIN. This is a deliberate, spec-mandated,
+// MEASURED duplicate window (bounded by the number of crashes), not a bug —
+// see the P0.4 chaos test for the real measured count.
+
+import crypto from 'node:crypto';
+import { config } from '../config.js';
+import { shardFor } from '../ingest/wal.js';
+import { logger } from '../logger.js';
+import { tryConsumeToken, tryConsumeMarketingDailyCap } from './tokenBucket.js';
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function queueKey(sid) { return `out:${sid}:queue`; }
+function inflightKey(sid) { return `out:${sid}:inflight`; }
+function idemKey(sid, clientMsgId) { return `outidem:${sid}:${clientMsgId}`; }
+function sentIdKey(sid, waId) { return `sent_ids:${sid}:${waId}`; }
+function sentMarkerKey(sid, clientMsgId) { return `sent_marker:${sid}:${clientMsgId}`; }
+function evtStreamKey(sid) { return `evt:${shardFor(sid)}`; }
+
+const ENQUEUE_LUA = `
+-- KEYS[1]=idem key  KEYS[2]=queue key
+-- ARGV[1]=item json  ARGV[2]=idem ttl seconds  ARGV[3]=queue max length
+local qlen = redis.call('LLEN', KEYS[2])
+if qlen >= tonumber(ARGV[3]) then
+  return {0}
+end
+local claimed = redis.call('SET', KEYS[1], 'queued', 'EX', ARGV[2], 'NX')
+if not claimed then
+  local state = redis.call('GET', KEYS[1])
+  return {2, state}
+end
+redis.call('RPUSH', KEYS[2], ARGV[1])
+return {1}
+`;
+
+async function emitEvt(client, sessionId, type, fields) {
+  const entry = { v: 1, type, session_id: sessionId, ts: Date.now(), ...fields };
+  try {
+    await client.xadd(evtStreamKey(sessionId), 'MAXLEN', '~', String(config.outbound.evtStreamMaxLen), '*', 'data', JSON.stringify(entry));
+  } catch (err) {
+    // H3: never swallow — an evt write failure is logged loudly. It does NOT
+    // block the send pipeline itself (the send outcome is already durable
+    // via sent_marker/outidem by the time this is called for 'sent'/'failed'),
+    // but it is a real observability gap worth surfacing.
+    logger.error({ sessionId, type, err: err.message }, '[outbound] evt XADD failed');
+  }
+}
+
+/**
+ * Enqueue one outbound message durably. Idempotent on `clientMsgId`: a
+ * repeated call with the same id never sends twice (spec: 1000x same
+ * client_msg_id -> exactly one send).
+ *
+ * @param {import('ioredis').Redis} client
+ * @param {object} opts
+ * @param {string} opts.sessionId
+ * @param {string} opts.clientMsgId
+ * @param {string} opts.to
+ * @param {string} opts.text
+ * @param {'interactive'|'bulk'|'marketing'} [opts.kind]
+ * @returns {Promise<{ status: 'queued'|'duplicate'|'full', state?: string }>}
+ */
+export async function enqueueSend(client, opts) {
+  const kind = opts.kind ?? 'interactive';
+  const item = {
+    client_msg_id: opts.clientMsgId,
+    to: opts.to,
+    text: opts.text,
+    kind,
+    enqueued_at: Date.now(),
+  };
+  const res = await client.eval(
+    ENQUEUE_LUA, 2, idemKey(opts.sessionId, opts.clientMsgId), queueKey(opts.sessionId),
+    JSON.stringify(item), String(config.outbound.idemTtlS), String(config.outbound.queueMax),
+  );
+  const flag = Number(res[0]);
+  if (flag === 0) return { status: 'full' };
+  if (flag === 2) return { status: 'duplicate', state: String(res[1]) };
+  await emitEvt(client, opts.sessionId, 'queued', { client_msg_id: opts.clientMsgId });
+  return { status: 'queued' };
+}
+
+/** Stub kill-switch check (P0.4 scope only). P0.6 builds the real kill-switch
+ * subsystem (redis-cache published state, global/tenant/channel scopes,
+ * origin=human never blocked). Until then this always allows sending — a
+ * documented, honest deviation (docs/P0_DEVIATIONS.md), not a silent gap. */
+function checkKillSwitch(/* sessionId, kind */) {
+  return { blocked: false };
+}
+
+async function requeue(client, sessionId, raw, { front = false } = {}) {
+  await client.lrem(inflightKey(sessionId), 1, raw);
+  if (front) await client.lpush(queueKey(sessionId), raw);
+  else await client.rpush(queueKey(sessionId), raw);
+}
+
+async function resolveInflight(client, sessionId, raw) {
+  await client.lrem(inflightKey(sessionId), 1, raw);
+}
+
+function paceRangeFor(kind) {
+  const o = config.outbound;
+  return kind === 'interactive' ? [o.paceInteractiveMinMs, o.paceInteractiveMaxMs] : [o.paceBulkMinMs, o.paceBulkMaxMs];
+}
+
+function ttlFor(kind) {
+  return kind === 'interactive' ? config.outbound.ttlInteractiveMs : config.outbound.ttlBulkMs;
+}
+
+function bucketKindFor(kind) {
+  return kind === 'marketing' ? 'marketing' : 'service';
+}
+
+/**
+ * Process exactly one dequeued item. Exported for direct unit testing
+ * without running the full blocking worker loop.
+ *
+ * @param {import('ioredis').Redis} client
+ * @param {string} sessionId
+ * @param {string} raw               The exact JSON string as stored (needed for LREM).
+ * @param {{ getSocket: () => object|null }} ctx
+ * @returns {Promise<{ outcome: 'sent'|'requeued'|'expired'|'failed' }>}
+ */
+export async function processOne(client, sessionId, raw, ctx) {
+  const item = JSON.parse(raw);
+
+  if (Date.now() - item.enqueued_at > ttlFor(item.kind)) {
+    await resolveInflight(client, sessionId, raw);
+    await emitEvt(client, sessionId, 'failed', { client_msg_id: item.client_msg_id, error_class: 'expired' });
+    return { outcome: 'expired' };
+  }
+
+  const ks = checkKillSwitch(sessionId, item.kind);
+  if (ks.blocked) {
+    await requeue(client, sessionId, raw);
+    await sleep(200);
+    return { outcome: 'requeued' };
+  }
+
+  const bucketKind = bucketKindFor(item.kind);
+  if (bucketKind === 'marketing') {
+    const daily = await tryConsumeMarketingDailyCap(client, { number: item.to, dailyCap: config.outbound.marketingDailyCap });
+    if (!daily.allowed) {
+      await requeue(client, sessionId, raw);
+      await sleep(200);
+      return { outcome: 'requeued' };
+    }
+  }
+  const bucket = bucketKind === 'marketing'
+    ? { capacity: config.outbound.marketingBucketCapacity, refillPerMin: config.outbound.marketingBucketRefillPerMin }
+    : { capacity: config.outbound.serviceBucketCapacity, refillPerMin: config.outbound.serviceBucketRefillPerMin };
+  const tok = await tryConsumeToken(client, { number: item.to, kind: bucketKind, ...bucket });
+  if (!tok.allowed) {
+    await requeue(client, sessionId, raw);
+    await sleep(200);
+    return { outcome: 'requeued' };
+  }
+
+  const sock = ctx.getSocket();
+  if (!sock) {
+    // session_down: stays queued until its own TTL, per spec.
+    await requeue(client, sessionId, raw);
+    await sleep(200);
+    return { outcome: 'requeued' };
+  }
+
+  const [paceMin, paceMax] = paceRangeFor(item.kind);
+  await sleep(paceMin + Math.floor(Math.random() * (paceMax - paceMin + 1)));
+
+  const waMessageId = crypto.randomUUID();
+  await client.set(sentIdKey(sessionId, waMessageId), '1', 'EX', config.outbound.sentIdsTtlS);
+
+  let lastErr;
+  for (let attempt = 1; attempt <= config.outbound.maxSendAttempts; attempt += 1) {
+    try {
+      const liveSock = ctx.getSocket();
+      if (!liveSock) throw Object.assign(new Error('session down mid-send'), { code: 'SESSION_DOWN' });
+      await liveSock.sendMessage(item.to, { text: item.text }, { messageId: waMessageId });
+      lastErr = null;
+      break;
+    } catch (err) {
+      lastErr = err;
+      if (err.code === 'SESSION_DOWN' || err.code === 'CONNECTION_CLOSED') {
+        await requeue(client, sessionId, raw);
+        await sleep(200);
+        return { outcome: 'requeued' };
+      }
+      if (attempt < config.outbound.maxSendAttempts) {
+        await sleep(200 * 2 ** (attempt - 1));
+      }
+    }
+  }
+
+  if (lastErr) {
+    await resolveInflight(client, sessionId, raw);
+    await emitEvt(client, sessionId, 'failed', {
+      client_msg_id: item.client_msg_id,
+      error_class: 'retryable',
+      error: lastErr.message,
+    });
+    logger.error({ sessionId, client_msg_id: item.client_msg_id, err: lastErr.message }, '[outbound] send failed after max attempts');
+    return { outcome: 'failed' };
+  }
+
+  // Success. Narrow duplicate window lives between the sendMessage() above
+  // returning and these two writes landing (see file header) — a crash here
+  // is exactly what the P0.4 chaos test measures.
+  await client.set(sentMarkerKey(sessionId, item.client_msg_id), waMessageId, 'EX', config.outbound.sentMarkerTtlS);
+  await client.set(idemKey(sessionId, item.client_msg_id), waMessageId, 'EX', config.outbound.idemTtlS);
+  await resolveInflight(client, sessionId, raw);
+  await emitEvt(client, sessionId, 'sent', { client_msg_id: item.client_msg_id, wa_message_id: waMessageId });
+  return { outcome: 'sent' };
+}
+
+/**
+ * Run the blocking outbound worker loop for one session until `ctx.running`
+ * is set to false. One worker per session (mirrors the pre-P0.4 per-session
+ * FIFO design) — BLMOVE blocks for up to 2s per iteration so the loop can
+ * notice `ctx.running` flip promptly without a tight spin.
+ *
+ * @param {import('ioredis').Redis} client
+ * @param {string} sessionId
+ * @param {{ getSocket: () => object|null }} ctx
+ * @returns {{ stop: () => void, done: Promise<void> }}
+ */
+export function startOutboundWorker(client, sessionId, ctx) {
+  const state = { running: true };
+  const done = (async () => {
+    while (state.running) {
+      let raw;
+      try {
+        raw = await client.blmove(queueKey(sessionId), inflightKey(sessionId), 'LEFT', 'RIGHT', 2);
+      } catch (err) {
+        logger.error({ sessionId, err: err.message }, '[outbound] blmove failed; backing off');
+        await sleep(500);
+        continue;
+      }
+      if (!raw) continue; // timeout — loop back and re-check state.running
+      try {
+        await processOne(client, sessionId, raw, ctx);
+      } catch (err) {
+        // Must never happen (processOne catches its own errors), but H3
+        // forbids an uncaught rejection from silently killing the worker.
+        logger.error({ sessionId, err: err.message }, '[outbound] unexpected error processing item; item left in inflight for recovery');
+      }
+    }
+  })();
+  return { stop: () => { state.running = false; }, done };
+}
+
+/**
+ * Crash-recovery scan, run once per session at startup/creation (before the
+ * worker starts): anything left in `inflight` either already has a
+ * sent_marker (it was actually sent before the crash — just clean it up) or
+ * does not (unconfirmed — put it back on the queue to retry, at the FRONT so
+ * recovered work is not starved behind new traffic).
+ *
+ * @param {import('ioredis').Redis} client
+ * @param {string} sessionId
+ * @returns {Promise<{ confirmedSent: number, requeued: number }>}
+ */
+export async function recoverInflight(client, sessionId) {
+  const items = await client.lrange(inflightKey(sessionId), 0, -1);
+  let confirmedSent = 0;
+  let requeued = 0;
+  for (const raw of items) {
+    const item = JSON.parse(raw);
+    const marker = await client.get(sentMarkerKey(sessionId, item.client_msg_id));
+    await client.lrem(inflightKey(sessionId), 1, raw);
+    if (marker) {
+      confirmedSent += 1;
+    } else {
+      await client.lpush(queueKey(sessionId), raw);
+      requeued += 1;
+    }
+  }
+  if (confirmedSent > 0 || requeued > 0) {
+    logger.info({ sessionId, confirmedSent, requeued }, '[outbound] startup recovery');
+  }
+  return { confirmedSent, requeued };
+}
+
+/** @returns {Promise<number>} current queue depth (for GET /sessions/:id/health, P0.5). */
+export async function queueDepth(client, sessionId) {
+  return client.llen(queueKey(sessionId));
+}
+
+export const _keys = { queueKey, inflightKey, idemKey, sentIdKey, sentMarkerKey, evtStreamKey };

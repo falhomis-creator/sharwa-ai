@@ -71,21 +71,59 @@ app.get('/sessions/:id/status', async (req, res) => {
   return res.json(status);
 });
 
-app.post('/sessions/:id/send', (req, res) => {
-  const { to, text } = req.body ?? {};
+// P0.4: the send route now accepts an optional `client_msg_id` (idempotency
+// key - a caller that retries a request after a timeout should reuse the
+// same client_msg_id, per the spec's idempotent-enqueue contract) and an
+// optional `kind` ('interactive' | 'bulk' | 'marketing', selecting pacing +
+// token-bucket category - see gateway/src/outbound/queue.js). Both are
+// optional for backward compatibility: an omitted client_msg_id gets a
+// server-generated one (no idempotency across retries in that case - the
+// caller opted out by not sending one).
+//
+// The queue-full response changed from the old in-RAM queue's 503 to a clean
+// 429 (P0.4's own acceptance text: "طابور ممتلئ ⇒ 429 نظيف") - see
+// docs/P0_DEVIATIONS.md.
+app.post('/sessions/:id/send', async (req, res) => {
+  const { to, text, client_msg_id, kind } = req.body ?? {};
   if (!to || typeof to !== 'string' || !text || typeof text !== 'string') {
     return res.status(400).json({ error: 'to and text (strings) are required' });
   }
-  let message_id;
+  if (client_msg_id !== undefined && typeof client_msg_id !== 'string') {
+    return res.status(400).json({ error: 'client_msg_id, if provided, must be a string' });
+  }
+  if (kind !== undefined && !['interactive', 'bulk', 'marketing'].includes(kind)) {
+    return res.status(400).json({ error: "kind, if provided, must be one of 'interactive', 'bulk', 'marketing'" });
+  }
+
+  let result;
   try {
-    message_id = enqueueSend(req.params.id, to, text);
+    result = await enqueueSend(req.params.id, to, text, {
+      clientMsgId: client_msg_id || undefined,
+      kind: kind || undefined,
+    });
   } catch (err) {
-    return res.status(404).json({ error: 'session not found' });
+    if (err.message && err.message.startsWith('Unknown session')) {
+      return res.status(404).json({ error: 'session not found' });
+    }
+    logger.error({ session_id: req.params.id, err: err.message }, '[index] enqueueSend failed');
+    return res.status(500).json({ error: 'failed to enqueue message' });
   }
-  if (!message_id) {
-    return res.status(503).json({ error: 'send queue is full' });
+
+  if (result.status === 'full') {
+    return res.status(429).json({ error: 'send queue is full' });
   }
-  return res.status(202).json({ message_id });
+  if (result.status === 'duplicate') {
+    // Idempotent replay: the original enqueue already happened (or is in
+    // flight/sent) - report success with the same client_msg_id rather than
+    // enqueueing a second copy.
+    return res.status(202).json({
+      message_id: result.client_msg_id,
+      client_msg_id: result.client_msg_id,
+      duplicate: true,
+      state: result.state,
+    });
+  }
+  return res.status(202).json({ message_id: result.client_msg_id, client_msg_id: result.client_msg_id });
 });
 
 app.post('/sessions/:id/logout', async (req, res) => {

@@ -90,6 +90,51 @@ function buildConfig(env, problems) {
   const ingestPoolSize = intFrom(env.INGEST_POOL_SIZE, 'INGEST_POOL_SIZE', 8);
   if (ingestPoolSize < 1) problems.push('INGEST_POOL_SIZE must be >= 1');
 
+  // --- P0.4: durable outbound send queue (G5/H4) ---------------------------
+  // Every cap below is a direct H4 requirement ("every queue ... has a
+  // written cap"). Defaults are this implementation's own documented choice
+  // (the P0.4 spec text does not fix numeric defaults for these) - see
+  // docs/P0_DEVIATIONS.md for the specific entry recording each default.
+  const outQueueMax = intFrom(env.OUT_QUEUE_MAX, 'OUT_QUEUE_MAX', 500);
+  if (outQueueMax < 1) problems.push('OUT_QUEUE_MAX must be >= 1');
+
+  const outIdemTtlS = intFrom(env.OUTIDEM_TTL_S, 'OUTIDEM_TTL_S', 604800); // 7d, per spec text
+  if (outIdemTtlS < 1) problems.push('OUTIDEM_TTL_S must be >= 1');
+
+  const sentIdsTtlS = intFrom(env.SENT_IDS_TTL_S, 'SENT_IDS_TTL_S', 600); // 10 min, per spec text
+  if (sentIdsTtlS < 1) problems.push('SENT_IDS_TTL_S must be >= 1');
+
+  const sentMarkerTtlS = intFrom(env.SENT_MARKER_TTL_S, 'SENT_MARKER_TTL_S', 86400); // 24h: must outlive any realistic crash/restart window used by startup recovery
+  if (sentMarkerTtlS < 1) problems.push('SENT_MARKER_TTL_S must be >= 1');
+
+  const paceInteractiveMinMs = intFrom(env.PACE_INTERACTIVE_MIN_MS, 'PACE_INTERACTIVE_MIN_MS', 800);
+  const paceInteractiveMaxMs = intFrom(env.PACE_INTERACTIVE_MAX_MS, 'PACE_INTERACTIVE_MAX_MS', 1500);
+  const paceBulkMinMs = intFrom(env.PACE_BULK_MIN_MS, 'PACE_BULK_MIN_MS', 2000);
+  const paceBulkMaxMs = intFrom(env.PACE_BULK_MAX_MS, 'PACE_BULK_MAX_MS', 3000);
+  if (paceInteractiveMinMs > paceInteractiveMaxMs) problems.push('PACE_INTERACTIVE_MIN_MS must be <= PACE_INTERACTIVE_MAX_MS');
+  if (paceBulkMinMs > paceBulkMaxMs) problems.push('PACE_BULK_MIN_MS must be <= PACE_BULK_MAX_MS');
+
+  // Token buckets (per phone number, per kind) - Lua-atomic in outbound/tokenBucket.js.
+  const serviceBucketCapacity = intFrom(env.SERVICE_BUCKET_CAPACITY, 'SERVICE_BUCKET_CAPACITY', 60);
+  const serviceBucketRefillPerMin = intFrom(env.SERVICE_BUCKET_REFILL_PER_MIN, 'SERVICE_BUCKET_REFILL_PER_MIN', 60);
+  const marketingBucketCapacity = intFrom(env.MARKETING_BUCKET_CAPACITY, 'MARKETING_BUCKET_CAPACITY', 20);
+  const marketingBucketRefillPerMin = intFrom(env.MARKETING_BUCKET_REFILL_PER_MIN, 'MARKETING_BUCKET_REFILL_PER_MIN', 20); // spec default: 20 msg/min
+  const marketingDailyCap = intFrom(env.MARKETING_DAILY_CAP, 'MARKETING_DAILY_CAP', 1000);
+  if (serviceBucketCapacity < 1) problems.push('SERVICE_BUCKET_CAPACITY must be >= 1');
+  if (marketingBucketCapacity < 1) problems.push('MARKETING_BUCKET_CAPACITY must be >= 1');
+  if (marketingDailyCap < 1) problems.push('MARKETING_DAILY_CAP must be >= 1');
+
+  const outboundMaxSendAttempts = intFrom(env.OUTBOUND_MAX_SEND_ATTEMPTS, 'OUTBOUND_MAX_SEND_ATTEMPTS', 3); // spec: "3 محاولات مع backoff"
+  if (outboundMaxSendAttempts < 1) problems.push('OUTBOUND_MAX_SEND_ATTEMPTS must be >= 1');
+
+  const outboundTtlInteractiveMs = intFrom(env.OUTBOUND_TTL_INTERACTIVE_MS, 'OUTBOUND_TTL_INTERACTIVE_MS', 10 * 60 * 1000); // 10 min, per spec text
+  const outboundTtlBulkMs = intFrom(env.OUTBOUND_TTL_BULK_MS, 'OUTBOUND_TTL_BULK_MS', 24 * 3600 * 1000); // 24h, per spec text
+  if (outboundTtlInteractiveMs < 1000) problems.push('OUTBOUND_TTL_INTERACTIVE_MS must be >= 1000');
+  if (outboundTtlBulkMs < 1000) problems.push('OUTBOUND_TTL_BULK_MS must be >= 1000');
+
+  const evtStreamMaxLen = intFrom(env.EVT_STREAM_MAXLEN, 'EVT_STREAM_MAXLEN', 100000);
+  if (evtStreamMaxLen < 1) problems.push('EVT_STREAM_MAXLEN must be >= 1');
+
   // Redis connection. Host/port/password are validated lazily by redis.js at
   // connection time (H3: fail loud, never guess). Defaults target the local
   // data tier exposed for tests / a compose network alias `redis-durable`.
@@ -129,6 +174,25 @@ function buildConfig(env, problems) {
     }),
     coreIngestGroup,
     legacyForwarderGroup,
+    outbound: Object.freeze({
+      queueMax: outQueueMax,
+      idemTtlS: outIdemTtlS,
+      sentIdsTtlS,
+      sentMarkerTtlS,
+      paceInteractiveMinMs,
+      paceInteractiveMaxMs,
+      paceBulkMinMs,
+      paceBulkMaxMs,
+      serviceBucketCapacity,
+      serviceBucketRefillPerMin,
+      marketingBucketCapacity,
+      marketingBucketRefillPerMin,
+      marketingDailyCap,
+      maxSendAttempts: outboundMaxSendAttempts,
+      ttlInteractiveMs: outboundTtlInteractiveMs,
+      ttlBulkMs: outboundTtlBulkMs,
+      evtStreamMaxLen,
+    }),
     // Recorded for H4 documentation / P0_REPORT: the exact raw values in force.
     _raw: Object.freeze({
       INGEST_SHARDS: intPair(env.INGEST_SHARDS, 'INGEST_SHARDS', 4).raw,

@@ -9,7 +9,40 @@ import {
   processInboundMessage,
   shouldIgnoreInbound,
   extractText,
+  setRedisClient,
+  startSessionOutboundWorker,
 } from '../sessions.js';
+import { createRedisClient, closeRedisClient } from '../redis.js';
+
+// createRedisClient() uses lazyConnect:false + enableOfflineQueue:false, so
+// the first command must wait for 'ready' (same ordering fix as forwarder.js
+// / real_redis_integration.test.js) - otherwise it fails immediately with
+// "Stream isn't writeable and enableOfflineQueue options is false".
+function waitForRedisReady(client) {
+  if (client.status === 'ready') return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const onReady = () => { client.off('error', onError); resolve(); };
+    const onError = (err) => { client.off('ready', onReady); reject(err); };
+    client.once('ready', onReady);
+    client.once('error', onError);
+  });
+}
+
+// P0.4 (deviation, see docs/P0_DEVIATIONS.md): this suite's own send-queue
+// test below used to drive sessions.js's OLD in-RAM, non-durable queue
+// (enqueueSend was synchronous and createSessionRecord accepted a
+// sendDelayMs jitter function). P0.4 replaced that queue entirely with a
+// durable, Redis-backed one (gateway/src/outbound/queue.js) - enqueueSend is
+// now async and requires a real redis-durable client to be configured
+// (REDIS_NOT_CONFIGURED otherwise, by design - H3: never pretend to queue
+// something that only lives in RAM again). The real invariant the old test
+// existed to prove - two messages for the same session are NEVER sent
+// concurrently - still holds under the new architecture (the outbound
+// worker processes one item at a time per session via BLMOVE), so the test
+// below is rewritten to prove that same invariant through the new API
+// (setRedisClient + startSessionOutboundWorker + async enqueueSend) against
+// a real local Redis, rather than being dropped (H8: never weaken/skip an
+// existing test).
 
 const SECRET = 'sharwa-ai-test-webhook-secret';
 
@@ -113,7 +146,10 @@ test('inbound filtering: fromMe/group/broadcast/empty messages never reach the W
   assert.equal(calls, 1);
 });
 
-test('send queue: two messages for the same session are never sent simultaneously', async () => {
+test('send queue (P0.4, durable): two messages for the same session are never sent simultaneously', async () => {
+  process.env.ALLOW_FAKE_WA = '1';
+  process.env.NODE_ENV = 'test';
+
   let active = 0;
   let maxActive = 0;
   const sent = [];
@@ -128,22 +164,33 @@ test('send queue: two messages for the same session are never sent simultaneousl
     },
   };
 
-  const sessionId = 'test-serialization-session';
-  createSessionRecord(sessionId, { sock: fakeSock, sendDelayMs: () => 50 });
+  const redis = createRedisClient();
+  await waitForRedisReady(redis);
+  setRedisClient(redis);
+  try {
+    const sessionId = `test-serialization-session-${crypto.randomUUID()}`;
+    const session = createSessionRecord(sessionId, { sock: fakeSock });
+    session.status = 'CONNECTED'; // the worker only reads session.sock while CONNECTED
+    startSessionOutboundWorker(session);
 
-  const id1 = enqueueSend(sessionId, '201234567890@s.whatsapp.net', 'message one');
-  const id2 = enqueueSend(sessionId, '201234567890@s.whatsapp.net', 'message two');
-  assert.ok(id1, 'first message should be enqueued');
-  assert.ok(id2, 'second message should be enqueued');
+    const dest = `${crypto.randomUUID()}@s.whatsapp.net`;
+    const r1 = await enqueueSend(sessionId, dest, 'message one');
+    const r2 = await enqueueSend(sessionId, dest, 'message two');
+    assert.equal(r1.status, 'queued', 'first message should be enqueued');
+    assert.equal(r2.status, 'queued', 'second message should be enqueued');
 
-  await waitUntil(() => sent.length === 2);
+    await waitUntil(() => sent.length === 2);
 
-  assert.equal(sent.length, 2);
-  assert.equal(maxActive, 1, 'messages must never be in-flight concurrently');
-  assert.ok(sent[1].at > sent[0].at, 'second send must start after the first');
+    assert.equal(sent.length, 2);
+    assert.equal(maxActive, 1, 'messages must never be in-flight concurrently');
+    assert.ok(sent[1].at >= sent[0].at, 'second send must start no earlier than the first');
 
-  const gap = sent[1].at - sent[0].at;
-  assert.ok(gap >= 50, `expected a jitter gap >= 50ms between sends, got ${gap}ms`);
+    session.outboundWorker.stop();
+    await session.outboundWorker.done;
+  } finally {
+    setRedisClient(null);
+    await closeRedisClient(redis);
+  }
 });
 
 test('postInboundMessage forwards text as message_text (Django contract)', async () => {

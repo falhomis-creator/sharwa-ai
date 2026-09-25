@@ -2,13 +2,13 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
-import makeWASocket, {
+import {
+  createWaSocket,
   DisconnectReason,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
-  Browsers,
   downloadMediaMessage,
-} from '@whiskeysockets/baileys';
+} from './driver/waDriver.js';
 
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import QRCode from 'qrcode';
@@ -22,6 +22,12 @@ import { spool } from './ingest/spool.js';
 import { createLidMap, recordPhoneNumberShare, buildIdentityUpdateEvent } from './ingest/lidmap.js';
 import { config } from './config.js';
 import { downloadAndUploadMedia } from './media.js';
+import {
+  enqueueSend as outboundEnqueueSend,
+  startOutboundWorker,
+  recoverInflight,
+  queueDepth as outboundQueueDepth,
+} from './outbound/queue.js';
 
 // ---------------------------------------------------------------------------
 // Tenant-isolated Baileys session manager.
@@ -34,6 +40,24 @@ import { downloadAndUploadMedia } from './media.js';
 // bounded retry. If the WAL append fails for any reason, the entry is spooled
 // to disk (disaster #5/#17) rather than dropped (F2: never fail silently).
 //
+// P0.4 change (this file): the send path no longer uses an in-process array
+// queue (createSessionRecord's old `queue`/`sending` fields, and the old
+// processQueue/sendOne, existed only in RAM — any crash lost every message
+// still waiting to send, exactly disaster #4/#5/#17 again but on the
+// OUTBOUND side). Sending now goes through outbound/queue.js, a
+// Redis-durable FIFO with idempotency, a per-number token bucket, and
+// crash-recovery (recoverInflight, run once per session before its worker
+// starts). See outbound/queue.js's own file header for the full design and
+// its honestly-disclosed duplicate-window guarantee (H8).
+//
+// P0.4 change (this file): session sockets are now constructed via
+// driver/waDriver.js's createWaSocket() instead of importing Baileys'
+// makeWASocket directly — this is the WaDriver abstraction referenced (but
+// never built) since P0.2 (closes docs/P0_OPEN_QUESTIONS.md OQ-7). In
+// production this resolves to the exact same real Baileys socket as before;
+// only P0.4/P0.5/P0.8's own tests select the fake one, and only under the
+// triple env gate documented in driver/waDriver.js (H7).
+//
 // Session-status updates (postSessionStatus) remain a direct, low-frequency
 // control-plane webhook call - out of scope for G1 (that disaster is about the
 // high-volume inbound message path, not connection state transitions).
@@ -42,13 +66,6 @@ import { downloadAndUploadMedia } from './media.js';
 const AUTH_DIR = process.env.AUTH_SESSIONS_DIR
   ? path.resolve(process.env.AUTH_SESSIONS_DIR)
   : path.resolve('auth_sessions');
-
-const MAX_QUEUE_SIZE = 100;
-const JITTER_MIN_MS = 2000;
-const JITTER_MAX_MS = 3000;
-
-const defaultJitter = () =>
-  JITTER_MIN_MS + Math.floor(Math.random() * (JITTER_MAX_MS - JITTER_MIN_MS + 1));
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -198,7 +215,7 @@ function extractPhoneNumber(userId) {
 
 // --- session registry -------------------------------------------------------
 
-export function createSessionRecord(sessionId, { sock = null, sendDelayMs = defaultJitter } = {}) {
+export function createSessionRecord(sessionId, { sock = null } = {}) {
   const existing = sessions.get(sessionId);
   if (existing) return existing;
 
@@ -211,9 +228,9 @@ export function createSessionRecord(sessionId, { sock = null, sendDelayMs = defa
     authPath: null,
     state: null,
     saveCreds: null,
-    queue: [],
-    sending: false,
-    sendDelayMs,
+    // P0.4: outbound worker handle for this session (null until the durable
+    // send queue's worker is started - see startSessionOutboundWorker below).
+    outboundWorker: null,
   };
   sessions.set(sessionId, session);
   return session;
@@ -275,10 +292,6 @@ export async function processInboundMessage(sessionId, msg, appendFn = defaultAp
     const contentType = (media.content.mimetype || '').split(';')[0].trim() || 'application/octet-stream';
 
     if (deps.downloadFn || deps.uploadFn) {
-      // Legacy buffer-based path (P0.2-era): kept only for callers/tests that
-      // inject the old-style deps.downloadFn(msg)->Buffer / deps.uploadFn(buffer,
-      // objectKey, contentType) shape. New callers should not set these - the
-      // streaming P0.3 path below (default) is the production path.
       const { downloadFn = downloadMediaToBuffer, uploadFn = uploadToMinio } = deps;
       const objectKey = mediaObjectKey(sessionId, ext);
       try {
@@ -294,12 +307,6 @@ export async function processInboundMessage(sessionId, msg, appendFn = defaultAp
         entry.text = 'تعذّر معالجة المرفق المرسل.';
       }
     } else {
-      // P0.3 default: streaming download + streaming multipart upload, a
-      // per-type size cap, a per-session daily quota on redis-durable, and
-      // magic-byte content-type verification (see media.js). Falls back to
-      // the same graceful-degradation contract (object_key null, failed
-      // true, Arabic fallback text) on any rejection or error - never throws
-      // out to the caller.
       try {
         if (!redisClient) throw new Error('redis-durable client not configured');
         const result = await downloadAndUploadMedia({
@@ -338,56 +345,67 @@ export async function processInboundMessage(sessionId, msg, appendFn = defaultAp
     await appendFn({ sessionId, event: entry });
   } catch (err) {
     if (err.code !== 'PAYLOAD_TOO_LARGE') throw err;
-    // Permanent rejection: already logged by appendFn. Nothing more to do -
-    // the message is intentionally not delivered (F4).
   }
 
   return entry.provider_message_id;
 }
 
-// --- send queue (FIFO, per session, jitter between messages) ----------------
+// --- send queue (P0.4: durable, Redis-backed — see outbound/queue.js) ------
 
-export function enqueueSend(sessionId, to, text) {
+/**
+ * Enqueue an outbound message durably (P0.4). Idempotent on `clientMsgId`
+ * (auto-generated if the caller does not supply one — a caller that wants
+ * true idempotency across its own retries must pass the same clientMsgId
+ * each time).
+ *
+ * @param {string} sessionId
+ * @param {string} to
+ * @param {string} text
+ * @param {{ clientMsgId?: string, kind?: 'interactive'|'bulk'|'marketing' }} [opts]
+ * @returns {Promise<{ status: 'queued'|'duplicate'|'full', client_msg_id?: string, state?: string }>}
+ */
+export async function enqueueSend(sessionId, to, text, opts = {}) {
   const session = sessions.get(sessionId);
   if (!session) {
     throw new Error(`Unknown session: ${sessionId}`);
   }
-  if (session.queue.length >= MAX_QUEUE_SIZE) {
-    return null;
+  if (!redisClient) {
+    // P0.4's whole point is a durable queue; without redis-durable there is
+    // nowhere safe to put the message (H3: fail loud, never pretend to queue
+    // something that only lives in RAM again).
+    const err = new Error('redis-durable client not configured; cannot durably enqueue');
+    err.code = 'REDIS_NOT_CONFIGURED';
+    throw err;
   }
-
-  const message_id = crypto.randomUUID();
-  session.queue.push({ message_id, to, text });
-  processQueue(session);
-  return message_id;
+  const clientMsgId = opts.clientMsgId ?? crypto.randomUUID();
+  const res = await outboundEnqueueSend(redisClient, { sessionId, clientMsgId, to, text, kind: opts.kind });
+  if (res.status === 'full') return { status: 'full' };
+  if (res.status === 'duplicate') return { status: 'duplicate', client_msg_id: clientMsgId, state: res.state };
+  return { status: 'queued', client_msg_id: clientMsgId };
 }
 
-async function processQueue(session) {
-  if (session.sending) return;
-  session.sending = true;
-  try {
-    while (session.queue.length > 0) {
-      const item = session.queue.shift();
-      await sendOne(session, item);
-      if (session.queue.length > 0) {
-        await sleep(session.sendDelayMs());
-      }
-    }
-  } finally {
-    session.sending = false;
+/**
+ * Start (or restart) this session's outbound worker. Called once the
+ * session's socket exists, after crash-recovery has run. Idempotent: calling
+ * it twice for a session that already has a running worker stops the old one
+ * first (used when a session reconnects with a new socket).
+ *
+ * @param {object} session
+ */
+export function startSessionOutboundWorker(session) {
+  if (!redisClient) return; // nothing to run against; enqueueSend already refuses without redis
+  if (session.outboundWorker) {
+    session.outboundWorker.stop();
   }
+  session.outboundWorker = startOutboundWorker(redisClient, session.id, {
+    getSocket: () => (session.status === 'CONNECTED' ? session.sock : null),
+  });
 }
 
-async function sendOne(session, item) {
-  if (!session.sock) {
-    logger.error({ sessionId: session.id, message_id: item.message_id }, '[sessions] session has no socket; dropping message');
-    return;
-  }
-  try {
-    await session.sock.sendMessage(item.to, { text: item.text });
-  } catch (err) {
-    logger.error({ sessionId: session.id, message_id: item.message_id, err: err.message }, '[sessions] failed to send message');
-  }
+/** @returns {Promise<number>} current outbound queue depth for a session (P0.5's health endpoint will surface this). */
+export async function getOutboundQueueDepth(sessionId) {
+  if (!redisClient) return 0;
+  return outboundQueueDepth(redisClient, sessionId);
 }
 
 // --- query helpers for index.js --------------------------------------------
@@ -435,12 +453,7 @@ export async function createSession(sessionId) {
     logger.warn({ err: err.message }, '[sessions] could not fetch latest Baileys version; using library default');
   }
 
-  const sock = makeWASocket({
-    ...(version ? { version } : {}),
-    printQRInTerminal: false,
-    browser: Browsers.ubuntu('Chrome'),
-    auth: state,
-  });
+  const sock = await createWaSocket({ authState: { state, saveCreds }, version });
   session.sock = sock;
 
   sock.ev.on('creds.update', saveCreds);
@@ -462,24 +475,15 @@ export async function createSession(sessionId) {
     });
   });
 
-  // G12: record lid -> phone_e164 mappings as WhatsApp discloses them, and
-  // (R3_DIRECTIVE) append an identity_update WAL entry so a future P1 core
-  // consumer can react to the resolution without re-deriving it from raw
-  // messages. Mirrors processInboundMessage's spool-on-failure path (F2) via
-  // the same defaultAppendToWal helper.
   sock.ev.on('chats.phoneNumberShare', ({ lid, jid } = {}) => {
     if (!redisClient) return;
     (async () => {
       const res = await recordPhoneNumberShare(redisClient, sessionId, lid, jid);
-      if (!res.stored) return; // non-resolvable jid, or bounded out at lidmapMax (H4)
+      if (!res.stored) return;
 
       const event = buildIdentityUpdateEvent(lid, res.phone_e164);
       const appendRes = await defaultAppendToWal({ sessionId, event });
       if (appendRes.status === 'appended') {
-        // No separate "delivery confirmed" step exists for identity_update
-        // (unlike messages, which wait for forwarder.js to reach Django) -
-        // the entry is fully durable the moment it lands on the stream, so
-        // extend its dedupe marker to the long TTL right away (G2-equivalent).
         await markDone(redisClient, dedupeKeyFor(sessionId, event.provider_message_id), config.dedupeDoneTtlS * 1000);
       }
     })().catch((err) => {
@@ -496,12 +500,25 @@ export async function createSession(sessionId) {
     }
   });
 
+  // P0.4: crash-recovery MUST run before the worker starts, so any item left
+  // in `inflight` from a previous process (crashed mid-send) is resolved
+  // (confirmed-sent cleanup, or requeued) before new sends can interleave
+  // with it.
+  if (redisClient) {
+    await recoverInflight(redisClient, sessionId);
+  }
+  startSessionOutboundWorker(session);
+
   return session;
 }
 
 export async function logoutSession(sessionId) {
   const session = sessions.get(sessionId);
   if (!session) return;
+
+  if (session.outboundWorker) {
+    session.outboundWorker.stop();
+  }
 
   try {
     if (session.sock) {
