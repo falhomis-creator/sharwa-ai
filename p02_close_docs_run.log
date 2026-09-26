@@ -1,0 +1,40 @@
+=== 1) append P0.2 closure section to docs/P0_PROGRESS.md ===
+P0_PROGRESS.md updated OK
+=== 2) overwrite docs/PHASE_GATE.md (P0.2 -> DONE) ===
+PHASE_GATE.md updated OK
+=== 3) review before commit ===
+On branch master
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   docs/P0_PROGRESS.md
+	modified:   docs/PHASE_GATE.md
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	batch_p02_auth_sessions_perms_fix.sh
+	batch_p02_close_docs.sh
+	batch_p02_compose.sh
+	batch_p02_compose_secrets.sh
+	batch_p02_forwarder_block_timeout_fix.sh
+	batch_p02_forwarder_ready_fix.sh
+	batch_p02_identity_update.sh
+	batch_p02_integration.sh
+	batch_p02_real_redis_integration.sh
+	batch_p02_real_redis_integration_v2.sh
+	gateway/p02_real_redis_integration_v2_run.log
+	p02_auth_sessions_perms_fix_run.log
+	p02_close_docs_run.log
+	p02_compose_run.log
+	p02_compose_secrets_run.log
+	p02_forwarder_block_timeout_fix_run.log
+	p02_forwarder_ready_fix_run.log
+	p02_identity_update_run.log
+	p02_integration_run.log
+	p02_real_redis_integration_run.log
+	p02_real_redis_integration_v2_run.log
+
+no changes added to commit (use "git add" and/or "git commit -a")
+ docs/P0_PROGRESS.md | 52 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ docs/PHASE_GATE.md  |  3 ++-
+ 2 files changed, 54 insertions(+), 1 deletion(-)

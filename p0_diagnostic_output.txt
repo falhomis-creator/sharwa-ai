@@ -1,0 +1,572 @@
+
+################ A. repo tree (depth 2, no node_modules/.git) ################
+.
+.editorconfig
+.env
+.env.example
+.gitattributes
+.gitignore
+PROMPT_P0_foundation_for_deepseek.md
+PROMPT_phase3a_step1_gateway_foundation.md
+PROMPT_phase3a_step2_contract_alignment.md
+README.md
+SHARWA_AI_PROJECT_SUMMARY.md
+batch_p02_auth_sessions_perms_fix.sh
+batch_p02_close_docs.sh
+batch_p02_compose.sh
+batch_p02_compose_secrets.sh
+batch_p02_forwarder_block_timeout_fix.sh
+batch_p02_forwarder_ready_fix.sh
+batch_p02_identity_update.sh
+batch_p02_integration.sh
+batch_p02_real_redis_integration.sh
+batch_p02_real_redis_integration_v2.sh
+batch_p03_close_minio_e2e.sh
+batch_p03_commit.sh
+batch_p03_commit_final.sh
+batch_p03_hunt_gate_fix.sh
+batch_p03_media_module.sh
+batch_p03_progress_and_stage.sh
+batch_p03_recon.sh
+batch_p03_sessions_wiring.sh
+batch_p04_commit.sh
+batch_p04_hunt_gate_fix.sh
+batch_p04_outbound_queue.sh
+batch_p05_commit.sh
+batch_p05_dual_instance_timing_fix.sh
+batch_p05_session_lifecycle.sh
+batch_p06a_commit.sh
+batch_p06a_operational_readiness.sh
+batch_p06a_timing_fix.sh
+batch_p06a_timing_fix2.sh
+batch_p06a_timing_fix3.sh
+batch_p06b_diag_and_verify.sh
+batch_p06b_killswitch.sh
+batch_p06b_redis_cache_fix.sh
+batch_p06b_startup_fix.sh
+claude inputs
+claude inputs/sharwa_ai_scope_and_risks.txt
+docker-compose.test.yml
+docker-compose.yml
+docs
+docs/00_ARCHITECTURE.md
+docs/01_FIVE_TASKS_DESIGN.md
+docs/02_RISK_SOLUTIONS_21.md
+docs/P0_AUDIT_01.md
+docs/P0_AUDIT_02.md
+docs/P0_AUDIT_03.md
+docs/P0_C1_REPORT.md
+docs/P0_DEPENDENCIES.md
+docs/P0_DEVIATIONS.md
+docs/P0_FINDINGS.md
+docs/P0_OPEN_QUESTIONS.md
+docs/P0_PROGRESS.md
+docs/P0_REPORT.md
+docs/P0_RUNBOOK.md
+docs/PHASE_GATE.md
+docs/R3_DIRECTIVE.md
+docs/reference
+gateway
+gateway/.dockerignore
+gateway/.env.example
+gateway/.gitignore
+gateway/Dockerfile
+gateway/p02_real_redis_integration_v2_run.log
+gateway/package-lock.json
+gateway/package.json
+gateway/scripts
+gateway/src
+gateway/test-support
+ops
+ops/pgbouncer.ini
+ops/postgres
+
+################ B. which P0 components already exist ################
+  MISSING: core
+  MISSING: console
+  MISSING: tests/e2e
+  EXISTS : ops
+  MISSING: ops/prometheus
+  EXISTS : docker-compose.test.yml
+  EXISTS : scripts/hunt_gate.mjs
+  EXISTS : docs/PHASE_GATE.md
+  EXISTS : docs/P0_PROGRESS.md
+  EXISTS : docs/P0_REPORT.md
+  EXISTS : docs/reference/schema.sql
+  EXISTS : gateway/Dockerfile
+
+################ C. docker-compose.yml (SECRET VALUES MASKED) ################
+# =============================================================================
+# Sharwa AI - docker-compose.yml (P0.1 data tier DRAFT - NOT run: no Docker yet)
+#
+# Derived from docs/reference/docker-compose.reference.yml. Originally scoped to
+# the P0.1 data layer only (PROMPT_P0 §6 P0.1 step 1); P0.1 was verified on real
+# Docker at C1 (docs/P0_C1_REPORT.md) - this file is no longer a "not run" draft.
+# P0.2 (R3_DIRECTIVE) adds the `gateway`/`gateway-forwarder` app tier below.
+# worker-*/scheduler/api/prometheus remain ABSENT - still out of scope.
+#
+# Rules applied:
+#   - every container has mem_limit + memswap_limit + cpus + pids_limit + log cap
+#     + restart + healthcheck (risk #16).
+#   - PostgreSQL gets oom_score_adj: -900 and lives on the internal `data` network
+#     (never published to the host) - risk #16 / #2.
+#   - redis-durable uses AOF fsync=always + noeviction; redis-cache is lossy
+#     allkeys-lru with no persistence (risk #17 / #5).
+#   - secrets come from a gitignored root `.env` via ${VAR:?error} - no defaults.
+#   - every image tag is an explicit version - NO `latest` (deviation from the
+#     reference is recorded in docs/P0_DEVIATIONS.md).
+#
+# Memory budget: data tier (postgres 1536 + pgbouncer 64 + redis-durable 320 +
+# redis-cache 128 = 2048 MB) + app tier (gateway 512 + gateway-forwarder 128 =
+# 640 MB) = 2688 MB, leaving ~5.3 GB of an 8 GB host for the OS, page cache, and
+# the still-absent api/prometheus tiers. The gateway/gateway-forwarder limits
+# are a FIRST-PASS ESTIMATE (Baileys per-session memory not yet load-tested
+# under P0.2) - revisit once real WhatsApp sessions run under load.
+# =============================================================================
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  # ---------------------------------------------------------------- data tier
+  postgres:
+    build: ./ops/postgres                 # postgis/postgis:16-3.4 + postgresql-16-pgvector + pg_trgm
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required (see .env)}
+      POSTGRES_PASSWORD: <MASKED>
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required (see .env)}
+      # Role bootstrap (10_roles.sh) reads these; LOGIN roles inherit the base roles.
+      SHARWA_APP_USER: ${SHARWA_APP_USER:?SHARWA_APP_USER is required (see .env)}
+      SHARWA_APP_PASSWORD: <MASKED>
+      SHARWA_SYSTEM_USER: ${SHARWA_SYSTEM_USER:?SHARWA_SYSTEM_USER is required (see .env)}
+      SHARWA_SYSTEM_PASSWORD: <MASKED>
+      SHARWA_MIGRATION_USER: ${SHARWA_MIGRATION_USER:?SHARWA_MIGRATION_USER is required (see .env)}
+      SHARWA_MIGRATION_PASSWORD: <MASKED>
+    command:
+      - postgres
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./ops/postgres.conf:/etc/postgresql/postgresql.conf:ro
+    networks: [data]                      # internal only: reachable through PgBouncer, never from outside
+    mem_limit: 1536m
+    memswap_limit: 1536m
+    cpus: 2.0
+    pids_limit: 300
+    oom_score_adj: -900                   # the kernel kills everything else first
+    stop_grace_period: 60s
+    shm_size: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    logging: *default-logging
+    restart: unless-stopped
+
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.25.2-p0  # explicit tag (reference used :latest)
+    environment:
+      DB_HOST: postgres
+      DB_USER: ${SHARWA_APP_USER:?SHARWA_APP_USER is required (see .env)}
+      DB_PASSWORD: <MASKED>
+      DB_NAME: ${POSTGRES_DB:?POSTGRES_DB is required (see .env)}
+      # auth_type + pool settings are also encoded in ops/pgbouncer.ini (mounted).
+      AUTH_TYPE: scram-sha-256
+    volumes:
+      - ./ops/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+    networks: [data]
+    mem_limit: 64m
+    memswap_limit: 64m
+    cpus: 0.5
+    pids_limit: 50
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    depends_on:
+      postgres: { condition: service_healthy }
+    logging: *default-logging
+    restart: unless-stopped
+
+  redis-durable:                         # streams (inbound WAL) + lidmap + wake-ups. Never evicts.
+    image: redis:7.4-alpine              # explicit tag (reference used :7-alpine)
+    command:
+      - sh
+      - -c
+      - exec redis-server /etc/redis/redis.conf --requirepass "<MASKED>"
+    environment:
+      # B7: password via env (not argv). REDISCLI_AUTH lets the healthcheck
+      # authenticate without -a on the command line.
+      REDIS_PASSWORD: <MASKED>
+      REDISCLI_AUTH: ${REDIS_DURABLE_PASSWORD:?REDIS_DURABLE_PASSWORD is required (see .env)}
+    volumes:
+      - ./ops/redis-durable.conf:/etc/redis/redis.conf:ro
+      - redis_durable:/data
+    networks: [data]
+    mem_limit: 320m                       # B3: AOF rewrite headroom above maxmemory 128mb
+    memswap_limit: 320m
+    cpus: 0.5
+    pids_limit: 50
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging: *default-logging
+    restart: unless-stopped
+
+  redis-cache:                           # dedupe fast-path, rate limits, pub/sub, read cache. Losable.
+    image: redis:7.4-alpine
+    command:
+      - sh
+      - -c
+      - exec redis-server /etc/redis/redis.conf --requirepass "<MASKED>"
+    environment:
+      REDIS_PASSWORD: <MASKED>
+      REDISCLI_AUTH: ${REDIS_CACHE_PASSWORD:?REDIS_CACHE_PASSWORD is required (see .env)}
+    volumes:
+      - ./ops/redis-cache.conf:/etc/redis/redis.conf:ro
+    networks: [data]
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: 0.5
+    pids_limit: 50
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging: *default-logging
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------- app tier
+  # P0.2 (R3_DIRECTIVE, disaster #4/G1 + #5/#17): the WA socket (gateway) and
+  # the Django delivery path (gateway-forwarder) are separate containers/
+  # processes so a slow/down Django never blocks inbound message receipt.
+  gateway:
+    build:
+      context: ./gateway
+    image: sharwa-ai-gateway:p0.2          # tag shared with gateway-forwarder below (built once)
+    environment:
+      PORT: "4001"
+      NODE_ENV: production
+      SHARWA_AI_GATEWAY_API_KEY: <MASKED>
+      SHARWA_AI_GATEWAY_WEBHOOK_SECRET: <MASKED>
+      # host.docker.internal (below) is what makes these reachable when Django/
+      # MinIO run on the VPS host itself rather than in this compose file -
+      # "localhost" from INSIDE the container would mean the container itself.
+      DJANGO_BASE_URL: <MASKED>
+      MINIO_ENDPOINT_URL: <MASKED>
+      # Optional (owner decision, P0.2): MinIO deployment status was unknown when
+      # this was written. Left EMPTY here rather than :?required so `gateway` can
+      # still start and handle text messages - sessions.js already degrades a
+      # media upload gracefully (object_key: null, Arabic fallback text) when
+      # these are unset/wrong. Set real values in .env once MinIO is confirmed.
+      MINIO_ACCESS_KEY: <MASKED>
+      MINIO_SECRET_KEY: <MASKED>
+      MINIO_BUCKET_NAME: ${MINIO_BUCKET_NAME:-sharwa-ai}
+      MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
+      AUTH_SESSIONS_DIR: /app/auth_sessions
+      REDIS_DURABLE_HOST: redis-durable
+      REDIS_DURABLE_PORT: "6379"
+      REDIS_DURABLE_PASSWORD: <MASKED>
+    volumes:
+      - gateway_auth_sessions:/app/auth_sessions   # WhatsApp session credentials survive restarts
+    networks: [data, app]                  # data: reach redis-durable. app: reach the internet (WhatsApp) + host
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:4001:4001"              # loopback only (Dockerfile: never published to the public internet)
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 1.0
+    pids_limit: 200
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:4001/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    depends_on:
+      redis-durable: { condition: service_healthy }
+    logging: *default-logging
+    restart: unless-stopped
+
+  gateway-forwarder:                       # same image as `gateway`, different command - reads in:{shard}
+    image: sharwa-ai-gateway:p0.2          # via the legacy-forwarder consumer group and delivers to Django
+    command: ["node", "src/forwarder.js"]
+    environment:
+      NODE_ENV: production
+      SHARWA_AI_GATEWAY_WEBHOOK_SECRET: <MASKED>
+      DJANGO_BASE_URL: <MASKED>
+      REDIS_DURABLE_HOST: redis-durable
+      REDIS_DURABLE_PORT: "6379"
+      REDIS_DURABLE_PASSWORD: <MASKED>
+    networks: [data, app]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: 0.5
+    pids_limit: 50
+    # No process-level healthcheck: this image's alpine base has no verified
+    # pgrep/procps, and a wrong CMD here would flap the container needlessly
+    # (H3: don't guess a healthcheck we haven't proven). restart: unless-stopped
+    # plus the forwarder's own structured logs (logger.info '[forwarder] started')
+    # are the liveness signal for now - revisit if we add a tiny /healthz shim.
+    logging: *default-logging
+    restart: unless-stopped
+
+networks:
+  data:
+    driver: bridge
+    internal: true                       # databases/Redis cannot be reached from outside
+  app:
+    driver: bridge                       # NOT internal: gateway needs outbound internet (WhatsApp)
+                                          # and a route to Django/MinIO on the host (host.docker.internal)
+
+volumes:
+  pgdata:
+  redis_durable:
+  gateway_auth_sessions:
+
+################ D. gateway/Dockerfile ################
+# Sharwa AI WhatsApp Gateway - standalone container.
+# Published only on 127.0.0.1 of the Sharwa server (never the public internet).
+
+FROM node:24-alpine
+
+# Run as a non-root user.
+RUN addgroup -S app && adduser -S app -G app
+
+WORKDIR /app
+
+# Install production dependencies only.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
+# Copy application source.
+COPY src ./src
+
+ENV NODE_ENV=production \
+    PORT=4001
+
+# Persistent WhatsApp credentials (auth_sessions/) survive container restarts.
+# The directory must exist and be owned by the non-root `app` user BEFORE the
+# VOLUME instruction: Docker seeds a fresh named volume by copying this
+# directory's content AND ownership from the image the first time a container
+# uses it. Without this, a fresh volume comes back root:root and `app` (USER
+# app, below) gets EACCES on its very first mkdir under it (observed on real
+# Docker: "EACCES: permission denied, mkdir '/app/auth_sessions/<id>'").
+RUN mkdir -p /app/auth_sessions && chown -R app:app /app/auth_sessions
+VOLUME ["/app/auth_sessions"]
+
+# Deliberately different from SharwaConnect's 4000 to avoid any port clash if
+# both ever run on the same host. Override at runtime with `-e PORT=...`.
+EXPOSE ${PORT}
+
+USER app
+
+CMD ["node", "src/index.js"]
+
+################ E. .env KEY NAMES ONLY (values never printed) ################
+POSTGRES_USER= <value hidden>
+POSTGRES_PASSWORD= <value hidden>
+POSTGRES_DB= <value hidden>
+SHARWA_APP_USER= <value hidden>
+SHARWA_APP_PASSWORD= <value hidden>
+SHARWA_SYSTEM_USER= <value hidden>
+SHARWA_SYSTEM_PASSWORD= <value hidden>
+SHARWA_MIGRATION_USER= <value hidden>
+SHARWA_MIGRATION_PASSWORD= <value hidden>
+REDIS_DURABLE_PASSWORD= <value hidden>
+REDIS_CACHE_PASSWORD= <value hidden>
+SHARWA_AI_GATEWAY_API_KEY= <value hidden>
+SHARWA_AI_GATEWAY_WEBHOOK_SECRET= <value hidden>
+MINIO_TEST_ACCESS_KEY= <value hidden>
+MINIO_TEST_SECRET_KEY= <value hidden>
+MINIO_TEST_BUCKET_NAME= <value hidden>
+
+################ F. does redis-cache require a password? (correct test: clear REDISCLI_AUTH first) ################
+--- redis-cache, REDISCLI_AUTH cleared ---
+NOAUTH Authentication required.
+
+--- redis-durable, REDISCLI_AUTH cleared (re-testing my earlier unreliable PONG) ---
+NOAUTH Authentication required.
+
+--- is REDISCLI_AUTH actually set inside those containers? (presence only) ---
+redis-cache: REDISCLI_AUTH IS set
+redis-durable: REDISCLI_AUTH IS set
+
+################ G. git state ################
+be5debe P0.6 Batch A: operational readiness (G10, disasters 19/21 baseline) - readyz, metrics, graceful shutdown, H12 logging
+ac86d7a P0.5: session lifecycle state machine (G6 reconnect, G7 lease/fencing, G8 human takeover)
+97c8dc5 P0.4: durable outbound send queue (disasters #4/#5/#17) + FakeWaDriver (OQ-7)
+4d96e0e feat(media): close P0.3 — real MinIO E2E acceptance tests + backpressure fix
+cf756ef feat(gateway): P0.3 media handling - streaming download/upload, quotas, magic-byte verification
+215e70b docs(P0.2): close out P0.2 acceptance in P0_PROGRESS.md, flip PHASE_GATE to DONE
+1914b6f test(gateway): add real-redis P0.2 acceptance suite (a/b/c from PROMPT_P0_DEEPSEEK)
+f342950 fix(gateway): own auth_sessions dir before VOLUME to avoid EACCES on fresh volumes
+fa980c5 P0.2: fix two gateway-forwarder startup bugs found on first real Docker run
+fdec236 P0.2: add gateway/gateway-forwarder to docker-compose.yml (R3_DIRECTIVE)
+31a902a P0.2: write an identity_update WAL entry on lid->phone resolution (R3_DIRECTIVE, G12)
+4766966 P0.2: integrate WAL ingestion pipeline into sessions.js/index.js
+--- current branch / status (short) ---
+master
+ M docs/P0_DEVIATIONS.md
+ M docs/P0_FINDINGS.md
+ M gateway/.env.example
+ M gateway/src/__tests__/outbound_chaos.test.js
+ M gateway/src/config.js
+ M gateway/src/index.js
+ M gateway/src/metrics.js
+ M gateway/src/outbound/queue.js
+ M gateway/src/sessions.js
+?? gateway/src/__tests__/killswitch.test.js
+?? gateway/src/killswitch.js
+--- any CRLF files? (audit-3 item; empty = good) ---
+  (none)
+
+################ H. host resources (Batch C mem_limit decisions need real numbers) ################
+4
+               total        used        free      shared  buff/cache   available
+Mem:            7941        1215        6058          55        1030        6726
+Swap:              0           0           0
+--- docker stats snapshot ---
+sharwa_ai-gateway-forwarder-1	27.89MiB / 128MiB	0.00%
+sharwa_ai-gateway-1	60.88MiB / 512MiB	0.02%
+sharwa_ai-pgbouncer-1	3.793MiB / 64MiB	0.03%
+sharwa_ai-postgres-1	72.32MiB / 1.5GiB	0.02%
+sharwa_ai-redis-cache-1	4.062MiB / 128MiB	5.55%
+sharwa_ai-redis-durable-1	15.6MiB / 320MiB	1.44%
+
+################ I. containers (note the stray gateway-run-* one) ################
+sharwa_ai-gateway-forwarder-1	Up 3 days	de2be7c436c1
+sharwa_ai-gateway-1	Up 3 days (healthy)	de2be7c436c1
+sharwa_ai-pgbouncer-1	Up 4 days (healthy)	edoburu/pgbouncer:v1.25.2-p0
+sharwa_ai-postgres-1	Up 4 days (healthy)	sharwa_ai-postgres
+sharwa_ai-redis-cache-1	Up 3 days (healthy)	redis:7.4-alpine
+sharwa_ai-redis-durable-1	Up 3 days (healthy)	redis:7.4-alpine
+
+################ J. toolchain versions available on the host ################
+node: v22.23.2
+npm: 10.9.8
+python3: Python 3.12.3
+pip3: ./p0_full_diagnostic.sh: line 69: pip3: command not found
+docker: Docker version 29.1.3, build 29.1.3-0ubuntu3~24.04.2
+
+################ K. kill_switches + channel_accounts schema (exact columns - P0.7 core API needs them) ################
+71:CREATE TABLE kill_switches (
+72-  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+73-  scope      text NOT NULL CHECK (scope IN ('global','tenant','channel_account')),
+74-  scope_id   uuid,
+75-  capability text NOT NULL CHECK (capability IN
+76-             ('*','ai_reply','marketing','broadcast','geocode_auto','gift','fit','checkout','back_in_stock','media')),
+77-  state      text NOT NULL CHECK (state IN ('on','degraded','off')),
+78-  reason     text,
+79-  set_by     text NOT NULL,
+80-  set_at     timestamptz NOT NULL DEFAULT now(),
+81-  CHECK ((scope = 'global') = (scope_id IS NULL)),
+82-  UNIQUE NULLS NOT DISTINCT (scope, scope_id, capability)
+83-);
+84-
+85--- Most restrictive of (global, tenant, channel) x (capability, '*') wins: off > degraded > on.
+86-CREATE OR REPLACE FUNCTION app.effective_switch(p_tenant uuid, p_channel uuid, p_capability text)
+87-RETURNS text LANGUAGE sql STABLE AS $$
+88-  SELECT COALESCE(
+89-    (SELECT CASE max(CASE state WHEN 'off' THEN 2 WHEN 'degraded' THEN 1 ELSE 0 END)
+90-              WHEN 2 THEN 'off' WHEN 1 THEN 'degraded' ELSE 'on' END
+91-       FROM kill_switches
+92-      WHERE capability IN (p_capability, '*')
+93-        AND ( scope = 'global'
+--- channel_accounts ---
+57:CREATE TABLE channel_accounts (
+58-  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+59-  tenant_id   uuid NOT NULL REFERENCES tenants(id),
+60-  type        text NOT NULL CHECK (type IN ('whatsapp_baileys','whatsapp_cloud','instagram','livechat')),
+61-  session_id  text NOT NULL UNIQUE,                         -- opaque, generated by the platform (never by the gateway)
+62-  phone_e164  text,
+63-  engine      text NOT NULL DEFAULT 'django' CHECK (engine IN ('django','ai_core')),  -- strangler switch (risk #25)
+64-  status      text NOT NULL DEFAULT 'unknown'
+65-              CHECK (status IN ('unknown','qr_pending','connected','reconnecting','disconnected','logged_out','conflict','banned')),
+66-  created_at  timestamptz NOT NULL DEFAULT now()
+67-);
+68-CREATE INDEX ON channel_accounts (tenant_id);
+69-
+70--- Kill switches (risk #19). Global rows have NULL scope_id. No RLS: managed by admin API only.
+71-CREATE TABLE kill_switches (
+72-  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+73-  scope      text NOT NULL CHECK (scope IN ('global','tenant','channel_account')),
+74-  scope_id   uuid,
+75-  capability text NOT NULL CHECK (capability IN
+--- effective_switch function, if any ---
+86:CREATE OR REPLACE FUNCTION app.effective_switch(p_tenant uuid, p_channel uuid, p_capability text)
+818:GRANT EXECUTE ON FUNCTION app.current_tenant(), app.effective_switch(uuid, uuid, text),
+
+################ L. PHASE_GATE + P0_PROGRESS current content ################
+P0: IN PROGRESS — P0.0 done, P0.1 verified on real Docker at C1. P0.2 DONE (acceptance criteria a/b/c/d verified on real Docker + real redis-durable, see docs/P0_PROGRESS.md P0.2 §2.6; a real WhatsApp phone connection is explicitly out of P0.2's official acceptance scope, deferred as a separate operational smoke test). P0.3–P0.8 remaining.
+P1: LOCKED
+P2: LOCKED
+P3: LOCKED
+P4: LOCKED
+P5: LOCKED
+
+--- P0_PROGRESS.md (last 25 lines) ---
+
+### 3.3 الانحدار — لا كسر لأي شيء قائم
+
+```
+✔ (أ) 1000x redelivery of the same provider_message_id against REAL redis-durable -> exactly one stream entry
+✔ (ب) redis-durable unreachable during ingest -> spool captures it -> drainSpool (real client) delivers with no loss
+✔ (ج) a real Baileys-shaped location message reaches the REAL stream with its coordinates
+✔ (P0.3) 200x concurrent media-quota reservations against REAL redis-durable respect a 20-file cap exactly, atomically
+tests 4 / pass 4 / fail 0
+```
+ومجموعة `node --test` الكاملة (السريعة/الحتمية، بلا MinIO): **79/79 ناجح**. hunt_gate بعد الكتابة: 3 مخالفات — كلها في سكربتات batch مؤقتة في جذر المستودع (`batch_p02_real_redis_integration.sh`, `batch_p03_close_minio_e2e.sh`, `batch_p03_hunt_gate_fix.sh`)، **لا شيء في `gateway/src`**. المكدّس الحي (`gateway`/`gateway-forwarder`/`postgres`/`pgbouncer`/`redis-*`) ظلّ يعمل بلا انقطاع طوال التشغيل (تحقَّق `docker compose ps` بعده).
+
+### 3.4 الانحرافات المسجَّلة (تفاصيلها الكاملة في `docs/P0_DEVIATIONS.md`)
+
+- **D-15:** مقاييس P0.3 الأربعة (`media_bytes_total`/`media_inflight`/`media_failures_total{reason}`/`media_duration_seconds`) مُنفَّذة كمحاسَبة داخلية حقيقية الآن (`getMediaMetrics()`)، مُستخدَمة فعلياً في اختبار القبول E2 لإثبات `media_inflight ≤ 3`. تعريض `/metrics` HTTP العام مؤجَّل إلى P0.6 (نص المرجع الرسمي يضعه هناك صراحة).
+- **D-16:** اختبارات القبول تستدعي `downloadAndUploadMedia` مباشرة بحمولات تدفق اصطناعية حقيقية بدل عبر `FakeWaDriver` — لأن `FakeWaDriver`/بنية `driver/` المنصوص عليها في P0.2 **غير موجودة فعلياً** في الكود (تعارض حقيقي مع `P0_PROGRESS.md` §2.5 القديم الذي افترض إنجازها؛ مسجَّل كسؤال مفتوح OQ-7).
+- **D-17:** خدمتا `minio`/`minio-init` الاختباريتان تسحبان من `quay.io` بدل Docker Hub (الذي أزال مستودعَي `minio/minio`/`minio/mc` بالكامل بتاريخ 2026-09-12) — مقصور على الخدمتين الاختباريتين المؤقتتين، لا أثر على المكدّس الحي.
+
+### 3.5 سؤال مفتوح لم يُحسَم (OQ-7)
+
+عدم وجود `FakeWaDriver` فعلياً في الكود (رغم ذكرها في `P0_PROGRESS.md` §2.5 القديم) يحتاج قراراً من المالك قبل P0.5، التي تفترض وجودها لاختبارات الحاملتين المزدوجتين وأكواد قطع الاتصال. التفاصيل الكاملة في `docs/P0_OPEN_QUESTIONS.md` OQ-7.
+
+---
+
+**الحالة: ✅ P0.3 مكتملة — معيار قبول P0.3 محقَّق بالكامل (اختبارات E1-E4 الأربعة ضد MinIO و`redis-durable` حقيقيَّين + انحدار 4/4 + المجموعة الكاملة 79/79). عيب backpressure حقيقي اكتُشف وأُصلح أثناء بناء الاختبار، بأثر مقاس قبل/بعد. لم يُنجَز بعد: commit التغييرات (media.js، ملفا الاختبار الجديدان، docker-compose.test.yml، توثيقات D-15/D-16/D-17/OQ-7/F5) — خطوة منفصلة تالية بعد مراجعتك.**
+
+################ M. gateway package.json scripts + deps ################
+{
+  "name": "sharwa-ai-gateway",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "test": "node scripts/run-tests.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1136.0",
+    "@aws-sdk/lib-storage": "^3.1136.0",
+    "@whiskeysockets/baileys": "6.7.24",
+    "express": "^4.21.2",
+    "file-type": "^22.1.1",
+    "ioredis": "^5.11.1",
+    "pino": "^9.6.0",
+    "prom-client": "15.1.3",
+    "qrcode": "^1.5.4"
+  }
+}
+
+################ DONE ################
+Everything above is also saved to: p0_diagnostic_output.txt

@@ -9,6 +9,11 @@ auth_sessions/
 .env.*
 !.env.example
 
+# Generated at delivery time from .env's METRICS_TOKEN (P0.6 Batch C) - never
+# committed, mirrors the .env/.env.example split above (see
+# ops/wire_p06c.mjs / the delivery script).
+ops/prometheus/secrets/
+
 # Build output
 dist/
 coverage/

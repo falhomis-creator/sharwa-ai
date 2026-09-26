@@ -14,6 +14,7 @@ import { fileTypeFromBuffer } from 'file-type';
 import { PassThrough } from 'node:stream';
 import { once } from 'node:events';
 import { logger } from './logger.js';
+import { mediaBytesTotal, mediaInflightGauge, mediaFailuresTotal, mediaDurationSeconds } from './metrics.js';
 
 // ---------------------------------------------------------------------------
 // Size caps (env-configurable, PROMPT_P0_DEEPSEEK_PROMPT.md P0.3 defaults).
@@ -147,13 +148,19 @@ export function getMediaMetrics() {
 }
 
 // Exposed for tests only - each test suite/process should start from a clean
-// slate rather than accumulating counts across unrelated test cases.
+// slate rather than accumulating counts across unrelated test cases. Only the
+// in-process mediaMetrics object and the Prometheus GAUGE (media_inflight) are
+// reset here - the Prometheus COUNTERS (media_bytes_total/failures/duration)
+// are never reset by a test helper: a real Counter must never decrease (P0.6
+// closure - see metrics.js's own comment on this).
 export function resetMediaMetrics() {
   mediaMetrics = { inflight: 0, bytesTotal: 0, failuresByReason: Object.create(null), durationsMs: [] };
+  mediaInflightGauge.set(0);
 }
 
 function recordFailure(reason) {
   mediaMetrics.failuresByReason[reason] = (mediaMetrics.failuresByReason[reason] || 0) + 1;
+  mediaFailuresTotal.labels(reason).inc();
 }
 
 // ---------------------------------------------------------------------------
@@ -314,13 +321,17 @@ export async function downloadAndUploadMedia({
 
   await downloadSemaphore.acquire();
   mediaMetrics.inflight += 1;
+  mediaInflightGauge.inc();
   const startedAt = Date.now();
   let released = false;
   const releaseOnce = () => {
     if (!released) {
       released = true;
       mediaMetrics.inflight -= 1;
-      mediaMetrics.durationsMs.push(Date.now() - startedAt);
+      mediaInflightGauge.dec();
+      const durationMs = Date.now() - startedAt;
+      mediaMetrics.durationsMs.push(durationMs);
+      mediaDurationSeconds.observe(durationMs / 1000);
       downloadSemaphore.release();
     }
   };
@@ -417,6 +428,7 @@ export async function downloadAndUploadMedia({
     }
 
     mediaMetrics.bytesTotal += total;
+    mediaBytesTotal.inc(total);
     return { status: 'ok', object_key: objectKey, size: total };
   } catch (err) {
     await releaseQuota(redisClient, scope, reserveEstimate).catch((releaseErr) => {

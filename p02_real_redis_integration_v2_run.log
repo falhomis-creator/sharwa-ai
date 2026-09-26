@@ -1,0 +1,70 @@
+=== 1) rewrite gateway/src/__tests__/real_redis_integration.test.js (fixes: hunt_gate false-positive comment wording) ===
+test file written OK
+=== 2) hunt_gate (repo root) - only the gateway/ tree matters for the commit; batch_p02_*.sh scratch-file hits are expected noise (never git-added) ===
+batch_p02_real_redis_integration.sh:224: [H1] placeholder marker "placeholder"
+HUNT GATE FAILED — 1 violation(s).
+hunt_gate exit: 1
+=== 3) normal (mocked) suite on host - must stay green ===
+# Subtest: buildIdentityUpdateEvent gives different lids different provider_message_ids
+ok 65 - buildIdentityUpdateEvent gives different lids different provider_message_ids
+  ---
+  duration_ms: 1.752682
+  type: 'test'
+  ...
+1..65
+# tests 65
+# suites 0
+# pass 65
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 6100.790158
+=== 4) run the REAL 3-scenario integration suite in a one-off container ===
+    (gateway/.dockerignore excludes src/__tests__ from the built image on purpose -
+     a production image should not ship test files - so this bind-mounts the CURRENT
+     gateway/src over /app/src for this one throwaway container only. node_modules
+     still comes from the already-built image, untouched. Does NOT rebuild, does NOT
+     touch docker-compose.yml/Dockerfile, does NOT restart the live gateway/gateway-forwarder.)
+ Container sharwa_ai-redis-durable-1  Running
+✔ (أ) 1000x redelivery of the same provider_message_id against REAL redis-durable -> exactly one stream entry (1103.076787ms)
+✔ (ب) redis-durable unreachable during ingest -> spool captures it -> drainSpool (real client) delivers with no loss (166.893613ms)
+✔ (ج) a real Baileys-shaped location message reaches the REAL stream with its coordinates (31.333207ms)
+ℹ tests 3
+ℹ suites 0
+ℹ pass 3
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 4020.890906
+=== 5) confirm the live gateway/gateway-forwarder were not disturbed ===
+NAME                            IMAGE                                                                     COMMAND                  SERVICE             CREATED       STATUS                 PORTS
+sharwa_ai-gateway-1             sha256:de2be7c436c129c8f2bd5d9e4fd6f7f16debb2cd784930fcdf9aa60e91cc9ec9   "docker-entrypoint.s…"   gateway             5 hours ago   Up 5 hours (healthy)   127.0.0.1:4001->4001/tcp
+sharwa_ai-gateway-forwarder-1   sha256:de2be7c436c129c8f2bd5d9e4fd6f7f16debb2cd784930fcdf9aa60e91cc9ec9   "docker-entrypoint.s…"   gateway-forwarder   5 hours ago   Up 5 hours             4001/tcp
+=== 6) git status / diff (review before commit) ===
+On branch master
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	batch_p02_auth_sessions_perms_fix.sh
+	batch_p02_compose.sh
+	batch_p02_compose_secrets.sh
+	batch_p02_forwarder_block_timeout_fix.sh
+	batch_p02_forwarder_ready_fix.sh
+	batch_p02_identity_update.sh
+	batch_p02_integration.sh
+	batch_p02_real_redis_integration.sh
+	batch_p02_real_redis_integration_v2.sh
+	gateway/p02_real_redis_integration_v2_run.log
+	gateway/src/__tests__/real_redis_integration.test.js
+	p02_auth_sessions_perms_fix_run.log
+	p02_compose_run.log
+	p02_compose_secrets_run.log
+	p02_forwarder_block_timeout_fix_run.log
+	p02_forwarder_ready_fix_run.log
+	p02_identity_update_run.log
+	p02_integration_run.log
+	p02_real_redis_integration_run.log
+	p02_real_redis_integration_v2_run.log
+
+nothing added to commit but untracked files present (use "git add" to track)

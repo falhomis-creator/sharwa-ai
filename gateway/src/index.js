@@ -6,11 +6,13 @@ import {
   createSession,
   rehydrateSessions,
   enqueueSend,
+  getSession,
   getSessionQr,
   getSessionStatus,
   getSessionHealth,
   logoutSession,
   setRedisClient,
+  setKillSwitch,
   startLeaseSweep,
   releaseAllOwnedLeases,
   getSessionCount,
@@ -19,8 +21,9 @@ import { drainSpool } from './ingest/spool.js';
 import { createRedisClient, closeRedisClient } from './redis.js';
 import { logger } from './logger.js';
 import { config } from './config.js';
-import { registry } from './metrics.js';
+import { registry, setStreamMetricsRedisClient } from './metrics.js';
 import { getMediaMetrics } from './media.js';
+import { createKillSwitch } from './killswitch.js';
 
 const PORT = Number.parseInt(process.env.PORT ?? '4001', 10);
 const API_KEY = process.env.SHARWA_AI_GATEWAY_API_KEY ?? '';
@@ -165,6 +168,23 @@ app.post('/sessions/:id/send', async (req, res) => {
     return res.status(400).json({ error: "kind, if provided, must be one of 'interactive', 'bulk', 'marketing'" });
   }
 
+  // P0.6 Batch B (spec, literal): "A block ⇒ HTTP 423" with
+  // {error:'blocked_by_switch', capability, state, scope} - checked at
+  // REQUEST time, before the item is even enqueued. This is defense-in-depth
+  // alongside outbound/queue.js's own re-check for items already sitting in
+  // the queue when a switch flips mid-flight (that path returns
+  // failed/error_class=blocked instead, since there is no HTTP response left
+  // to send by then). killSwitchRef is null only in tests/wiring-gap
+  // contexts that never call main() - never in the real running process.
+  if (killSwitchRef) {
+    const session = getSession(req.params.id);
+    const ksCtx = session ? { tenantId: session.tenantId, channelAccountId: session.channelAccountId } : {};
+    const ks = killSwitchRef.checkSend(kind || 'interactive', ksCtx);
+    if (!ks.allowed) {
+      return res.status(423).json({ error: 'blocked_by_switch', capability: ks.capability, state: ks.state, scope: ks.scope });
+    }
+  }
+
   let result;
   try {
     result = await enqueueSend(req.params.id, to, text, {
@@ -224,6 +244,11 @@ let drainTimer = null;
 let redisClientRef = null;
 let spoolNonEmptySince = null;
 let isShuttingDown = false;
+// P0.6 Batch B: set in main() once killswitch.js's instance has completed
+// its initial sync - null before that (and in any test that imports `app`
+// without calling main()), which POST /sessions/:id/send's check above
+// treats as "kill-switch subsystem not running here", not as "blocked".
+let killSwitchRef = null;
 
 /** P0.6 (spec, literal): poll GET_MEDIA_METRICS().inflight until it drains to 0 or timeoutMs elapses - never blocks shutdown forever on a stuck download. */
 async function waitForInflightDownloadsToDrain(timeoutMs) {
@@ -260,6 +285,53 @@ async function main() {
     logger.error({ err: err.message }, '[index] redis-durable client error');
   });
   setRedisClient(client);
+
+  // P0.6 closure (Batch C): give stream_length/stream_pending's collect()
+  // callbacks (metrics.js) the same, already-connected redis-durable client -
+  // never a second connection just for metrics scrapes.
+  setStreamMetricsRedisClient(client);
+
+  // F18 (found during P0.6 closure research, docs/P0_FINDINGS.md): the
+  // literal P0.2 spec text requires the `core-ingest` consumer group to be
+  // created "عند إقلاع البوابة" (at GATEWAY startup) via
+  // `XGROUP CREATE ... MKSTREAM`, with no consumer until P1 - but this call
+  // never existed anywhere in the real code (only `legacy-forwarder` was
+  // ever created, in forwarder.js, a separate process). Fixed here, in the
+  // one place the spec actually asks for it, mirroring forwarder.js's own
+  // ensureGroup() exactly (BUSYGROUP on an already-created group is not an
+  // error - idempotent across restarts).
+  for (let i = 0; i < config.ingestShards; i += 1) {
+    try {
+      await client.xgroup('CREATE', `in:${i}`, config.coreIngestGroup, '0', 'MKSTREAM');
+    } catch (err) {
+      if (!String(err.message).includes('BUSYGROUP')) {
+        logger.error({ stream: `in:${i}`, err: err.message }, '[index] failed to create core-ingest consumer group (F18)');
+      }
+    }
+  }
+
+  // P0.6 Batch B: start the kill-switch subsystem (its own two dedicated
+  // redis-cache connections - one command, one subscriber, per
+  // killswitch.js's own comment on why they must be separate) and wire it
+  // into sessions.js BEFORE rehydrateSessions() below can start any
+  // session's outbound worker, so no worker ever runs with kill-switch
+  // checking unwired in the real process. start() runs its initial full
+  // resync before resolving, so the very first check after this line
+  // reflects real redis-cache state (or, if redis-cache is unreachable at
+  // boot, isStale() is already true from the start - the same fail-closed
+  // posture the staleness rule intends).
+  killSwitchRef = createKillSwitch();
+  try {
+    await killSwitchRef.start();
+  } catch (err) {
+    // H3: never let an unreachable redis-cache at boot crash the whole
+    // gateway - the staleness fail-closed rule (marketing/broadcast only)
+    // is exactly the documented degraded-mode behavior for this. Every
+    // other capability keeps its all-'on' default until redis-cache comes
+    // back and a resync tick succeeds.
+    logger.error({ err: err.message }, '[index] killswitch initial start failed; continuing with fail-closed marketing/broadcast until redis-cache is reachable');
+  }
+  setKillSwitch(killSwitchRef);
 
   // Periodically replay anything that was spooled while Redis was unreachable.
   // P0.6: also tracks spoolNonEmptySince for GET /readyz's staleness check -
@@ -323,6 +395,17 @@ async function main() {
     await drainSpool(client).catch((err) => {
       logger.error({ err: err.message }, '[index] final spool flush failed');
     });
+
+    // P0.6 Batch B: stop the kill-switch subsystem's own two redis-cache
+    // connections. Placed after releaseAllOwnedLeases (no outbound worker
+    // still has a live socket to send through by then) and before the
+    // redis-durable client close, matching this function's existing
+    // outermost-to-innermost teardown order.
+    if (killSwitchRef) {
+      await killSwitchRef.stop().catch((err) => {
+        logger.error({ err: err.message }, '[index] killswitch shutdown failed');
+      });
+    }
 
     await closeRedisClient(client);
     clearTimeout(forceExitTimer);

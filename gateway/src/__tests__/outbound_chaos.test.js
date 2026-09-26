@@ -52,8 +52,27 @@ function spawnChild(sessionId) {
     },
   });
   const lines = [];
+  const errLines = [];
   child.stdout.on('data', (buf) => { lines.push(...buf.toString().split('\n').filter(Boolean)); });
-  return { child, lines };
+  // stderr is drained as well as captured, for two separate reasons: the
+  // child's own PROGRESS_TICK_SKIPPED / crash output is real evidence when a
+  // timing assertion below fails (see childEvidence), AND a piped stream that
+  // is never read can fill its ~64KB pipe buffer and block the writing child
+  // mid-test - which would present as an unexplained stall with no clue as to
+  // the cause.
+  child.stderr.on('data', (buf) => { errLines.push(...buf.toString().split('\n').filter(Boolean)); });
+  return { child, lines, errLines };
+}
+
+// The child's own output is the ONLY evidence of why a timing assertion here
+// failed: did it even reach CHILD_READY, did RECOVERY run, what did the
+// PROGRESS ticks report, did it die writing something to stderr? A real
+// failure of this test on the VPS (docs/P0_FINDINGS.md F14) was undiagnosable
+// precisely because that output was being captured and then never shown, so
+// every assertion below now carries it.
+function childEvidence(lines, errLines) {
+  const tail = (arr, n) => (arr.length ? arr.slice(-n).join(' | ') : '(no output at all)');
+  return `\n    child stdout (last 12): ${tail(lines, 12)}\n    child stderr (last 6): ${tail(errLines, 6)}`;
 }
 
 async function waitFor(predicate, timeoutMs, intervalMs = 30) {
@@ -65,7 +84,7 @@ async function waitFor(predicate, timeoutMs, intervalMs = 30) {
   return false;
 }
 
-test('(P0.4 chaos) 50 queued messages survive 5x kill -9 + restart with zero loss; duplicates measured and bounded by kill count', async () => {
+test('(P0.4 chaos) 50 queued messages survive 5x kill -9 + restart with zero loss; duplicates measured and bounded by kill count', async (t) => {
   const sessionId = `chaos-${crypto.randomUUID()}`;
   // Unique destination per test run (not a fixed literal): the token bucket
   // (outbound/tokenBucket.js) is real and keyed by `to` number in real Redis,
@@ -87,7 +106,7 @@ test('(P0.4 chaos) 50 queued messages survive 5x kill -9 + restart with zero los
   assert.equal(initialDepth, N);
 
   let killsPerformed = 0;
-  let { child, lines } = spawnChild(sessionId);
+  let { child, lines, errLines } = spawnChild(sessionId);
   // Bug fixed while writing this test (H8): a ChildProcess's 'exit' event
   // fires exactly once — registering `.once('exit', ...)` AFTER a process has
   // already exited never fires (Node does not replay past events), which
@@ -97,13 +116,30 @@ test('(P0.4 chaos) 50 queued messages survive 5x kill -9 + restart with zero los
   // actually still running.
   let childAlive = true;
 
+  // Cleanup that runs whether this test PASSES OR FAILS (the happy-path
+  // kill+wait further down only runs when every assertion passed). Without
+  // this, an assertion throwing mid-round leaves the forked child running,
+  // and a fork()'d child's live IPC channel is a libuv handle on the parent
+  // side: the test file's event loop never drains, so node:test prints the
+  // failure and then hangs forever waiting to exit - which is exactly what
+  // happened for real on the VPS (a human had to Ctrl+C after ~4 minutes),
+  // and what reproduced locally the moment the round-0 assertion was forced
+  // to fail. See docs/P0_FINDINGS.md F14.
+  t.after(() => {
+    if (childAlive) {
+      child.kill('SIGKILL');
+      childAlive = false;
+    }
+    if (child.connected) child.disconnect();
+  });
+
   for (let round = 0; round < KILLS; round++) {
     // Let it make real progress (at least a couple of confirmed sends) before killing.
     const madeProgress = await waitFor(async () => {
       const confirmed = await redis.llen(`chaos:confirmed:${sessionId}`);
       return confirmed >= 2;
     }, 5000);
-    assert.ok(madeProgress, `round ${round}: child should have sent at least 2 messages before being killed`);
+    assert.ok(madeProgress, `round ${round}: child should have sent at least 2 messages before being killed${childEvidence(lines, errLines)}`);
 
     child.kill('SIGKILL');
     await new Promise((resolve) => child.once('exit', resolve));
@@ -116,7 +152,7 @@ test('(P0.4 chaos) 50 queued messages survive 5x kill -9 + restart with zero los
     const inflight = await redis.llen(_keys.inflightKey(sessionId));
     if (depth === 0 && inflight === 0) break;
 
-    ({ child, lines } = spawnChild(sessionId));
+    ({ child, lines, errLines } = spawnChild(sessionId));
     childAlive = true;
   }
 
@@ -127,7 +163,7 @@ test('(P0.4 chaos) 50 queued messages survive 5x kill -9 + restart with zero los
     const inflight = await redis.llen(_keys.inflightKey(sessionId));
     return depth === 0 && inflight === 0;
   }, 30000);
-  assert.ok(drained, 'queue and inflight must both fully drain');
+  assert.ok(drained, `queue and inflight must both fully drain${childEvidence(lines, errLines)}`);
 
   if (childAlive) {
     child.kill('SIGTERM');

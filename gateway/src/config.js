@@ -205,6 +205,17 @@ function buildConfig(env, problems) {
   // intFrom - it's a string).
   const metricsToken = read('METRICS_TOKEN', '');
 
+  // P0.6 closure (Batch C, my own addition - not from the literal spec text,
+  // which only describes the GATEWAY's own /metrics): the forwarder is a
+  // separate OS process with no HTTP server at all today (D-22's own
+  // recorded reason monitoring was deferred). Giving it a small, dedicated
+  // /healthz+/metrics server (forwarder.js, forwarder_metrics.js) needs its
+  // own port, distinct from the gateway's PORT (4001) since both can run on
+  // the same host/network. 4002 keeps the existing "gateway uses 4001"
+  // convention obviously adjacent, not overlapping.
+  const forwarderMetricsPort = intFrom(env.FORWARDER_METRICS_PORT, 'FORWARDER_METRICS_PORT', 4002);
+  if (forwarderMetricsPort < 1 || forwarderMetricsPort > 65535) problems.push('FORWARDER_METRICS_PORT out of range');
+
   // /readyz (spec, literal): 503 if spool has been non-empty for longer than
   // this. Reused as the same threshold for the Prometheus alert rule
   // "spool غير فارغ > 5 دقائق" (ops/prometheus/alerts.yml) - one number, one
@@ -235,6 +246,28 @@ function buildConfig(env, problems) {
   if (redisTimeoutMs < 100) problems.push('REDIS_TIMEOUT_MS must be >= 100');
   if (redisMaxRetries < 0) problems.push('REDIS_MAX_RETRIES must be >= 0');
 
+  // P0.6 Batch B: redis-cache connection - the fast copy of kill-switch
+  // state (Postgres kill_switches, written only by core/api, is P0.7 scope
+  // and does not exist yet; this gateway only ever READS the redis-cache
+  // mirror - see gateway/src/killswitch.js). Mirrors the redis-durable block
+  // above exactly: same convention, same lazy-validation posture (H3 -
+  // reachability is validated by redis.js at connection time, not here).
+  const redisCacheHost = read('REDIS_CACHE_HOST', '127.0.0.1');
+  const redisCachePort = intFrom(env.REDIS_CACHE_PORT, 'REDIS_CACHE_PORT', 6379);
+  const redisCachePassword = read('REDIS_CACHE_PASSWORD', '');
+  const redisCacheTimeoutMs = intFrom(env.REDIS_CACHE_TIMEOUT_MS, 'REDIS_CACHE_TIMEOUT_MS', 5000);
+  const redisCacheMaxRetries = intFrom(env.REDIS_CACHE_MAX_RETRIES, 'REDIS_CACHE_MAX_RETRIES', 3);
+  if (redisCachePort < 1 || redisCachePort > 65535) problems.push('REDIS_CACHE_PORT out of range');
+  if (redisCacheTimeoutMs < 100) problems.push('REDIS_CACHE_TIMEOUT_MS must be >= 100');
+  if (redisCacheMaxRetries < 0) problems.push('REDIS_CACHE_MAX_RETRIES must be >= 0');
+
+  // P0.6 Batch B (spec, literal): once the cached kill-switch state's age
+  // exceeds this, marketing/broadcast specifically fail closed (blocked);
+  // every other capability keeps using its last-known cached value
+  // regardless of age (gateway/src/killswitch.js's checkCapability).
+  const ksStaleMaxS = intFrom(env.KS_STALE_MAX_S, 'KS_STALE_MAX_S', 120);
+  if (ksStaleMaxS < 1) problems.push('KS_STALE_MAX_S must be >= 1');
+
   // The consumer group that the gateway creates at startup and that P1's
   // core-ingest worker will later read from. Fixed by the architecture; not a
   // tunable. Legacy sessions are consumed by `legacy-forwarder` (forwarder.js).
@@ -260,9 +293,20 @@ function buildConfig(env, problems) {
       timeoutMs: redisTimeoutMs,
       maxRetries: redisMaxRetries,
     }),
+    redisCache: Object.freeze({
+      host: redisCacheHost,
+      port: redisCachePort,
+      password: redisCachePassword,
+      timeoutMs: redisCacheTimeoutMs,
+      maxRetries: redisCacheMaxRetries,
+    }),
+    killswitch: Object.freeze({
+      staleMaxS: ksStaleMaxS,
+    }),
     coreIngestGroup,
     legacyForwarderGroup,
     metricsToken,
+    forwarderMetricsPort,
     readyz: Object.freeze({
       spoolStaleS,
     }),

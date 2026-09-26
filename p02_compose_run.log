@@ -1,0 +1,5 @@
+=== 1) docker-compose.yml — add gateway/gateway-forwarder app tier ===
+docker-compose.yml patched OK
+=== 2) .env.example — document the new required/optional gateway vars ===
+.env.example patched OK
+=== 3) validate: docker compose config must parse cleanly ===

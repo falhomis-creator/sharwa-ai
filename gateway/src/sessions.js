@@ -33,6 +33,18 @@ import { acquireLease, renewLease, releaseLease, getLeaseHolder, isLeaseOwner } 
 import { createRedisClient, closeRedisClient } from './redis.js';
 import { recordSessionStateTransition, untrackSessionState, sessionReconnectsTotal, leaseLostTotal } from './metrics.js';
 
+// P0.6 Batch B: the running killswitch.js instance (created once in
+// index.js's main(), wired here the same way setRedisClient wires the
+// shared redis-durable client). null until main() calls setKillSwitch -
+// startSessionOutboundWorker's ctx.checkKillSwitch below is left unwired in
+// that case, which outbound/queue.js's checkKillSwitch() treats as
+// always-allow (documented there) - the correct behavior for unit tests
+// that never call setKillSwitch at all, never the real running process.
+let killSwitch = null;
+export function setKillSwitch(instance) {
+  killSwitch = instance;
+}
+
 // P0.6/H12: session_state{state} only counts sessions this process is
 // currently tracking - when a record is removed from `sessions` (logout,
 // LOGGED_OUT cleanup), its last-known state must come OUT of the gauge too,
@@ -324,6 +336,16 @@ export function createSessionRecord(sessionId, { sock = null } = {}) {
     since: Date.now(),        // when `status` last changed
     stopping: false,          // true once logoutSession/shutdown has started - suppresses reconnect
     authLoaded: false,        // true once useMultiFileAuthState has run once for this process
+    // P0.6 Batch B: forward-compatible plumbing ONLY - always null today.
+    // No caller anywhere passes these yet (grepped: zero matches for
+    // tenant_id/channel_account_id across the whole gateway codebase before
+    // this batch), and no mapping mechanism from a session to a real
+    // tenant/channel exists yet either (that's P0.7's job, once core/api
+    // exists). killswitch.js's own scope-fallback logic already handles
+    // "both null" correctly and is exactly the spec's documented behavior
+    // for this exact situation - see killswitch.js's file header.
+    tenantId: null,
+    channelAccountId: null,
   };
   sessions.set(sessionId, session);
   return session;
@@ -560,6 +582,15 @@ export async function startSessionOutboundWorker(session) {
   session.outboundWorkerClient = client;
   session.outboundWorker = startOutboundWorker(client, session.id, {
     getSocket: () => (session.status === 'CONNECTED' ? session.sock : null),
+    // P0.6 Batch B: undefined (not a function) when killswitch.js hasn't
+    // been wired via setKillSwitch - outbound/queue.js's checkKillSwitch()
+    // treats that as always-allow (documented there). session.tenantId/
+    // channelAccountId are always null today (see createSessionRecord's own
+    // comment) - killSwitch.checkSend resolves that through its
+    // global-only fallback, exactly the spec's own documented behavior.
+    checkKillSwitch: killSwitch
+      ? (kind) => killSwitch.checkSend(kind, { tenantId: session.tenantId, channelAccountId: session.channelAccountId })
+      : undefined,
   });
 }
 

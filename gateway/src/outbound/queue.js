@@ -30,6 +30,7 @@ import { config } from '../config.js';
 import { shardFor } from '../ingest/wal.js';
 import { logger } from '../logger.js';
 import { tryConsumeToken, tryConsumeMarketingDailyCap } from './tokenBucket.js';
+import { outBlockedTotal, outQueueDepthGauge, outSentTotal, outFailedTotal } from '../metrics.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -99,22 +100,48 @@ export async function enqueueSend(client, opts) {
   const flag = Number(res[0]);
   if (flag === 0) return { status: 'full' };
   if (flag === 2) return { status: 'duplicate', state: String(res[1]) };
+  outQueueDepthGauge.labels(kind).inc();
   await emitEvt(client, opts.sessionId, 'queued', { client_msg_id: opts.clientMsgId });
   return { status: 'queued' };
 }
 
-/** Stub kill-switch check (P0.4 scope only). P0.6 builds the real kill-switch
- * subsystem (redis-cache published state, global/tenant/channel scopes,
- * origin=human never blocked). Until then this always allows sending — a
- * documented, honest deviation (docs/P0_DEVIATIONS.md), not a silent gap. */
-function checkKillSwitch(/* sessionId, kind */) {
-  return { blocked: false };
+/**
+ * P0.6 Batch B: real kill-switch check, via `ctx.checkKillSwitch` — injected
+ * by sessions.js's startSessionOutboundWorker, itself backed by
+ * killswitch.js's real scope/state computation (see that file's header for
+ * the full design). `ctx.checkKillSwitch` is OPTIONAL so every existing
+ * unit test that builds a bare ctx ({ getSocket }) keeps working unmodified:
+ * a caller that never wires kill-switch checking gets the P0.4-era
+ * always-allow behavior — a deliberate, documented default for
+ * test/wiring-gap contexts only (never true in the real running process,
+ * where index.js's main() always starts killswitch.js and wires it into
+ * sessions.js before any session's outbound worker can start — see
+ * docs/P0_DEVIATIONS.md).
+ *
+ * @param {{ checkKillSwitch?: (kind: string) => { allowed: boolean, state?: string, scope?: string, capability?: string } }} ctx
+ * @param {string} kind
+ * @returns {{ allowed: boolean, state?: string, scope?: string, capability?: string }}
+ */
+function checkKillSwitch(ctx, kind) {
+  if (!ctx.checkKillSwitch) return { allowed: true };
+  return ctx.checkKillSwitch(kind);
 }
 
 async function requeue(client, sessionId, raw, { front = false } = {}) {
   await client.lrem(inflightKey(sessionId), 1, raw);
   if (front) await client.lpush(queueKey(sessionId), raw);
   else await client.rpush(queueKey(sessionId), raw);
+  // out_queue_depth (P0.6 closure): the item is leaving `inflight` and
+  // landing back on `queue`, so depth goes back up by one - kind is parsed
+  // from `raw` itself rather than widening every requeue() call site.
+  try {
+    const { kind } = JSON.parse(raw);
+    outQueueDepthGauge.labels(kind ?? 'interactive').inc();
+  } catch {
+    // raw is always this module's own serialized item (see enqueueSend) - a
+    // parse failure here would mean corruption elsewhere, already surfaced
+    // by processOne's own JSON.parse(raw) a few lines above every call site.
+  }
 }
 
 async function resolveInflight(client, sessionId, raw) {
@@ -141,8 +168,8 @@ function bucketKindFor(kind) {
  * @param {import('ioredis').Redis} client
  * @param {string} sessionId
  * @param {string} raw               The exact JSON string as stored (needed for LREM).
- * @param {{ getSocket: () => object|null }} ctx
- * @returns {Promise<{ outcome: 'sent'|'requeued'|'expired'|'failed' }>}
+ * @param {{ getSocket: () => object|null, checkKillSwitch?: (kind: string) => object }} ctx
+ * @returns {Promise<{ outcome: 'sent'|'requeued'|'expired'|'failed', reason?: string }>}
  */
 export async function processOne(client, sessionId, raw, ctx) {
   const item = JSON.parse(raw);
@@ -150,14 +177,32 @@ export async function processOne(client, sessionId, raw, ctx) {
   if (Date.now() - item.enqueued_at > ttlFor(item.kind)) {
     await resolveInflight(client, sessionId, raw);
     await emitEvt(client, sessionId, 'failed', { client_msg_id: item.client_msg_id, error_class: 'expired' });
+    outFailedTotal.labels('expired').inc();
     return { outcome: 'expired' };
   }
 
-  const ks = checkKillSwitch(sessionId, item.kind);
-  if (ks.blocked) {
-    await requeue(client, sessionId, raw);
-    await sleep(200);
-    return { outcome: 'requeued' };
+  // P0.6 Batch B (spec, literal): "items already sitting in the outbound
+  // queue when a switch flips are re-checked immediately before send and
+  // become failed(error_class='blocked')" — NOT silently requeued forever
+  // (the P0.4-era stub's behavior). This is the queue-side half of
+  // enforcement; index.js's POST /sessions/:id/send route additionally
+  // rejects a brand-new send at request time (423) if already blocked then.
+  const ks = checkKillSwitch(ctx, item.kind);
+  if (!ks.allowed) {
+    await resolveInflight(client, sessionId, raw);
+    await emitEvt(client, sessionId, 'failed', {
+      client_msg_id: item.client_msg_id,
+      error_class: 'blocked',
+      capability: ks.capability,
+      state: ks.state,
+      scope: ks.scope,
+    });
+    outBlockedTotal.labels(ks.capability ?? 'unknown').inc();
+    logger.info(
+      { sessionId, client_msg_id: item.client_msg_id, capability: ks.capability, state: ks.state, scope: ks.scope },
+      '[outbound] send blocked by kill-switch',
+    );
+    return { outcome: 'failed', reason: 'blocked' };
   }
 
   const bucketKind = bucketKindFor(item.kind);
@@ -222,6 +267,7 @@ export async function processOne(client, sessionId, raw, ctx) {
       error: lastErr.message,
     });
     logger.error({ sessionId, client_msg_id: item.client_msg_id, err: lastErr.message }, '[outbound] send failed after max attempts');
+    outFailedTotal.labels('retryable').inc();
     return { outcome: 'failed' };
   }
 
@@ -232,6 +278,7 @@ export async function processOne(client, sessionId, raw, ctx) {
   await client.set(idemKey(sessionId, item.client_msg_id), waMessageId, 'EX', config.outbound.idemTtlS);
   await resolveInflight(client, sessionId, raw);
   await emitEvt(client, sessionId, 'sent', { client_msg_id: item.client_msg_id, wa_message_id: waMessageId });
+  outSentTotal.inc();
   return { outcome: 'sent' };
 }
 
@@ -259,6 +306,16 @@ export function startOutboundWorker(client, sessionId, ctx) {
         continue;
       }
       if (!raw) continue; // timeout — loop back and re-check state.running
+      // out_queue_depth (P0.6 closure): the item just moved queue -> inflight
+      // via the BLMOVE above, so depth goes down by one right here (not
+      // inside processOne, which only ever sees an item already in inflight).
+      try {
+        const { kind } = JSON.parse(raw);
+        outQueueDepthGauge.labels(kind ?? 'interactive').dec();
+      } catch {
+        // see requeue()'s identical try/catch above for why this can't happen
+        // in practice - never let a parse issue crash the worker loop (H3).
+      }
       try {
         await processOne(client, sessionId, raw, ctx);
       } catch (err) {
@@ -295,6 +352,17 @@ export async function recoverInflight(client, sessionId) {
     } else {
       await client.lpush(queueKey(sessionId), raw);
       requeued += 1;
+      // out_queue_depth (P0.6 closure): this item is landing back on `queue`
+      // directly (bypassing requeue() - it was never re-added to `inflight`
+      // in the first place, so there is nothing for requeue()'s own LREM to
+      // do), so the depth gauge must be incremented here too.
+      try {
+        outQueueDepthGauge.labels(item.kind ?? 'interactive').inc();
+      } catch {
+        // item is already a parsed object here (JSON.parse succeeded above
+        // to read client_msg_id) - this can only fail if labels() itself
+        // throws, never silently swallowed (H3).
+      }
     }
   }
   if (confirmedSent > 0 || requeued > 0) {

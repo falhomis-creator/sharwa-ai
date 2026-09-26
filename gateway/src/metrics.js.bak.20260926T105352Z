@@ -1,0 +1,123 @@
+// gateway/src/metrics.js
+// P0.6 (G10, H12): Prometheus metrics, served (Bearer-token-protected) at
+// GET /metrics by index.js.
+//
+// Scope of THIS phase's wiring (Batch A): the default process/runtime
+// metrics (collectDefaultMetrics - confirmed, not guessed, to produce the
+// exact names the spec requires: process_resident_memory_bytes,
+// nodejs_heap_size_used_bytes, process_open_fds - see docs/P0_DEVIATIONS.md)
+// plus the three session-lifecycle metrics this phase's own code touches
+// directly: session_state, session_reconnects_total, lease_lost_total.
+//
+// Batch B addition: killswitch_state{scope,capability} and
+// killswitch_stale_seconds (both wired to killswitch.js's real sync points)
+// plus out_blocked_total{capability} (wired to outbound/queue.js's real
+// kill-switch-blocked outcome) - each added in the same change that gives it
+// a real increment/update point, same posture as Batch A's three
+// session-lifecycle metrics.
+//
+// Still deliberately NOT defined here: ingest_*, forwarder_*, dlq_length,
+// stream_*, media_* - the rest of the spec's fixed-name list. A metric
+// registered but never incremented reads as a confirmed "0" to whoever is
+// watching it (an ops dashboard, an alert rule) when the true answer is
+// "not wired" - that is exactly the kind of fabricated-looking data H1
+// forbids, just wearing a metrics hat instead of a report hat. Those
+// families land with Batch C's wiring pass across
+// wal.js/forwarder.js/media.js - never speculatively ahead of that.
+
+import client from 'prom-client';
+
+export const registry = new client.Registry();
+
+client.collectDefaultMetrics({ register: registry });
+
+// session_state{state}: how many currently-tracked sessions are in each
+// status value (the same frozen vocabulary mapConnectionStatus produces -
+// CONNECTED/CONNECTING/DISCONNECTED/etc). A gauge, not a counter: a session
+// moving CONNECTING -> CONNECTED must decrement the old label and increment
+// the new one, never just accumulate.
+export const sessionStateGauge = new client.Gauge({
+  name: 'session_state',
+  help: 'Number of sessions currently in each lifecycle state (P0.5 mapConnectionStatus vocabulary).',
+  labelNames: ['state'],
+  registers: [registry],
+});
+
+/**
+ * Record a session's status transition. Call with the OLD and NEW status
+ * every time `session.status` actually changes (mirrors the existing
+ * `if (session.status !== prevStatus)` guard in sessions.js - never call
+ * this on a non-transition, or the gauge double-counts).
+ *
+ * @param {string|null} prevState  Previous status, or null on first transition.
+ * @param {string} nextState       New status.
+ */
+export function recordSessionStateTransition(prevState, nextState) {
+  if (prevState) sessionStateGauge.labels(prevState).dec();
+  sessionStateGauge.labels(nextState).inc();
+}
+
+/**
+ * Remove a session's last-known state from the gauge entirely - call this
+ * when the session's in-memory record is deleted (logout, LOGGED_OUT
+ * cleanup), never on an ordinary state transition (use
+ * recordSessionStateTransition for that).
+ *
+ * @param {string} lastState
+ */
+export function untrackSessionState(lastState) {
+  sessionStateGauge.labels(lastState).dec();
+}
+
+// session_reconnects_total{reason}: one increment per scheduled reconnect
+// attempt, labeled with the same reason string already used in sessions.js's
+// own log line ('conflict' | 'restart' | 'backoff' | 'backoff-after-open-error').
+export const sessionReconnectsTotal = new client.Counter({
+  name: 'session_reconnects_total',
+  help: 'Total reconnect attempts scheduled, by reason (P0.5 classifyDisconnect / open-error retry).',
+  labelNames: ['reason'],
+  registers: [registry],
+});
+
+// lease_lost_total: incremented once per real lease-loss event
+// (handleLeaseLost in sessions.js - a renewal that failed because another
+// instance now holds the lease).
+export const leaseLostTotal = new client.Counter({
+  name: 'lease_lost_total',
+  help: 'Total times this instance lost a session lease during renewal (P0.5/G7).',
+  registers: [registry],
+});
+
+// killswitch_state{scope,capability}: the last-synced severity of one
+// (scope, capability) pair from the redis-cache mirror (0=on, 1=degraded,
+// 2=off) - a gauge, set directly by killswitch.js on every successful HGETALL
+// (initial resync, periodic 30s resync, or a ks:changes-triggered refetch).
+export const killswitchStateGauge = new client.Gauge({
+  name: 'killswitch_state',
+  help: 'Last-synced kill-switch severity per scope+capability from the redis-cache mirror (0=on, 1=degraded, 2=off).',
+  labelNames: ['scope', 'capability'],
+  registers: [registry],
+});
+
+// killswitch_stale_seconds: seconds since the last successful redis-cache
+// sync of ANY scope. 0 while healthy; grows unbounded while redis-cache is
+// unreachable - the spec's own staleness signal (KS_STALE_MAX_S) made
+// observable. Refreshed on a short internal timer by killswitch.js so a
+// /metrics scrape between resync ticks still reflects the true elapsed time,
+// not a stale snapshot from the last sync.
+export const killswitchStaleSecondsGauge = new client.Gauge({
+  name: 'killswitch_stale_seconds',
+  help: 'Seconds since the last successful redis-cache kill-switch sync (P0.6 Batch B).',
+  registers: [registry],
+});
+
+// out_blocked_total{capability}: one increment per outbound queue item that
+// reached processOne() and was blocked by the kill-switch (outcome
+// failed/error_class=blocked) - wired directly at outbound/queue.js's real
+// blocked-item code path.
+export const outBlockedTotal = new client.Counter({
+  name: 'out_blocked_total',
+  help: 'Total outbound queue items blocked by the kill-switch, by capability (P0.6 Batch B).',
+  labelNames: ['capability'],
+  registers: [registry],
+});

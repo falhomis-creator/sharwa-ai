@@ -11,11 +11,24 @@
 // slow or down - disaster #5/#17). Bounded retry via XAUTOCLAIM; a message
 // that still fails after config.forwardMaxAttempts is parked on `dlq:in` and
 // logged loudly (F2: never retried forever, never dropped silently).
+//
+// P0.6 closure (Batch C, my own addition beyond the literal spec text - see
+// docs/P0_DEVIATIONS.md): this process now also serves a small, dedicated
+// Bearer-token-protected /metrics + open /healthz HTTP server on
+// config.forwarderMetricsPort, so ops/prometheus/prometheus.yml has a real
+// target to scrape here (D-22's own recorded reason monitoring was deferred:
+// "الـforwarder يعمل في حاوية منفصلة بلا نقطة HTTP تُكشَط أصلاً"). Same
+// timing-safe Bearer-token check as index.js's own /metrics, same H5 refusal
+// posture (empty METRICS_TOKEN -> refuse to start at all) for consistency.
+
+import crypto from 'node:crypto';
+import http from 'node:http';
 
 import { logger } from './logger.js';
 import { config } from './config.js';
 import { createRedisClient, closeRedisClient } from './redis.js';
 import { postInboundMessage } from './webhook.js';
+import { forwarderRegistry, forwarderAttemptsTotal, setForwarderRedisClient } from './forwarder_metrics.js';
 
 const CONSUMER_NAME = `forwarder-${process.pid}`;
 // XREADGROUP's own BLOCK parameter is a SERVER-side wait; redis.js's
@@ -133,11 +146,14 @@ async function deliverOne(client, stream, id, data) {
     if (attempts >= config.forwardMaxAttempts) {
       await client.xadd('dlq:in', '*', 'stream', stream, 'id', id, 'data', JSON.stringify(data));
       logger.error({ stream, id, attempts }, '[forwarder] message parked on dlq:in after max attempts');
+      forwarderAttemptsTotal.labels('dlq').inc();
       return true; // ACK the original entry - it now lives on the DLQ, not lost (F2)
     }
     logger.warn({ stream, id, attempts, max: config.forwardMaxAttempts }, '[forwarder] delivery failed; will retry');
+    forwarderAttemptsTotal.labels('retry').inc();
     return false;
   }
+  forwarderAttemptsTotal.labels('delivered').inc();
   return true;
 }
 
@@ -195,23 +211,96 @@ async function processStream(client, stream) {
 
 let running = true;
 
+/**
+ * P0.6 closure: timing-safe Bearer-token check, identical in shape to
+ * index.js's own isValidMetricsToken (same secret, config.metricsToken -
+ * shared across both processes via the same METRICS_TOKEN env var).
+ */
+function isValidMetricsToken(provided) {
+  if (!provided || !config.metricsToken) return false;
+  const a = Buffer.from(provided, 'utf8');
+  const b = Buffer.from(config.metricsToken, 'utf8');
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+/**
+ * Small, dedicated HTTP server for this process's /healthz + /metrics -
+ * deliberately NOT express (no other route needs a framework here; the
+ * gateway process's own index.js already depends on express for its much
+ * larger real HTTP surface, but adding that same dependency weight here for
+ * two routes would be its own unrelated deviation). Returns the raw
+ * http.Server so main() can close it during shutdown.
+ */
+function startMetricsServer() {
+  const server = http.createServer(async (req, res) => {
+    if (req.method !== 'GET') {
+      res.writeHead(405, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'method not allowed' }));
+      return;
+    }
+    if (req.url === '/healthz') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok' }));
+      return;
+    }
+    if (req.url === '/metrics') {
+      const auth = req.headers.authorization || '';
+      const provided = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : '';
+      if (!isValidMetricsToken(provided)) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'unauthorized' }));
+        return;
+      }
+      try {
+        const body = await forwarderRegistry.metrics();
+        res.writeHead(200, { 'Content-Type': forwarderRegistry.contentType });
+        res.end(body);
+      } catch (err) {
+        logger.error({ err: err.message }, '[forwarder] /metrics collection failed');
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'metrics collection failed' }));
+      }
+      return;
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'not found' }));
+  });
+  server.listen(config.forwarderMetricsPort, () => {
+    logger.info({ port: config.forwarderMetricsPort }, '[forwarder] metrics server listening');
+  });
+  return server;
+}
+
 async function main() {
+  // P0.6 closure (H5, same posture as index.js's main() - D-21): refuse to
+  // start at all with an empty/missing METRICS_TOKEN, rather than silently
+  // serving an unauthenticated (or permanently 401-ing, indistinguishable
+  // from "working but misconfigured") /metrics route.
+  if (!config.metricsToken) {
+    throw new Error('main: METRICS_TOKEN is required and must be non-empty (H5: empty secret refuses startup)');
+  }
+
   const client = createRedisClient();
   client.on('error', (err) => {
     logger.error({ err: err.message }, '[forwarder] redis-durable client error');
   });
 
   await waitForReady(client);
+  setForwarderRedisClient(client);
 
   for (const stream of streamKeys()) {
     await ensureGroup(client, stream);
   }
+
+  const metricsServer = startMetricsServer();
 
   logger.info({ streams: streamKeys(), group: config.legacyForwarderGroup, consumer: CONSUMER_NAME }, '[forwarder] started');
 
   const shutdown = async (signal) => {
     logger.info({ signal }, '[forwarder] shutting down');
     running = false;
+    await new Promise((resolve) => metricsServer.close(() => resolve()));
   };
   process.on('SIGTERM', () => { shutdown('SIGTERM'); });
   process.on('SIGINT', () => { shutdown('SIGINT'); });
@@ -232,7 +321,7 @@ async function main() {
   process.exit(0);
 }
 
-export { toWebhookPayload, deliverOne, streamKeys, shouldForwardToLegacy, waitForReady, BLOCK_MS };
+export { toWebhookPayload, deliverOne, streamKeys, shouldForwardToLegacy, waitForReady, BLOCK_MS, isValidMetricsToken };
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch((err) => {

@@ -17,6 +17,7 @@ import path from 'node:path';
 
 import { appendEvent } from './wal.js';
 import { config } from '../config.js';
+import { ingestSpoolDepthBytes, ingestSpoolOverflowTotal } from '../metrics.js';
 
 const SPOOL_FILE = 'spool.ndjson';
 
@@ -40,13 +41,20 @@ export async function spool(record, opts = {}) {
     // no spool file yet — start at 0.
   }
   if (size >= maxMb * 1024 * 1024) {
+    ingestSpoolOverflowTotal.inc();
     const err = new Error(`spool: ${file} is at cap (${maxMb}MB); refusing to grow (H4)`);
     err.code = 'SPOOL_FULL';
     throw err;
   }
 
   // On-disk shape mirrors the WAL entry: `{ session_id, event }`.
-  await appendFile(file, JSON.stringify({ session_id: record.sessionId, event: record.event }) + '\n', 'utf8');
+  const line = JSON.stringify({ session_id: record.sessionId, event: record.event }) + '\n';
+  await appendFile(file, line, 'utf8');
+  // ingest_spool_depth (P0.6 closure): updated right here rather than via a
+  // second stat() call - the new size is exactly the old size plus what was
+  // just appended (H4/H8: no extra scrape-time or write-time filesystem call
+  // needed to keep this accurate).
+  ingestSpoolDepthBytes.set(size + Buffer.byteLength(line, 'utf8'));
 }
 
 /**
@@ -122,12 +130,17 @@ export async function drainSpool(client, opts = {}) {
 
   // Atomic rewrite so a crash mid-drain cannot truncate pending entries.
   const tmp = `${file}.tmp`;
+  let rewrittenContent = '';
   if (remaining.length === 0) {
     await writeFile(tmp, '', 'utf8');
   } else {
-    await writeFile(tmp, `${remaining.join('\n')}\n`, 'utf8');
+    rewrittenContent = `${remaining.join('\n')}\n`;
+    await writeFile(tmp, rewrittenContent, 'utf8');
   }
   await rename(tmp, file);
+  // ingest_spool_depth (P0.6 closure): the rewritten file's real byte size -
+  // computed from the content just written, no extra stat() call needed.
+  ingestSpoolDepthBytes.set(Buffer.byteLength(rewrittenContent, 'utf8'));
 
   return { replayed, remaining: remaining.length, dropped };
 }

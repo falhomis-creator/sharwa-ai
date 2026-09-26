@@ -1,0 +1,239 @@
+# =============================================================================
+# Sharwa AI - docker-compose.yml (P0.1 data tier DRAFT - NOT run: no Docker yet)
+#
+# Derived from docs/reference/docker-compose.reference.yml. Originally scoped to
+# the P0.1 data layer only (PROMPT_P0 §6 P0.1 step 1); P0.1 was verified on real
+# Docker at C1 (docs/P0_C1_REPORT.md) - this file is no longer a "not run" draft.
+# P0.2 (R3_DIRECTIVE) adds the `gateway`/`gateway-forwarder` app tier below.
+# worker-*/scheduler/api/prometheus remain ABSENT - still out of scope.
+#
+# Rules applied:
+#   - every container has mem_limit + memswap_limit + cpus + pids_limit + log cap
+#     + restart + healthcheck (risk #16).
+#   - PostgreSQL gets oom_score_adj: -900 and lives on the internal `data` network
+#     (never published to the host) - risk #16 / #2.
+#   - redis-durable uses AOF fsync=always + noeviction; redis-cache is lossy
+#     allkeys-lru with no persistence (risk #17 / #5).
+#   - secrets come from a gitignored root `.env` via ${VAR:?error} - no defaults.
+#   - every image tag is an explicit version - NO `latest` (deviation from the
+#     reference is recorded in docs/P0_DEVIATIONS.md).
+#
+# Memory budget: data tier (postgres 1536 + pgbouncer 64 + redis-durable 320 +
+# redis-cache 128 = 2048 MB) + app tier (gateway 512 + gateway-forwarder 128 =
+# 640 MB) = 2688 MB, leaving ~5.3 GB of an 8 GB host for the OS, page cache, and
+# the still-absent api/prometheus tiers. The gateway/gateway-forwarder limits
+# are a FIRST-PASS ESTIMATE (Baileys per-session memory not yet load-tested
+# under P0.2) - revisit once real WhatsApp sessions run under load.
+# =============================================================================
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  # ---------------------------------------------------------------- data tier
+  postgres:
+    build: ./ops/postgres                 # postgis/postgis:16-3.4 + postgresql-16-pgvector + pg_trgm
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required (see .env)}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (see .env)}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required (see .env)}
+      # Role bootstrap (10_roles.sh) reads these; LOGIN roles inherit the base roles.
+      SHARWA_APP_USER: ${SHARWA_APP_USER:?SHARWA_APP_USER is required (see .env)}
+      SHARWA_APP_PASSWORD: ${SHARWA_APP_PASSWORD:?SHARWA_APP_PASSWORD is required (see .env)}
+      SHARWA_SYSTEM_USER: ${SHARWA_SYSTEM_USER:?SHARWA_SYSTEM_USER is required (see .env)}
+      SHARWA_SYSTEM_PASSWORD: ${SHARWA_SYSTEM_PASSWORD:?SHARWA_SYSTEM_PASSWORD is required (see .env)}
+      SHARWA_MIGRATION_USER: ${SHARWA_MIGRATION_USER:?SHARWA_MIGRATION_USER is required (see .env)}
+      SHARWA_MIGRATION_PASSWORD: ${SHARWA_MIGRATION_PASSWORD:?SHARWA_MIGRATION_PASSWORD is required (see .env)}
+    command:
+      - postgres
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./ops/postgres.conf:/etc/postgresql/postgresql.conf:ro
+    networks: [data]                      # internal only: reachable through PgBouncer, never from outside
+    mem_limit: 1536m
+    memswap_limit: 1536m
+    cpus: 2.0
+    pids_limit: 300
+    oom_score_adj: -900                   # the kernel kills everything else first
+    stop_grace_period: 60s
+    shm_size: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    logging: *default-logging
+    restart: unless-stopped
+
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.25.2-p0  # explicit tag (reference used :latest)
+    environment:
+      DB_HOST: postgres
+      DB_USER: ${SHARWA_APP_USER:?SHARWA_APP_USER is required (see .env)}
+      DB_PASSWORD: ${SHARWA_APP_PASSWORD:?SHARWA_APP_PASSWORD is required (see .env)}
+      DB_NAME: ${POSTGRES_DB:?POSTGRES_DB is required (see .env)}
+      # auth_type + pool settings are also encoded in ops/pgbouncer.ini (mounted).
+      AUTH_TYPE: scram-sha-256
+    volumes:
+      - ./ops/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+    networks: [data]
+    mem_limit: 64m
+    memswap_limit: 64m
+    cpus: 0.5
+    pids_limit: 50
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    depends_on:
+      postgres: { condition: service_healthy }
+    logging: *default-logging
+    restart: unless-stopped
+
+  redis-durable:                         # streams (inbound WAL) + lidmap + wake-ups. Never evicts.
+    image: redis:7.4-alpine              # explicit tag (reference used :7-alpine)
+    command:
+      - sh
+      - -c
+      - exec redis-server /etc/redis/redis.conf --requirepass "$$REDIS_PASSWORD"
+    environment:
+      # B7: password via env (not argv). REDISCLI_AUTH lets the healthcheck
+      # authenticate without -a on the command line.
+      REDIS_PASSWORD: ${REDIS_DURABLE_PASSWORD:?REDIS_DURABLE_PASSWORD is required (see .env)}
+      REDISCLI_AUTH: ${REDIS_DURABLE_PASSWORD:?REDIS_DURABLE_PASSWORD is required (see .env)}
+    volumes:
+      - ./ops/redis-durable.conf:/etc/redis/redis.conf:ro
+      - redis_durable:/data
+    networks: [data]
+    mem_limit: 320m                       # B3: AOF rewrite headroom above maxmemory 128mb
+    memswap_limit: 320m
+    cpus: 0.5
+    pids_limit: 50
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging: *default-logging
+    restart: unless-stopped
+
+  redis-cache:                           # dedupe fast-path, rate limits, pub/sub, read cache. Losable.
+    image: redis:7.4-alpine
+    command:
+      - sh
+      - -c
+      - exec redis-server /etc/redis/redis.conf --requirepass "$$REDIS_PASSWORD"
+    environment:
+      REDIS_PASSWORD: ${REDIS_CACHE_PASSWORD:?REDIS_CACHE_PASSWORD is required (see .env)}
+      REDISCLI_AUTH: ${REDIS_CACHE_PASSWORD:?REDIS_CACHE_PASSWORD is required (see .env)}
+    volumes:
+      - ./ops/redis-cache.conf:/etc/redis/redis.conf:ro
+    networks: [data]
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: 0.5
+    pids_limit: 50
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging: *default-logging
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------- app tier
+  # P0.2 (R3_DIRECTIVE, disaster #4/G1 + #5/#17): the WA socket (gateway) and
+  # the Django delivery path (gateway-forwarder) are separate containers/
+  # processes so a slow/down Django never blocks inbound message receipt.
+  gateway:
+    build:
+      context: ./gateway
+    image: sharwa-ai-gateway:p0.2          # tag shared with gateway-forwarder below (built once)
+    environment:
+      PORT: "4001"
+      NODE_ENV: production
+      SHARWA_AI_GATEWAY_API_KEY: ${SHARWA_AI_GATEWAY_API_KEY:?SHARWA_AI_GATEWAY_API_KEY is required (see .env)}
+      SHARWA_AI_GATEWAY_WEBHOOK_SECRET: ${SHARWA_AI_GATEWAY_WEBHOOK_SECRET:?SHARWA_AI_GATEWAY_WEBHOOK_SECRET is required (see .env)}
+      # host.docker.internal (below) is what makes these reachable when Django/
+      # MinIO run on the VPS host itself rather than in this compose file -
+      # "localhost" from INSIDE the container would mean the container itself.
+      DJANGO_BASE_URL: ${DJANGO_BASE_URL:-http://host.docker.internal:8000}
+      MINIO_ENDPOINT_URL: ${MINIO_ENDPOINT_URL:-http://host.docker.internal:9000}
+      # Optional (owner decision, P0.2): MinIO deployment status was unknown when
+      # this was written. Left EMPTY here rather than :?required so `gateway` can
+      # still start and handle text messages - sessions.js already degrades a
+      # media upload gracefully (object_key: null, Arabic fallback text) when
+      # these are unset/wrong. Set real values in .env once MinIO is confirmed.
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-}
+      MINIO_BUCKET_NAME: ${MINIO_BUCKET_NAME:-sharwa-ai}
+      MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
+      AUTH_SESSIONS_DIR: /app/auth_sessions
+      REDIS_DURABLE_HOST: redis-durable
+      REDIS_DURABLE_PORT: "6379"
+      REDIS_DURABLE_PASSWORD: ${REDIS_DURABLE_PASSWORD:?REDIS_DURABLE_PASSWORD is required (see .env)}
+    volumes:
+      - gateway_auth_sessions:/app/auth_sessions   # WhatsApp session credentials survive restarts
+    networks: [data, app]                  # data: reach redis-durable. app: reach the internet (WhatsApp) + host
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:4001:4001"              # loopback only (Dockerfile: never published to the public internet)
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 1.0
+    pids_limit: 200
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:4001/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    depends_on:
+      redis-durable: { condition: service_healthy }
+    logging: *default-logging
+    restart: unless-stopped
+
+  gateway-forwarder:                       # same image as `gateway`, different command - reads in:{shard}
+    image: sharwa-ai-gateway:p0.2          # via the legacy-forwarder consumer group and delivers to Django
+    command: ["node", "src/forwarder.js"]
+    environment:
+      NODE_ENV: production
+      SHARWA_AI_GATEWAY_WEBHOOK_SECRET: ${SHARWA_AI_GATEWAY_WEBHOOK_SECRET:?SHARWA_AI_GATEWAY_WEBHOOK_SECRET is required (see .env)}
+      DJANGO_BASE_URL: ${DJANGO_BASE_URL:-http://host.docker.internal:8000}
+      REDIS_DURABLE_HOST: redis-durable
+      REDIS_DURABLE_PORT: "6379"
+      REDIS_DURABLE_PASSWORD: ${REDIS_DURABLE_PASSWORD:?REDIS_DURABLE_PASSWORD is required (see .env)}
+    networks: [data, app]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: 0.5
+    pids_limit: 50
+    # No process-level healthcheck: this image's alpine base has no verified
+    # pgrep/procps, and a wrong CMD here would flap the container needlessly
+    # (H3: don't guess a healthcheck we haven't proven). restart: unless-stopped
+    # plus the forwarder's own structured logs (logger.info '[forwarder] started')
+    # are the liveness signal for now - revisit if we add a tiny /healthz shim.
+    logging: *default-logging
+    restart: unless-stopped
+
+networks:
+  data:
+    driver: bridge
+    internal: true                       # databases/Redis cannot be reached from outside
+  app:
+    driver: bridge                       # NOT internal: gateway needs outbound internet (WhatsApp)
+                                          # and a route to Django/MinIO on the host (host.docker.internal)
+
+volumes:
+  pgdata:
+  redis_durable:
+  gateway_auth_sessions:

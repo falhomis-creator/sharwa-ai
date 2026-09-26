@@ -1,0 +1,135 @@
+=== 1) gateway/src/forwarder.js — wait for the redis-durable client to be ready before the first command ===
+forwarder.js patched OK
+=== 2) gateway/src/__tests__/forwarder.test.js — add a unit test for the ordering bug itself ===
+forwarder.test.js patched OK
+=== 3) also export waitForReady from forwarder.js (test needs it) ===
+forwarder.js export list patched OK
+=== 4) verify: hunt_gate (repo root) + node --test (gateway/) ===
+HUNT GATE PASSED — 78 files scanned, 0 violations.
+hunt_gate exit: 0
+  duration_ms: 0.328472
+  type: 'test'
+  ...
+# Subtest: recordPhoneNumberShare is bounded by lidmapMax (H4): new lid dropped at cap, existing lid still updatable
+ok 61 - recordPhoneNumberShare is bounded by lidmapMax (H4): new lid dropped at cap, existing lid still updatable
+  ---
+  duration_ms: 0.734959
+  type: 'test'
+  ...
+# Subtest: buildIdentityUpdateEvent produces a deterministic provider_message_id for the same lid/phone pair
+ok 62 - buildIdentityUpdateEvent produces a deterministic provider_message_id for the same lid/phone pair
+  ---
+  duration_ms: 0.294621
+  type: 'test'
+  ...
+# Subtest: buildIdentityUpdateEvent gives different lids different provider_message_ids
+ok 63 - buildIdentityUpdateEvent gives different lids different provider_message_ids
+  ---
+  duration_ms: 0.460479
+  type: 'test'
+  ...
+1..63
+# tests 63
+# suites 0
+# pass 63
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 5236.67484
+=== 5) rebuild and restart just gateway-forwarder (same image as gateway - both get the fix) ===
+time="2026-09-22T16:56:08+02:00" level=warning msg="Docker Compose is configured to build using Bake, but buildx isn't installed"
+#0 building with "default" instance using docker driver
+
+#1 [gateway internal] load build definition from Dockerfile
+#1 transferring dockerfile: 783B 0.0s done
+#1 DONE 0.0s
+
+#2 [gateway internal] load metadata for docker.io/library/node:24-alpine
+#2 DONE 2.0s
+
+#3 [gateway internal] load .dockerignore
+#3 transferring context: 107B 0.0s done
+#3 DONE 0.0s
+
+#4 [gateway internal] load build context
+#4 transferring context: 9.13kB 0.0s done
+#4 DONE 0.0s
+
+#5 [gateway 1/6] FROM docker.io/library/node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1
+#5 resolve docker.io/library/node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 0.1s done
+#5 DONE 0.1s
+
+#6 [gateway 4/6] COPY package.json package-lock.json ./
+#6 CACHED
+
+#7 [gateway 2/6] RUN addgroup -S app && adduser -S app -G app
+#7 CACHED
+
+#8 [gateway 3/6] WORKDIR /app
+#8 CACHED
+
+#9 [gateway 5/6] RUN npm ci --omit=dev
+#9 CACHED
+
+#10 [gateway 6/6] COPY src ./src
+#10 DONE 0.1s
+
+#11 [gateway] exporting to image
+#11 exporting layers
+#11 exporting layers 0.3s done
+#11 exporting manifest sha256:4b5d8a2d10cf38f490a2a41546b02668ab500cd71ed010fa5bf4a74d1d2f957f
+#11 exporting manifest sha256:4b5d8a2d10cf38f490a2a41546b02668ab500cd71ed010fa5bf4a74d1d2f957f 0.0s done
+#11 exporting config sha256:eddef3dc79f389b08aa0ff82012537f840491c869b9592f37cb7748d1c8ff630 0.0s done
+#11 exporting attestation manifest sha256:34f32f1cc75a8007afaab03a0f558c92a226ed56dec485323717cf0a73efb7a6 0.1s done
+#11 exporting manifest list sha256:ec85c3b9a40028f6ab9eeb6192740e495f6a12403eb263b218116df567624fd5
+#11 exporting manifest list sha256:ec85c3b9a40028f6ab9eeb6192740e495f6a12403eb263b218116df567624fd5 0.0s done
+#11 naming to docker.io/library/sharwa-ai-gateway:p0.2 done
+#11 unpacking to docker.io/library/sharwa-ai-gateway:p0.2 0.1s done
+#11 DONE 0.7s
+
+#12 [gateway] resolving provenance for metadata file
+#12 DONE 0.1s
+ gateway  Built
+ Container sharwa_ai-redis-durable-1  Running
+ Container sharwa_ai-gateway-forwarder-1  Recreate
+ Container sharwa_ai-gateway-1  Recreate
+ Container sharwa_ai-gateway-1  Recreated
+ Container sharwa_ai-gateway-forwarder-1  Recreated
+ Container sharwa_ai-redis-durable-1  Waiting
+ Container sharwa_ai-gateway-forwarder-1  Starting
+ Container sharwa_ai-redis-durable-1  Healthy
+ Container sharwa_ai-gateway-1  Starting
+ Container sharwa_ai-gateway-forwarder-1  Started
+ Container sharwa_ai-gateway-1  Started
+NAME                            IMAGE                    COMMAND                  SERVICE             CREATED          STATUS                            PORTS
+sharwa_ai-gateway-1             sharwa-ai-gateway:p0.2   "docker-entrypoint.s…"   gateway             13 seconds ago   Up 7 seconds (health: starting)   127.0.0.1:4001->4001/tcp
+sharwa_ai-gateway-forwarder-1   sharwa-ai-gateway:p0.2   "docker-entrypoint.s…"   gateway-forwarder   13 seconds ago   Up 7 seconds                      4001/tcp
+--- gateway-forwarder logs (last 30 lines, should show '[forwarder] started', no fatal error) ---
+gateway-forwarder-1  | {"level":30,"time":1790088981912,"pid":1,"hostname":"1db1fdafe040","streams":["in:0","in:1","in:2","in:3"],"group":"legacy-forwarder","consumer":"forwarder-1","msg":"[forwarder] started"}
+gateway-forwarder-1  | {"level":50,"time":1790088986928,"pid":1,"hostname":"1db1fdafe040","err":"Command timed out","msg":"[forwarder] loop error; backing off"}
+=== 6) git status / diff ===
+On branch master
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   gateway/src/__tests__/forwarder.test.js
+	modified:   gateway/src/forwarder.js
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	batch_p02_compose.sh
+	batch_p02_compose_secrets.sh
+	batch_p02_forwarder_ready_fix.sh
+	batch_p02_identity_update.sh
+	batch_p02_integration.sh
+	p02_compose_run.log
+	p02_compose_secrets_run.log
+	p02_forwarder_ready_fix_run.log
+	p02_identity_update_run.log
+	p02_integration_run.log
+
+no changes added to commit (use "git add" and/or "git commit -a")
+ gateway/src/__tests__/forwarder.test.js | 37 +++++++++++++++++++++++++++++++-
+ gateway/src/forwarder.js                | 38 ++++++++++++++++++++++++++++++++-
+ 2 files changed, 73 insertions(+), 2 deletions(-)

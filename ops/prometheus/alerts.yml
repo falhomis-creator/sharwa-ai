@@ -1,0 +1,118 @@
+# ops/prometheus/alerts.yml
+# P0.6 closure (Batch C). The exact 8 rules the spec requires
+# (prompts/P0_DEEPSEEK_PROMPT.md P0.6 §6): gateway down, redis-durable memory
+# > 60%, spool non-empty > 5min, dlq_length > 0, a `banned` session, heap >
+# 85% of its configured cap, the oldest pending stream message > 60s, and
+# process_open_fds > 70% of its cap.
+#
+# Spec's own explicit P0 posture (literal text): "Alertmanager/إشعارات
+# التسليم تُضاف في P1؛ في P0 القواعد مرئية في واجهة Prometheus" - these rules
+# only need to be VISIBLE in the Prometheus UI in P0, not wired to any
+# delivery channel (no Alertmanager service exists, deliberately - P1 scope).
+#
+# One of the eight references a metric this repository does not produce yet -
+# documented explicitly here AND in docs/P0_DEVIATIONS.md, per the spec's own
+# instruction to record such gaps rather than hide them:
+#   - redis-durable memory %: needs a redis_exporter (oliver006/redis_exporter
+#     or equivalent) scraping redis-durable's INFO memory stats - no such
+#     service exists in docker-compose.yml (adding a whole new exporter
+#     service was judged out of scope for "wire the alert rules text";
+#     written using that exporter's real, standard metric names so the rule
+#     activates the moment one is added, with no rewrite needed).
+#
+# session `banned` state (SessionBanned rule): VERIFIED against the real
+# gateway/src/sessions.js - mapConnectionStatus() (line ~270-281) returns the
+# UPPERCASE literal 'BANNED' (alongside 'QR_PENDING'/'CONNECTED'/
+# 'DISCONNECTED'/'UNKNOWN' - all uppercase, explicitly commented there as
+# "contract-frozen vocabulary"), and metrics.js's recordSessionStateTransition
+# feeds session_state{state} with that value verbatim, no case transform. The
+# rule below was corrected from an earlier draft that guessed lowercase
+# "banned" before this file was read - written as state="BANNED" now that the
+# real label value is confirmed, not assumed.
+#
+# Validated with `promtool check rules` (recorded in the delivery script's
+# own self-verification output, not just asserted here).
+
+groups:
+  - name: sharwa_ai_p0
+    rules:
+      - alert: GatewayDown
+        expr: up{job="gateway"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "gateway is down"
+          description: "Prometheus has not been able to scrape the gateway's /metrics for at least 1 minute."
+
+      - alert: RedisDurableMemoryHigh
+        # UNWIRED (see file header): requires a redis_exporter scraping
+        # redis-durable; no such target exists yet. Visible only (spec's own
+        # P0 allowance), not currently able to fire.
+        expr: redis_memory_used_bytes{addr=~".*redis-durable.*"} / redis_memory_max_bytes{addr=~".*redis-durable.*"} > 0.6
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "redis-durable memory usage above 60%"
+          description: "redis-durable is using more than 60% of its configured maxmemory for at least 5 minutes."
+
+      - alert: SpoolNonEmptyTooLong
+        expr: ingest_spool_depth > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "disk spool has been non-empty for over 5 minutes"
+          description: "redis-durable has likely been unreachable for a sustained period - inbound messages are spooling to disk instead of reaching the WAL."
+
+      - alert: DeadLetterQueueNonEmpty
+        expr: dlq_length > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "at least one message is parked on the dead-letter queue"
+          description: "dlq:in is non-empty - one or more inbound messages exhausted FORWARD_MAX_ATTEMPTS and were never delivered to Django. Needs manual investigation/replay."
+
+      - alert: SessionBanned
+        # VERIFIED against sessions.js's real mapConnectionStatus vocabulary
+        # (see file header) - the gauge label is the uppercase "BANNED".
+        expr: session_state{state="BANNED"} > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "a WhatsApp session has been banned"
+          description: "session_state reports at least one session in the banned state."
+
+      - alert: GatewayHeapNearCap
+        # Threshold hardcoded to the gateway's own NODE_OPTIONS
+        # (--max-old-space-size=900, docker-compose.yml) - if that value ever
+        # changes, this threshold must be updated to match (900*1024*1024 =
+        # 943718400 bytes).
+        expr: nodejs_heap_size_used_bytes{job="gateway"} / 943718400 > 0.85
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "gateway heap usage above 85% of its configured cap"
+          description: "nodejs_heap_size_used_bytes is above 85% of the 900MB --max-old-space-size budget for at least 2 minutes."
+
+      - alert: StreamPendingTooOld
+        expr: stream_pending_oldest_seconds{group="legacy-forwarder"} > 60
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "a WAL stream entry has been pending (unacked) for over 60 seconds"
+          description: "the legacy-forwarder consumer group has at least one entry that has not been acked in over 60 seconds - the forwarder may be stuck, crash-looping, or Django may be down."
+
+      - alert: OpenFileDescriptorsNearCap
+        expr: process_open_fds / process_max_fds > 0.7
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "open file descriptors above 70% of the process cap"
+          description: "{{ $labels.job }} is using more than 70% of its process_max_fds for at least 5 minutes."

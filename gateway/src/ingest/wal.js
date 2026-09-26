@@ -9,11 +9,17 @@
 // hard-rejected here, BEFORE anything reaches redis-durable. It is a permanent
 // rejection (no retry, no spool — it will never fit), surfaced as PAYLOAD_TOO_LARGE
 // and logged loudly, never silently dropped (F2).
+//
+// P0.6 closure (Batch C): ingest_ack_seconds/ingest_messages_total/
+// ingest_duplicates_total are wired here - the only real code path that
+// performs the XADD (see metrics.js's own comment on why 'duplicate' never
+// observes the histogram: no XADD ran on that path).
 
 import { randomUUID } from 'node:crypto';
 
 import { fusedAppend } from './dedupe.js';
 import { config } from '../config.js';
+import { ingestAckSeconds, ingestMessagesTotal, ingestDuplicatesTotal } from '../metrics.js';
 
 /** Deterministic djb2 hash so the same session always lands on the same shard. */
 function hashString(str) {
@@ -53,6 +59,7 @@ export function dedupeKeyFor(sessionId, providerMessageId) {
  */
 export async function appendEvent(client, opts) {
   const { sessionId, event } = opts;
+  const startedAt = process.hrtime.bigint();
 
   const entry = {
     v: 1,
@@ -74,10 +81,20 @@ export async function appendEvent(client, opts) {
   const providerMessageId = event.provider_message_id
     ?? `ts:${event.ts}:${randomUUID()}`;
 
-  return fusedAppend(client, {
+  const result = await fusedAppend(client, {
     dedupeKey: dedupeKeyFor(sessionId, providerMessageId),
     streamKey: streamKeyFor(sessionId),
     entry: serialized,
     pendingTtlMs: config.dedupePendingTtlS * 1000,
   });
+
+  if (result.status === 'appended') {
+    const elapsedSeconds = Number(process.hrtime.bigint() - startedAt) / 1e9;
+    ingestAckSeconds.observe(elapsedSeconds);
+    ingestMessagesTotal.labels(event.type ?? 'unknown').inc();
+  } else {
+    ingestDuplicatesTotal.inc();
+  }
+
+  return result;
 }

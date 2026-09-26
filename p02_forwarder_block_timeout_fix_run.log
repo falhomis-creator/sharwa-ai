@@ -1,0 +1,130 @@
+=== 1) gateway/src/forwarder.js — BLOCK_MS must stay safely below the ioredis commandTimeout ===
+forwarder.js patched OK
+=== 2) gateway/src/__tests__/forwarder.test.js — regression guard: BLOCK_MS must stay below commandTimeout ===
+forwarder.test.js patched OK
+=== 3) verify: hunt_gate (repo root) + node --test (gateway/) ===
+HUNT GATE PASSED — 80 files scanned, 0 violations.
+hunt_gate exit: 0
+ok 63 - buildIdentityUpdateEvent produces a deterministic provider_message_id for the same lid/phone pair
+  ---
+  duration_ms: 0.389192
+  type: 'test'
+  ...
+# Subtest: buildIdentityUpdateEvent gives different lids different provider_message_ids
+ok 64 - buildIdentityUpdateEvent gives different lids different provider_message_ids
+  ---
+  duration_ms: 0.381601
+  type: 'test'
+  ...
+1..64
+# tests 64
+# suites 0
+# pass 64
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 3324.326044
+=== 4) rebuild and restart gateway-forwarder, then watch it for 30s (idle-stream cycles should now be silent) ===
+time="2026-09-22T16:59:59+02:00" level=warning msg="Docker Compose is configured to build using Bake, but buildx isn't installed"
+#0 building with "default" instance using docker driver
+
+#1 [gateway internal] load build definition from Dockerfile
+#1 transferring dockerfile: 783B done
+#1 DONE 0.0s
+
+#2 [gateway internal] load metadata for docker.io/library/node:24-alpine
+#2 DONE 1.8s
+
+#3 [gateway internal] load .dockerignore
+#3 transferring context: 107B 0.0s done
+#3 DONE 0.5s
+
+#4 [gateway 1/6] FROM docker.io/library/node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1
+#4 resolve docker.io/library/node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1
+#4 ...
+
+#5 [gateway internal] load build context
+#5 transferring context: 10.10kB 0.1s done
+#5 DONE 0.4s
+
+#4 [gateway 1/6] FROM docker.io/library/node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1
+#4 resolve docker.io/library/node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 0.6s done
+#4 DONE 0.7s
+
+#6 [gateway 4/6] COPY package.json package-lock.json ./
+#6 CACHED
+
+#7 [gateway 2/6] RUN addgroup -S app && adduser -S app -G app
+#7 CACHED
+
+#8 [gateway 3/6] WORKDIR /app
+#8 CACHED
+
+#9 [gateway 5/6] RUN npm ci --omit=dev
+#9 CACHED
+
+#10 [gateway 6/6] COPY src ./src
+#10 DONE 0.2s
+
+#11 [gateway] exporting to image
+#11 exporting layers
+#11 exporting layers 0.2s done
+#11 exporting manifest sha256:39334fe97b9bce0352d1c167ca140eb86435cd9f505ca3afca6b4a383eb4b5dd
+#11 exporting manifest sha256:39334fe97b9bce0352d1c167ca140eb86435cd9f505ca3afca6b4a383eb4b5dd 0.0s done
+#11 exporting config sha256:798ca5f102a94bb28ca3ad36f79dfa21f1c8008f2265fc79426266daf1af276c 0.0s done
+#11 exporting attestation manifest sha256:3c4e66ffd091b18f7a1f786edb3bbf9f30e2725a9c267dd97a018d721a5fd31e
+#11 exporting attestation manifest sha256:3c4e66ffd091b18f7a1f786edb3bbf9f30e2725a9c267dd97a018d721a5fd31e 0.1s done
+#11 exporting manifest list sha256:0e341dcba1892bd862e390e4259cd10bf997351c96617e781f362bcc299349fe 0.0s done
+#11 naming to docker.io/library/sharwa-ai-gateway:p0.2 done
+#11 unpacking to docker.io/library/sharwa-ai-gateway:p0.2 0.1s done
+#11 DONE 0.5s
+
+#12 [gateway] resolving provenance for metadata file
+#12 DONE 0.0s
+ gateway  Built
+ Container sharwa_ai-redis-durable-1  Running
+ Container sharwa_ai-gateway-1  Recreate
+ Container sharwa_ai-gateway-forwarder-1  Recreate
+ Container sharwa_ai-gateway-1  Recreated
+ Container sharwa_ai-gateway-forwarder-1  Recreated
+ Container sharwa_ai-redis-durable-1  Waiting
+ Container sharwa_ai-gateway-forwarder-1  Starting
+ Container sharwa_ai-redis-durable-1  Healthy
+ Container sharwa_ai-gateway-1  Starting
+ Container sharwa_ai-gateway-forwarder-1  Started
+ Container sharwa_ai-gateway-1  Started
+--- watching gateway-forwarder logs for 30s (Ctrl-C safe, this is a fixed-duration timeout) ---
+gateway-forwarder-1  | {"level":30,"time":1790089214857,"pid":1,"hostname":"3c5040974911","streams":["in:0","in:1","in:2","in:3"],"group":"legacy-forwarder","consumer":"forwarder-1","msg":"[forwarder] started"}
+
+--- final status ---
+NAME                            IMAGE                    COMMAND                  SERVICE             CREATED          STATUS                    PORTS
+sharwa_ai-gateway-1             sharwa-ai-gateway:p0.2   "docker-entrypoint.s…"   gateway             42 seconds ago   Up 35 seconds (healthy)   127.0.0.1:4001->4001/tcp
+sharwa_ai-gateway-forwarder-1   sharwa-ai-gateway:p0.2   "docker-entrypoint.s…"   gateway-forwarder   42 seconds ago   Up 36 seconds             4001/tcp
+=== 5) git status / diff ===
+On branch master
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   gateway/src/__tests__/forwarder.test.js
+	modified:   gateway/src/forwarder.js
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	batch_p02_compose.sh
+	batch_p02_compose_secrets.sh
+	batch_p02_forwarder_block_timeout_fix.sh
+	batch_p02_forwarder_ready_fix.sh
+	batch_p02_identity_update.sh
+	batch_p02_integration.sh
+	p02_compose_run.log
+	p02_compose_secrets_run.log
+	p02_forwarder_block_timeout_fix_run.log
+	p02_forwarder_ready_fix_run.log
+	p02_identity_update_run.log
+	p02_integration_run.log
+
+no changes added to commit (use "git add" and/or "git commit -a")
+ gateway/src/__tests__/forwarder.test.js | 45 +++++++++++++++++++++++++++-
+ gateway/src/forwarder.js                | 52 +++++++++++++++++++++++++++++++--
+ 2 files changed, 94 insertions(+), 3 deletions(-)
