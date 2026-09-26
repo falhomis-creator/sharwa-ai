@@ -4,6 +4,7 @@ import express from 'express';
 
 import {
   createSession,
+  reconnectSession,
   rehydrateSessions,
   enqueueSend,
   getSession,
@@ -99,13 +100,33 @@ app.get('/metrics', async (req, res) => {
 
 app.use('/sessions', requireGatewayKey);
 
+// P0.7 (spec, literal - "ميتاداتا الجلسة (إضافية)"): tenant_id/channel_account_id/
+// engine are all optional - core/'s channel-lifecycle routes are the only
+// real caller today, and their absence never breaks an existing (Django-only)
+// caller. Persisted by sessions.js's createSession alongside the auth
+// credentials (meta.json) so a restart's rehydrate restores the same routing
+// decision. G11 (idempotent 201/200 status codes for an existing session) is
+// a separate, pre-existing gap this batch does not touch - see docs/P0_FINDINGS.md.
 app.post('/sessions', async (req, res) => {
-  const { session_id } = req.body ?? {};
+  const { session_id, tenant_id, channel_account_id, engine } = req.body ?? {};
   if (!session_id || typeof session_id !== 'string') {
     return res.status(400).json({ error: 'session_id (string) is required' });
   }
+  if (tenant_id !== undefined && typeof tenant_id !== 'string') {
+    return res.status(400).json({ error: 'tenant_id, if provided, must be a string' });
+  }
+  if (channel_account_id !== undefined && typeof channel_account_id !== 'string') {
+    return res.status(400).json({ error: 'channel_account_id, if provided, must be a string' });
+  }
+  if (engine !== undefined && typeof engine !== 'string') {
+    return res.status(400).json({ error: 'engine, if provided, must be a string' });
+  }
   try {
-    await createSession(session_id);
+    await createSession(session_id, {
+      tenantId: tenant_id ?? null,
+      channelAccountId: channel_account_id ?? null,
+      engine: engine ?? null,
+    });
     const status = await getSessionStatus(session_id);
     return res.status(201).json(status);
   } catch (err) {
@@ -214,6 +235,32 @@ app.post('/sessions/:id/send', async (req, res) => {
     });
   }
   return res.status(202).json({ message_id: result.client_msg_id, client_msg_id: result.client_msg_id });
+});
+
+// P0.7 (spec, literal - added at the user's explicit request once the gap was
+// found: GatewayClient.session_reconnect() in core/ already called this exact
+// path, but nothing here ever answered it before this batch). core/'s own
+// POST /v1/channels/{id}/reconnect only ever calls this for a channel whose
+// DB status is conflict/disconnected/logged_out - this route does not
+// re-derive or re-check that itself (core/ owns that policy decision); it
+// only ever forces sessions.js's own reconnect mechanics to run NOW instead
+// of waiting out a scheduled backoff/conflict-cooldown timer.
+app.post('/sessions/:id/reconnect', async (req, res) => {
+  try {
+    await reconnectSession(req.params.id);
+  } catch (err) {
+    if (err.code === 'CAPACITY') {
+      return res.status(503).json({ error: 'gateway at capacity (MAX_SESSIONS)' });
+    }
+    if (err.code === 'LEASE_HELD') {
+      return res.status(409).json({ error: 'session is active on another gateway instance' });
+    }
+    logger.error({ session_id: req.params.id, err: err.message }, '[index] failed to reconnect session');
+    return res.status(500).json({ error: 'failed to reconnect session' });
+  }
+  const status = await getSessionStatus(req.params.id);
+  if (!status) return res.status(404).json({ error: 'session not found' });
+  return res.status(200).json(status);
 });
 
 app.post('/sessions/:id/logout', async (req, res) => {

@@ -106,10 +106,20 @@ function waitForReady(client) {
  * replying from the merchant's own phone, not as a customer message. Skipped
  * the same deliberate/logged way as identity_update, never silently.
  *
+ * P0.7 (spec, literal - prompts/P0_DEEPSEEK_PROMPT.md): a session created
+ * with `engine=ai_core` (an additive POST /sessions field, see sessions.js's
+ * createSession/readSessionMeta) never gets a legacy webhook either - its
+ * entries are left in the `in:{shard}` stream for the `core-ingest` consumer
+ * group instead (created at gateway startup, index.js's main() - F18; no
+ * consumer reads it until P1). A session with no `engine` tag at all (every
+ * pre-P0.7 session, and any P0.7 session that simply omitted the field) is
+ * the legacy default and is unaffected: "جلسة بلا engine = django".
+ *
  * @param {object} entry
  * @returns {boolean}
  */
 function shouldForwardToLegacy(entry) {
+  if (entry.engine === 'ai_core') return false;
   return entry.type !== 'identity_update' && entry.type !== 'human_takeover_signal';
 }
 
@@ -192,7 +202,10 @@ async function processStream(client, stream) {
     }
 
     if (!shouldForwardToLegacy(data)) {
-      logger.info({ stream, id, type: data.type }, '[forwarder] skipping legacy delivery for non-message entry');
+      logger.info(
+        { stream, id, type: data.type, engine: data.engine ?? null },
+        '[forwarder] skipping legacy delivery (non-message entry or ai_core-engine session, P0.7)',
+      );
       await client.xack(stream, config.legacyForwarderGroup, id);
       continue;
     }

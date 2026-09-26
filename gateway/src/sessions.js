@@ -307,7 +307,7 @@ function extractPhoneNumber(userId) {
 
 // --- session registry -------------------------------------------------------
 
-export function createSessionRecord(sessionId, { sock = null } = {}) {
+export function createSessionRecord(sessionId, { sock = null, tenantId = null, channelAccountId = null, engine = null } = {}) {
   const existing = sessions.get(sessionId);
   if (existing) return existing;
 
@@ -336,16 +336,18 @@ export function createSessionRecord(sessionId, { sock = null } = {}) {
     since: Date.now(),        // when `status` last changed
     stopping: false,          // true once logoutSession/shutdown has started - suppresses reconnect
     authLoaded: false,        // true once useMultiFileAuthState has run once for this process
-    // P0.6 Batch B: forward-compatible plumbing ONLY - always null today.
-    // No caller anywhere passes these yet (grepped: zero matches for
-    // tenant_id/channel_account_id across the whole gateway codebase before
-    // this batch), and no mapping mechanism from a session to a real
-    // tenant/channel exists yet either (that's P0.7's job, once core/api
-    // exists). killswitch.js's own scope-fallback logic already handles
-    // "both null" correctly and is exactly the spec's documented behavior
-    // for this exact situation - see killswitch.js's file header.
-    tenantId: null,
-    channelAccountId: null,
+    // P0.7 (spec, literal - prompts/P0_DEEPSEEK_PROMPT.md "ميتاداتا الجلسة"):
+    // POST /sessions optionally accepts tenant_id/channel_account_id/engine.
+    // Real values now flow in from createSession()'s `meta` argument (fresh
+    // session) or from this session's persisted meta.json (rehydrate/lease
+    // sweep - see readSessionMeta/writeSessionMeta below), never guessed or
+    // resolved here. A session with no engine set is the legacy/default
+    // routing (forwarder.js: "جلسة بلا engine = django") - killswitch.js's
+    // own scope-fallback logic already handles "both null" correctly (see
+    // killswitch.js's file header), unchanged by this.
+    tenantId,
+    channelAccountId,
+    engine,
   };
   sessions.set(sessionId, session);
   return session;
@@ -353,6 +355,51 @@ export function createSessionRecord(sessionId, { sock = null } = {}) {
 
 export function getSession(sessionId) {
   return sessions.get(sessionId) ?? null;
+}
+
+// --- P0.7 session metadata persistence (spec, literal: "تُحفظ بجانب بيانات
+// المصادقة (meta.json) ليعيدها rehydrate") -----------------------------------
+//
+// tenant_id/channel_account_id/engine are optional, additive POST /sessions
+// fields (core/'s channel-lifecycle routes are the only real caller today).
+// Persisted as meta.json next to creds.json in the same per-session auth
+// folder, so a process restart's rehydrateSessions()/startLeaseSweep() -
+// which only ever have a bare sessionId, never the original request body -
+// can restore the same routing decision a fresh POST /sessions would have
+// made. Absence (no meta.json, or a read/parse failure) is the ordinary,
+// expected shape for every pre-P0.7 session and is never treated as an
+// error (spec, literal: "غيابها لا يكسر شيئاً").
+
+/** @returns {Promise<{ tenantId?: string|null, channelAccountId?: string|null, engine?: string|null }>} */
+export async function readSessionMeta(sessionId) {
+  const metaPath = path.join(AUTH_DIR, sessionId, 'meta.json');
+  try {
+    const raw = await fs.readFile(metaPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    return {
+      tenantId: parsed.tenant_id ?? null,
+      channelAccountId: parsed.channel_account_id ?? null,
+      engine: parsed.engine ?? null,
+    };
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      logger.warn({ sessionId, err: err.message }, '[sessions] failed to read meta.json; treating as no session metadata (P0.7)');
+    }
+    return {};
+  }
+}
+
+/** @param {{ tenantId: string|null, channelAccountId: string|null, engine: string|null }} meta */
+export async function writeSessionMeta(sessionId, meta) {
+  const authPath = path.join(AUTH_DIR, sessionId);
+  await fs.mkdir(authPath, { recursive: true });
+  const metaPath = path.join(authPath, 'meta.json');
+  const onDisk = {
+    tenant_id: meta.tenantId ?? null,
+    channel_account_id: meta.channelAccountId ?? null,
+    engine: meta.engine ?? null,
+  };
+  await fs.writeFile(metaPath, JSON.stringify(onDisk), 'utf8');
 }
 
 // --- inbound handling (P0.2: normalize -> WAL, spool on failure) -----------
@@ -399,6 +446,12 @@ export async function processInboundMessage(sessionId, msg, appendFn = defaultAp
   const lidMap = deps.lidMap ?? (redisClient ? createLidMap(redisClient, sessionId) : undefined);
   const entry = normalizeMessage(msg, { lidMap });
   if (entry === null) return null;
+  // P0.7 (spec, literal): tag the WAL entry with the session's engine so
+  // forwarder.js can skip legacy Django delivery for engine='ai_core'
+  // sessions - see shouldForwardToLegacy there. No engine (the ordinary case
+  // for every pre-P0.7 / legacy session) leaves entry.engine unset, which
+  // forwarder.js treats exactly like today: always forwarded.
+  if (deps.engine) entry.engine = deps.engine;
 
   const isMedia = entry.type === 'image' || entry.type === 'audio' || entry.type === 'video' || entry.type === 'document' || entry.type === 'sticker';
   if (isMedia) {
@@ -511,6 +564,11 @@ export async function processFromMeMessage(sessionId, msg, appendFn = defaultApp
     text: text || '',
     direction: 'outbound_human',
   };
+  // P0.7: same engine tag as processInboundMessage - forwarder.js already
+  // skips human_takeover_signal entries unconditionally (G8), so this is
+  // purely for a future P1 core-ingest consumer's own bookkeeping, not for
+  // today's routing decision.
+  if (deps.engine) event.engine = deps.engine;
 
   try {
     await appendFn({ sessionId, event });
@@ -744,6 +802,10 @@ function wireSocketEvents(session, sock, sessionId) {
       if (!res.stored) return;
 
       const event = buildIdentityUpdateEvent(lid, res.phone_e164);
+      // P0.7: same engine tag as processInboundMessage (bookkeeping for a
+      // future P1 core-ingest consumer - forwarder.js already skips
+      // identity_update entries unconditionally, G12).
+      if (session.engine) event.engine = session.engine;
       const appendRes = await defaultAppendToWal({ sessionId, event });
       if (appendRes.status === 'appended') {
         await markDone(redisClient, dedupeKeyFor(sessionId, event.provider_message_id), config.dedupeDoneTtlS * 1000);
@@ -755,14 +817,17 @@ function wireSocketEvents(session, sock, sessionId) {
 
   sock.ev.on('messages.upsert', ({ messages, type }) => {
     if (type !== 'notify') return;
+    // P0.7: read once per batch rather than per message - session.engine
+    // never changes mid-batch (it's fixed at session creation/rehydrate).
+    const deps = session.engine ? { engine: session.engine } : undefined;
     for (const msg of messages) {
       // P0.5 (G8): fromMe messages never enter the customer pipeline (that
       // was already true - shouldIgnoreInbound drops them), but they are now
       // checked for a genuine human-takeover signal instead of being dropped
       // unconditionally.
       const task = msg?.key?.fromMe === true
-        ? processFromMeMessage(sessionId, msg)
-        : processInboundMessage(sessionId, msg);
+        ? processFromMeMessage(sessionId, msg, undefined, deps)
+        : processInboundMessage(sessionId, msg, undefined, deps);
       task.catch((err) => {
         logger.error({ sessionId, err: err.message }, '[sessions] inbound message processing failed');
       });
@@ -893,10 +958,20 @@ function activeLocalSessionCount() {
  * that is the normal, expected outcome of a lease conflict, not an error
  * (H3 is about failing loud on unexpected conditions, not on this one).
  *
+ * @param {{ tenantId?: string|null, channelAccountId?: string|null, engine?: string|null }} [meta]
+ *   Explicit metadata for a brand-new session (passed by createSession(), which
+ *   has already written it to meta.json). Omitted (rehydrateSessions/
+ *   startLeaseSweep, which only ever have a bare sessionId) means: read
+ *   whatever meta.json already has on disk for this session, if anything
+ *   (P0.7 - "تُحفظ بجانب بيانات المصادقة (meta.json) ليعيدها rehydrate").
  * @returns {Promise<{ started: boolean, reason?: 'already_active'|'capacity'|'lease_held' }>}
  */
-async function attemptStartSession(sessionId) {
-  const session = createSessionRecord(sessionId);
+async function attemptStartSession(sessionId, meta) {
+  let session = sessions.get(sessionId);
+  if (!session) {
+    const initial = meta ?? await readSessionMeta(sessionId);
+    session = createSessionRecord(sessionId, initial);
+  }
   if (session.sock) return { started: true, reason: 'already_active' };
   if (activeLocalSessionCount() >= config.maxSessions) return { started: false, reason: 'capacity' };
 
@@ -914,7 +989,16 @@ async function attemptStartSession(sessionId) {
   return { started: true };
 }
 
-export async function createSession(sessionId) {
+/**
+ * @param {string} sessionId
+ * @param {{ tenantId?: string|null, channelAccountId?: string|null, engine?: string|null }} [meta]
+ *   P0.7 (spec, literal): POST /sessions' optional tenant_id/channel_account_id/
+ *   engine fields, already validated by index.js's route handler. Persisted to
+ *   meta.json BEFORE the socket is opened, so a crash between "meta written"
+ *   and "socket connected" still rehydrates with the right engine tag rather
+ *   than silently falling back to legacy/no-metadata routing.
+ */
+export async function createSession(sessionId, meta = {}) {
   // Preserved from pre-P0.5 behavior (relied on by contract.test.js etc.): a
   // session record pre-seeded via createSessionRecord (e.g. a test's fake
   // socket, status set directly) short-circuits here unconditionally - this
@@ -928,17 +1012,111 @@ export async function createSession(sessionId) {
     throw err;
   }
 
-  const result = await attemptStartSession(sessionId);
-  if (!result.started) {
-    const err = new Error(
-      result.reason === 'capacity'
-        ? `MAX_SESSIONS (${config.maxSessions}) reached on this instance`
-        : `Session ${sessionId}: lease is currently held by another gateway instance`,
-    );
-    err.code = result.reason === 'capacity' ? 'CAPACITY' : 'LEASE_HELD';
-    throw err;
+  const tenantId = meta.tenantId ?? null;
+  const channelAccountId = meta.channelAccountId ?? null;
+  const engine = meta.engine ?? null;
+  if (tenantId !== null || channelAccountId !== null || engine !== null) {
+    await writeSessionMeta(sessionId, { tenantId, channelAccountId, engine });
   }
+
+  const result = await attemptStartSession(sessionId, { tenantId, channelAccountId, engine });
+  _throwIfNotStarted(sessionId, result);
   return sessions.get(sessionId);
+}
+
+/** Shared by createSession/reconnectSession - both surface the same two
+ * expected, well-defined attemptStartSession() outcomes as CAPACITY (503)/
+ * LEASE_HELD (409), never a generic 500 (spec, literal - see createSession's
+ * own pre-existing comment on this). */
+function _throwIfNotStarted(sessionId, result) {
+  if (result.started) return;
+  const err = new Error(
+    result.reason === 'capacity'
+      ? `MAX_SESSIONS (${config.maxSessions}) reached on this instance`
+      : `Session ${sessionId}: lease is currently held by another gateway instance`,
+  );
+  err.code = result.reason === 'capacity' ? 'CAPACITY' : 'LEASE_HELD';
+  throw err;
+}
+
+/**
+ * P0.7 (spec, literal - core/'s POST /v1/channels/{id}/reconnect, only ever
+ * called for a channel whose DB status is conflict/disconnected/logged_out):
+ * force an immediate reconnect attempt NOW, bypassing whatever backoff/
+ * conflict-cooldown timer P0.5's own automatic state machine may already have
+ * scheduled (spec: CONFLICT's own "لا إعادة اتصال 15 دقيقة ثم محاولة واحدة" -
+ * a merchant's manual "أعد الاتصال" click is exactly the documented exception
+ * to that wait).
+ *
+ * Three shapes, by what THIS gateway instance currently has for sessionId:
+ *  - a live socket already (session.sock truthy): nothing to do - either the
+ *    automatic state machine already recovered, or another manual click beat
+ *    this one. Returns {reconnected: false, reason: 'already_active'}, never
+ *    an error - the caller (index.js) reports the session's real current
+ *    status either way.
+ *  - a tracked-but-disconnected record (CONFLICT/DISCONNECTED backoff): its
+ *    pending reconnectTimer is cancelled first - scheduleReconnect's own
+ *    callback calls openSocketForSession() UNCONDITIONALLY (it does not
+ *    re-check session.sock), so leaving a stale timer armed after this
+ *    function has already opened a fresh socket would open a SECOND,
+ *    concurrent one for the same session.
+ *  - untracked here at all (LOGGED_OUT already wiped both the in-memory
+ *    record and the on-disk auth folder via finalizeSessionExit, or this
+ *    instance never held the session): attemptStartSession()'s own ordinary
+ *    path already does the right thing - ensureAuthLoaded's
+ *    useMultiFileAuthState() on a missing folder creates fresh, unpaired
+ *    creds, so this naturally produces a brand-new QR code (the console's
+ *    "اربط الرقم من جديد" flow for LOGGED_OUT) with no special-casing needed
+ *    here.
+ *
+ * @returns {Promise<{ reconnected: boolean, reason?: 'already_active' }>}
+ */
+export async function reconnectSession(sessionId) {
+  const session = sessions.get(sessionId);
+  if (!session) {
+    const result = await attemptStartSession(sessionId);
+    _throwIfNotStarted(sessionId, result);
+    return { reconnected: true };
+  }
+
+  if (session.sock) {
+    return { reconnected: false, reason: 'already_active' };
+  }
+
+  if (session.reconnectTimer) {
+    clearTimeout(session.reconnectTimer);
+    session.reconnectTimer = null;
+  }
+  session.stopping = false;
+  session.reconnectAttempts = 0;
+
+  // The ordinary CONFLICT/DISCONNECTED-backoff case ALREADY holds its lease
+  // continuously the whole time it's disconnected (startLeaseRenewalLoop's
+  // interval keeps renewing it regardless of socket state - only
+  // finalizeSessionExit, i.e. LOGGED_OUT/BANNED/explicit logout, ever
+  // releases it, and those paths delete the in-memory record entirely,
+  // routing through the `!session` branch above instead). Re-acquiring here
+  // unconditionally would collide with this same instance's own still-valid
+  // lease and fail LEASE_HELD against itself (a real bug this function's own
+  // test caught - H7). Only acquire when nothing is currently held; otherwise
+  // reuse the existing fencingToken and just reopen the socket now, exactly
+  // like scheduleReconnect's own callback already does on every ordinary
+  // automatic retry - this function's only real difference from that is
+  // WHEN it runs (now, not after the backoff/cooldown delay).
+  if (redisClient && session.fencingToken === null) {
+    const { acquired, fencingToken } = await acquireLease(redisClient, sessionId, config.instanceId, config.lease.ttlMs);
+    if (!acquired) {
+      const err = new Error(`Session ${sessionId}: lease is currently held by another gateway instance`);
+      err.code = 'LEASE_HELD';
+      throw err;
+    }
+    session.fencingToken = fencingToken;
+    await openSocketForSession(session, sessionId);
+    startLeaseRenewalLoop(session, sessionId);
+  } else {
+    await openSocketForSession(session, sessionId);
+  }
+  return { reconnected: true };
 }
 
 export async function logoutSession(sessionId) {

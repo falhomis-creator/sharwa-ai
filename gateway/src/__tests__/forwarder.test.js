@@ -48,6 +48,16 @@ test('shouldForwardToLegacy skips human_takeover_signal entries (P0.5/G8: never 
   assert.equal(shouldForwardToLegacy({ type: 'human_takeover_signal', text: 'ok merchant typed this', direction: 'outbound_human' }), false);
 });
 
+test('shouldForwardToLegacy skips ANY entry from an engine=ai_core session (P0.7, spec literal)', () => {
+  assert.equal(shouldForwardToLegacy({ type: 'text', text: 'hi', engine: 'ai_core' }), false);
+  assert.equal(shouldForwardToLegacy({ type: 'image', engine: 'ai_core' }), false);
+});
+
+test('shouldForwardToLegacy still forwards a legacy session\'s ordinary message even when other sessions are engine=ai_core (P0.7: "جلسة بلا engine = django")', () => {
+  assert.equal(shouldForwardToLegacy({ type: 'text', text: 'hi' }), true);
+  assert.equal(shouldForwardToLegacy({ type: 'text', text: 'hi', engine: null }), true);
+});
+
 test('waitForReady resolves immediately when the client is already ready', async () => {
   const client = { status: 'ready' };
   await waitForReady(client); // must not hang/throw

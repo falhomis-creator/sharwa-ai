@@ -236,9 +236,86 @@ services:
       retries: 6
       start_period: 15s
 
+  # P0.7: FastAPI channel-lifecycle backend (core/, see core/app/main.py and
+  # core/Dockerfile). Its own schema (tenants/channel_accounts/kill_switches/
+  # api_idempotency/...) lives in the SAME ${POSTGRES_DB} database as the
+  # legacy Django app - this is not a second database, and 10_roles.sh's three
+  # LOGIN roles are reused as-is, unchanged, not duplicated for `api`:
+  #   - CORE_DATABASE_URL:           SHARWA_APP_USER,      through pgbouncer
+  #                                  (RLS-bound app role, transaction pooling)
+  #   - CORE_SYSTEM_DATABASE_URL:    SHARWA_SYSTEM_USER,   direct to postgres
+  #                                  (SECURITY DEFINER-only role)
+  #   - CORE_MIGRATION_DATABASE_URL: SHARWA_MIGRATION_USER, direct to postgres
+  #                                  (schema-owning role; not read by the
+  #                                  running server, only by `app.cli migrate`)
+  # The system/migration roles bypass PgBouncer deliberately: ops/pgbouncer.ini's
+  # own userlist decision only ever puts SHARWA_APP_USER in PgBouncer's
+  # userlist.txt (auto-generated from pgbouncer's own DB_USER/DB_PASSWORD env
+  # above) - a connection authenticating as any other role would simply be
+  # refused by PgBouncer, so this is not a style choice, it is the only wiring
+  # that can work at all against the real ops/pgbouncer.ini shipped here.
+  #
+  # All three DSNs are built with libpq keyword=value conninfo strings
+  # (`host=... user=... password=...`), never a `postgresql://` URI - a
+  # generated password containing @, /, %, or # would silently corrupt a URI
+  # (these characters are ordinary in a generated secret; none of them need
+  # escaping in keyword=value form).
+  api:
+    build:
+      context: ./core
+    environment:
+      JWT_ISSUER: ${JWT_ISSUER:?JWT_ISSUER is required (see .env)}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:?JWT_AUDIENCE is required (see .env)}
+      # One of these two is required (the api refuses to boot with neither) -
+      # JWKS_URL is the active default; set JWT_PUBLIC_KEY_PEM in .env instead
+      # if you need the static-PEM fallback (leave JWKS_URL empty then).
+      JWKS_URL: ${JWKS_URL:-}
+      JWT_PUBLIC_KEY_PEM: ${JWT_PUBLIC_KEY_PEM:-}
+      CORE_DATABASE_URL: "host=pgbouncer port=5432 dbname=${POSTGRES_DB} user=${SHARWA_APP_USER} password=${SHARWA_APP_PASSWORD}"
+      CORE_SYSTEM_DATABASE_URL: "host=postgres port=5432 dbname=${POSTGRES_DB} user=${SHARWA_SYSTEM_USER} password=${SHARWA_SYSTEM_PASSWORD}"
+      CORE_MIGRATION_DATABASE_URL: "host=postgres port=5432 dbname=${POSTGRES_DB} user=${SHARWA_MIGRATION_USER} password=${SHARWA_MIGRATION_PASSWORD}"
+      REDIS_CACHE_HOST: redis-cache
+      REDIS_CACHE_PORT: "6379"
+      REDIS_CACHE_PASSWORD: ${REDIS_CACHE_PASSWORD:?REDIS_CACHE_PASSWORD is required (see .env)}
+      # http://gateway:4001 - the internal Docker network hostname (both
+      # containers are members of `app`), never the host-published
+      # 127.0.0.1:4001 loopback, which is not reachable from inside another
+      # container.
+      GATEWAY_BASE_URL: ${GATEWAY_BASE_URL:-http://gateway:4001}
+      # Reuses the SAME secret the gateway's own HTTP API already requires
+      # (SHARWA_AI_GATEWAY_API_KEY) rather than inventing a second one - core/
+      # sends it back as the X-API-Key header on every gateway call.
+      GATEWAY_API_KEY: ${SHARWA_AI_GATEWAY_API_KEY:?SHARWA_AI_GATEWAY_API_KEY is required (see .env)}
+      METRICS_TOKEN: ${METRICS_TOKEN:?METRICS_TOKEN is required - the api service refuses to start without it (see .env)}
+      SSO_LOGIN_URL: ${SSO_LOGIN_URL:?SSO_LOGIN_URL is required (see .env)}
+    networks: [data, app]                  # data: postgres/pgbouncer/redis-cache. app: gateway + outbound (JWKS_URL)
+    ports:
+      - "127.0.0.1:8080:8080"              # loopback only, same convention as gateway/gateway-forwarder/prometheus
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 0.5
+    pids_limit: 100
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    depends_on:
+      postgres: { condition: service_healthy }
+      pgbouncer: { condition: service_healthy }
+      redis-cache: { condition: service_healthy }
+      gateway: { condition: service_healthy }
+    logging: *default-logging
+    restart: unless-stopped
+
   # P0.6 Batch C: scrapes gateway:4001 and gateway-forwarder:4002 (see
-  # ops/prometheus/prometheus.yml). `api` is not scraped yet - it does not
-  # exist (P0.7 scope, see ops/prometheus/prometheus.yml's own header).
+  # ops/prometheus/prometheus.yml). `api` is now built (P0.7) but is
+  # deliberately NOT added as a scrape target here - ops/prometheus/
+  # prometheus.yml itself needs its own real, current read before a scrape
+  # target is added to it (same "never guess at an unread file" rule this
+  # batch already applied to docker-compose.yml/.env.example); wiring it is
+  # a small, separate follow-up.
   prometheus:
     image: prom/prometheus:v3.14.0       # explicit tag - confirmed pullable on this VPS; no `:latest` (project rule)
     command:
