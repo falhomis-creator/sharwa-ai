@@ -11,7 +11,6 @@ digits, and no internal identifier is ever included.
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -20,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from app.llm.breaker import BreakerState, CircuitBreaker
 from app.llm.port import LlmJsonResult, LlmProvider, LlmProviderError
 from app.obs import metrics
+from app.text.redact import mask_phones  # noqa: F401 - re-exported for H21 back-compat (P1.6 C6)
 
 INTENTS = ("product_search", "policy_question", "handoff_request", "other")
 
@@ -31,15 +31,6 @@ ROUTER_SYSTEM_PROMPT = (
     '{"intent": "product_search|policy_question|handoff_request|other", '
     '"query": "نص البحث المستخرج أو سلسلة فارغة", "confidence": 0.0}'
 )
-
-_PHONE_RE = re.compile(r"\d{7,}")
-
-
-def mask_phones(text: str) -> str:
-    """H41: every run of 7+ digits becomes ***<last-3> - only the last 3 digits
-    survive. Called on every message before it reaches the provider."""
-    return _PHONE_RE.sub(lambda m: "***" + m.group(0)[-3:], text)
-
 
 def build_router_messages(texts: list[str], max_input_chars: int) -> list[dict[str, str]]:
     """Last-N text messages, phone-masked and length-capped (H41)."""

@@ -127,6 +127,23 @@ def insert_outbox(
     return row[0]
 
 
+def insert_verifier_block(
+    conn: psycopg.Connection, *, tenant_id: uuid.UUID, conversation_id: uuid.UUID | None,
+    reason: str, draft_excerpt: str | None,
+) -> int:
+    """Write one verifier_blocks audit row (H48's single exception). Append-only:
+    0001 REVOKEs UPDATE/DELETE on the table. `draft_excerpt` is caller-masked
+    (mask_phones) and capped before it reaches this function."""
+    row = conn.execute(
+        "INSERT INTO verifier_blocks (tenant_id, conversation_id, reason, draft_excerpt) "
+        "VALUES (%s, %s, %s, %s) RETURNING id",
+        (tenant_id, conversation_id, reason, draft_excerpt),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("INSERT ... RETURNING id produced no row")
+    return int(row[0])
+
+
 def mark_turn_processed(
     conn: psycopg.Connection, *, conversation_id: uuid.UUID, last_processed_seq: int,
 ) -> None:

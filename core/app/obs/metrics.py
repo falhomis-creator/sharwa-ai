@@ -552,3 +552,52 @@ summary_output_chars = Histogram(
     registry=registry,
 )
 
+# --- P1.6 output verifier metrics (PROMPT §7) ---------------------------------
+
+verify_checks_total = Counter(
+    "verify_checks_total",
+    "Verifier checks, by result (pass|violation).",
+    labelnames=["result"],
+    registry=registry,
+)
+
+verify_violations_total = Counter(
+    "verify_violations_total",
+    "Verifier violations, by rule_id (closed list: empty|oversize|control_chars|placeholder|profanity|competitor|disclosure|verifier_error).",
+    labelnames=["rule_id"],
+    registry=registry,
+)
+
+verify_errors_total = Counter(
+    "verify_errors_total",
+    "Verifier internal errors (check_text raised) - each means a customer got a safe template instead of a real reply (H47 fail-closed).",
+    registry=registry,
+)
+
+verify_duration_seconds = Histogram(
+    "verify_duration_seconds",
+    "Seconds for one insert_verified_outbox call.",
+    buckets=(0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0),
+    registry=registry,
+)
+
+verify_blocklist_phrases = Gauge(
+    "verify_blocklist_phrases",
+    "Number of active blocklist phrases per category (profanity|competitor|disclosure) - set at boot.",
+    labelnames=["category"],
+    registry=registry,
+)
+
+verify_enabled = Gauge(
+    "verify_enabled",
+    "1 when the output verifier is enabled, 0 when disabled (H4: disable is visible, not hidden).",
+    registry=registry,
+)
+
+verify_safe_template_sent_total = Counter(
+    "verify_safe_template_sent_total",
+    "Safe-fallback templates sent after a verifier violation.",
+    registry=registry,
+)
+
+

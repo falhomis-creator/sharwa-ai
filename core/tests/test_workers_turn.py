@@ -66,3 +66,59 @@ def test_policy_exempt_templates_are_closed_set():
     # (a closed list - adding to it is a policy decision, not programming).
     assert templates.POLICY_EXEMPT_TEMPLATES == frozenset({"safe_ack"})
 
+
+class _Counter:
+    def __init__(self):
+        self.value = 0
+
+    def inc(self, *a):
+        self.value += 1
+
+    def labels(self, *a):
+        return self
+
+
+def test_write_phase_delegates_to_verifier_and_skips_metrics_on_violation(monkeypatch):
+    # P1.6 §9: turn.py now writes through verify.insert_verified_outbox, and
+    # outbox_written_total must NOT rise when the verifier rejects (ok=False).
+    from types import SimpleNamespace
+    import uuid as _uuid
+
+    from app.workers import turn
+    from app.workers.turn import _Action, _TurnPlan
+
+    conv = SimpleNamespace(id=_uuid.uuid4(), bot_status="active", epoch=1,
+                           version=1, last_inbound_seq=5, last_processed_seq=0)
+    plan = _TurnPlan(conversation_id=conv.id, tenant_id=_uuid.uuid4(),
+                     channel_id=_uuid.uuid4(), decision=None, bodies=(), should_route=False)
+    action = _Action("handoff_notice", "نص", False, None, "template", "handoff")
+
+    calls: list[dict] = []
+    monkeypatch.setattr(turn.repos_outbox, "lock_conversation",
+                        lambda conn, conversation_id, tenant_id: conv)
+    monkeypatch.setattr(turn.repos_outbox, "wa_id_for_conversation", lambda conn, cid: "wa-1")
+    monkeypatch.setattr(turn.repos_outbox, "mark_turn_processed",
+                        lambda conn, conversation_id, last_processed_seq: None)
+    monkeypatch.setattr(turn, "_resolve_action",
+                        lambda conn, settings, plan, router_result, query_vector=None: action)
+    monkeypatch.setattr(turn.metrics, "turn_processed_total", _Counter())
+    monkeypatch.setattr(turn.metrics, "turn_skipped_total", _Counter())
+    monkeypatch.setattr(turn.metrics, "outbox_written_total", _Counter())
+    monkeypatch.setattr(turn.metrics, "compose_replies_total", _Counter())
+
+    class FakeOutcome:
+        ok = False
+
+    monkeypatch.setattr(turn.verify, "insert_verified_outbox",
+                        lambda conn, **kw: calls.append(kw) or FakeOutcome())
+
+    result = turn._write_phase(None, None, plan, None, None, rules=None)
+    assert result == "handoff"
+    assert len(calls) == 1
+    assert calls[0]["text"] == "نص"
+    assert calls[0]["template_id"] == "handoff_notice"
+    # ok=False => the composed reply did NOT go out, so it must not be counted.
+    assert turn.metrics.outbox_written_total.value == 0
+    assert turn.metrics.compose_replies_total.value == 0
+
+

@@ -52,6 +52,17 @@ def _csv(name: str, default: str) -> tuple[str, ...]:
     return tuple(p for p in parts if p)
 
 
+def _bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    raise ConfigError(f"{name} must be a boolean, got {raw!r}")
+
+
 # P1.1.5 default opt-out phrases (overridable without a code deploy, H4/OQ-P1-05).
 DEFAULT_OPTOUT_AR = (
     "إيقاف",
@@ -70,6 +81,20 @@ DEFAULT_OPTOUT_EN = ("stop", "unsubscribe", "opt out", "optout")
 # H25 - no classifier). customer_requested is reserved for an ACTUAL match.
 DEFAULT_HANDOFF_AR = ("موظف", "شخص حقيقي", "بشري", "ممثل", "خدمة العملاء", "حولني", "انسان", "إنسان")
 DEFAULT_HANDOFF_EN = ("human", "agent", "representative", "person", "talk to a human")
+
+# P1.6 output-verifier default blocklists (owner policy data, overridable via env
+# without a code deploy - H4). Conservative defaults; the owner's review of these
+# lists is an open item (docs/P1_DEVIATIONS.md / PROMPT_P1_06 §12 OQ-P1-14).
+DEFAULT_VERIFY_PROFANITY_AR = ("تبا", "لعنة", "سافل", "حقير")
+DEFAULT_VERIFY_PROFANITY_EN = ("fuck", "shit", "bitch", "asshole", "bastard")
+DEFAULT_VERIFY_COMPETITORS = ("salla", "zid", "shopify", "woocommerce", "bigcommerce", "squarespace")
+# disclosure = machine-revealing vocabulary + provider names. The provider names
+# belong here by necessity (S8 rule 3 forbids them outside app/llm/adapters/ and
+# the config files - and this file IS the exempted worker config).
+DEFAULT_VERIFY_DISCLOSURE = (
+    "بوت", "ذكاء اصطناعي", "روبوت", "نموذج لغوي", "chatbot",
+    "deepseek", "gpt", "claude", "openai", "anthropic",
+)
 
 # ops/pgbouncer.ini default_pool_size (read in P1.0.1, not assumed). The
 # worker's tenant pool goes THROUGH PgBouncer, so it must leave headroom for
@@ -136,6 +161,17 @@ def validate_embedding_dim(dim: int) -> None:
         raise ConfigError(
             f"EMBEDDING_DIM must equal {EMBEDDING_DIM_CONTRACT} "
             f"(the vector column width), got {dim}"
+        )
+
+
+def validate_safe_template_id(template_id: str) -> None:
+    """P1.6 §6: VERIFY_SAFE_TEMPLATE_ID must be a member of the CLOSED
+    templates.SAFE_FALLBACK_TEMPLATES list, else ConfigError at load."""
+    from app.workers import templates
+    if template_id not in templates.SAFE_FALLBACK_TEMPLATES:
+        raise ConfigError(
+            f"VERIFY_SAFE_TEMPLATE_ID ({template_id!r}) must be one of "
+            f"{sorted(templates.SAFE_FALLBACK_TEMPLATES)}"
         )
 
 
@@ -221,6 +257,15 @@ class WorkerSettings:
     summary_max_chars: int = 1600
     summary_min_messages_between: int = 10
     summary_max_per_conversation_per_day: int = 6
+    # P1.6 output verifier (PROMPT §6). All defaults written (H4).
+    verify_enabled: bool = True
+    verify_max_chars: int = 4000
+    verify_excerpt_max_chars: int = 200
+    verify_safe_template_id: str = "handoff_notice"
+    verify_profanity_ar: tuple[str, ...] = DEFAULT_VERIFY_PROFANITY_AR
+    verify_profanity_en: tuple[str, ...] = DEFAULT_VERIFY_PROFANITY_EN
+    verify_competitors: tuple[str, ...] = DEFAULT_VERIFY_COMPETITORS
+    verify_disclosure: tuple[str, ...] = DEFAULT_VERIFY_DISCLOSURE
 
     @staticmethod
     def load() -> WorkerSettings:
@@ -288,6 +333,9 @@ class WorkerSettings:
         validate_embedding_provider(env, embedding_provider)
         embedding_dim = _int("EMBEDDING_DIM", 1024)
         validate_embedding_dim(embedding_dim)
+
+        verify_safe_template_id = _optional("VERIFY_SAFE_TEMPLATE_ID", "handoff_notice")
+        validate_safe_template_id(verify_safe_template_id)
 
         return WorkerSettings(
             db=db,
@@ -370,4 +418,12 @@ class WorkerSettings:
             summary_max_chars=_int("SUMMARY_MAX_CHARS", 1600),
             summary_min_messages_between=_int("SUMMARY_MIN_MESSAGES_BETWEEN", 10),
             summary_max_per_conversation_per_day=_int("SUMMARY_MAX_PER_CONVERSATION_PER_DAY", 6),
+            verify_enabled=_bool("VERIFY_ENABLED", True),
+            verify_max_chars=_int("VERIFY_MAX_CHARS", 4000),
+            verify_excerpt_max_chars=_int("VERIFY_EXCERPT_MAX_CHARS", 200),
+            verify_safe_template_id=verify_safe_template_id,
+            verify_profanity_ar=_csv("VERIFY_PROFANITY_AR", ",".join(DEFAULT_VERIFY_PROFANITY_AR)),
+            verify_profanity_en=_csv("VERIFY_PROFANITY_EN", ",".join(DEFAULT_VERIFY_PROFANITY_EN)),
+            verify_competitors=_csv("VERIFY_COMPETITORS", ",".join(DEFAULT_VERIFY_COMPETITORS)),
+            verify_disclosure=_csv("VERIFY_DISCLOSURE", ",".join(DEFAULT_VERIFY_DISCLOSURE)),
         )

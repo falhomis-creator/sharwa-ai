@@ -27,6 +27,7 @@ from app.obs import metrics
 from app.workers import compose
 from app.workers import optout
 from app.workers import templates
+from app.workers import verify
 from app.workers.config import WorkerSettings
 from app.workers.stream import TransientError
 
@@ -202,6 +203,7 @@ def _account(conn: Any, settings: WorkerSettings, plan: _TurnPlan, router: LlmRo
 def process_turn(
     *, settings: WorkerSettings, conversation_id: uuid.UUID, tenant_id: uuid.UUID,
     router: LlmRouterHandle | None = None, embed: Any = None, cache_client: Any = None,
+    rules: Any = None,
 ) -> str:
     """Run one turn. The provider call (if any) runs OUTSIDE any transaction
     (H40): read + decide in one short tx, route, then write + account in a
@@ -277,7 +279,7 @@ def process_turn(
 
     # ---- Phase 3: write + account (second short transaction) ----
     with core_db.tenant_tx(tenant_id) as conn:
-        outcome = _write_phase(conn, settings, plan, router, router_result, query_vector=query_vector)
+        outcome = _write_phase(conn, settings, plan, router, router_result, query_vector=query_vector, rules=rules)
 
     metrics.turn_duration_seconds.observe(time.monotonic() - started)
     return outcome
@@ -288,6 +290,7 @@ def _write_phase(
     conn: Any, settings: WorkerSettings, plan: _TurnPlan,
     router: LlmRouterHandle | None, router_result: Any,
     query_vector: list[float] | None = None,
+    rules: Any = None,
 ) -> str:
     conv = repos_outbox.lock_conversation(conn, conversation_id=plan.conversation_id, tenant_id=plan.tenant_id)
     if conv is None:
@@ -339,19 +342,21 @@ def _write_phase(
         metrics.inbox_events_written_total.labels("conversation.updated").inc()
 
     turn_seq = conv.last_inbound_seq
-    repos_outbox.insert_outbox(
-        conn, tenant_id=plan.tenant_id, conversation_id=conv.id,
+    outcome = verify.insert_verified_outbox(
+        conn, settings=settings, rules=rules,
+        tenant_id=plan.tenant_id, conversation_id=conv.id,
         channel_account_id=plan.channel_id,
         idempotency_key=f"{conv.id}:{turn_seq}:1",
-        origin="bot", message_class="service", expected_epoch=expected_epoch,
+        message_class="service", expected_epoch=expected_epoch,
         to_wa_id=wa_id, template_id=action.template_id, text=action.text,
     )
     repos_outbox.mark_turn_processed(
         conn, conversation_id=conv.id, last_processed_seq=conv.last_inbound_seq,
     )
     metrics.turn_processed_total.labels(action.outcome).inc()
-    metrics.outbox_written_total.labels("service").inc()
-    if action.kind is not None:
-        metrics.compose_replies_total.labels(action.kind).inc()
+    if outcome.ok:
+        metrics.outbox_written_total.labels("service").inc()
+        if action.kind is not None:
+            metrics.compose_replies_total.labels(action.kind).inc()
     return action.outcome
 

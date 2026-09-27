@@ -167,6 +167,79 @@ def _s9_embedding_provider_imports(tree: ast.Module) -> list[str]:
     return found
 
 
+# --- S10 (P1.6): H45/H46 - single outbox write point; deterministic verifier ---
+_S10_INSERT_OUTBOX_UNCONDITIONAL = frozenset({"app.db.repos_outbox", "app.workers.verify"})
+_VERIFY_RULES_ALLOWED_IMPORTS = frozenset({
+    "re", "dataclasses", "typing", "enum", "__future__", "app.text.arabic",
+})
+
+
+def _insert_outbox_calls(tree: ast.Module) -> list[ast.Call]:
+    """Every insert_outbox CALL (name or attribute), via ast.walk (not re)."""
+    calls: list[ast.Call] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else (func.attr if isinstance(func, ast.Attribute) else None)
+        if name == "insert_outbox":
+            calls.append(node)
+    return calls
+
+
+def _call_origin_human(call: ast.Call) -> bool:
+    for kw in call.keywords:
+        if kw.arg == "origin" and isinstance(kw.value, ast.Constant) and kw.value.value == "human":
+            return True
+    return False
+
+
+def _resolved_import_targets(tree: ast.Module, mods: dict[str, Path]) -> list[str]:
+    """Resolve each import to a module name: `from app.text import arabic` ->
+    `app.text.arabic` (because that submodule exists), `from dataclasses import
+    dataclass` -> `dataclasses`, `from __future__ import x` -> `__future__`."""
+    targets: list[str] = []
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                targets.append(a.name)
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            for a in node.names:
+                if not base:
+                    continue
+                joined = f"{base}.{a.name}"
+                targets.append(joined if joined in mods else base)
+    return targets
+
+
+def _function_calls(tree: ast.Module, fn_name: str) -> list[ast.FunctionDef]:
+    return [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == fn_name]
+
+
+def _calls_name(node: ast.AST, callee: str) -> bool:
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call):
+            f = sub.func
+            name = f.id if isinstance(f, ast.Name) else (f.attr if isinstance(f, ast.Attribute) else None)
+            if name == callee:
+                return True
+    return False
+
+
+def _call_text_is_verified(call: ast.Call) -> bool:
+    """text= must be a .value attribute (approved.value) OR templates.template_text(...)."""
+    for kw in call.keywords:
+        if kw.arg != "text":
+            continue
+        v = kw.value
+        if isinstance(v, ast.Attribute) and v.attr == "value":
+            return True
+        if isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute) and v.func.attr == "template_text":
+            return True
+    return False
+
+
 _violations: list[str] = []
 _notes: list[str] = []  # informational (S1-c re-exports) - never cause a failure
 
@@ -531,6 +604,65 @@ def main() -> int:
         if mod not in _S9_CATALOG_EMBEDDINGS_ALLOWED and "catalog_embeddings" in text:
             _err("S9", str(path.relative_to(ROOT)), 0,
                  f"'{mod}' references 'catalog_embeddings' outside repos_catalog.py and embed.py")
+
+    # ---- S10 (P1.6): H45/H46 - single outbox write point; deterministic layer ---
+    # a: insert_outbox may only be called by repos_outbox (definition), verify.py
+    #    (the enforcement point), or a module whose every call is origin="human".
+    for mod, path in mods.items():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        calls = _insert_outbox_calls(tree)
+        if not calls:
+            continue
+        if mod in _S10_INSERT_OUTBOX_UNCONDITIONAL:
+            continue
+        if all(_call_origin_human(c) for c in calls):
+            continue
+        _err("S10", str(path.relative_to(ROOT)), 0,
+             f"'{mod}' calls insert_outbox without origin='human' literal "
+             "(H46: only verify.py + the human reply path may write outbox)")
+
+    # b: verify_rules imports are closed (H45 - no LLM/IO/DB/random/time).
+    vr_path = mods.get("app.workers.verify_rules")
+    if vr_path is not None:
+        vr_tree = ast.parse(vr_path.read_text(encoding="utf-8"))
+        for target in _resolved_import_targets(vr_tree, mods):
+            if target not in _VERIFY_RULES_ALLOWED_IMPORTS:
+                _err("S10", str(vr_path.relative_to(ROOT)), 0,
+                     f"app.workers.verify_rules imports '{target}' outside the closed set "
+                     "(H45: no LLM/IO/DB/random/time)")
+
+    # c: verify.insert_verified_outbox exists, calls check_text, <=2 insert_outbox.
+    v_path = mods.get("app.workers.verify")
+    if v_path is not None:
+        v_tree = ast.parse(v_path.read_text(encoding="utf-8"))
+        fns = _function_calls(v_tree, "insert_verified_outbox")
+        if not fns:
+            _err("S10", str(v_path.relative_to(ROOT)), 0,
+                 "app.workers.verify must define insert_verified_outbox (H46)")
+        elif not any(_calls_name(f, "check_text") for f in fns):
+            _err("S10", str(v_path.relative_to(ROOT)), 0,
+                 "insert_verified_outbox body must call check_text (H45)")
+        n_calls = len(_insert_outbox_calls(v_tree))
+        if n_calls > 2:
+            _err("S10", str(v_path.relative_to(ROOT)), 0,
+                 f"app.workers.verify has {n_calls} insert_outbox calls (max 2: accept + safe template)")
+
+    # d: turn.py must not call insert_outbox (it delegates to verify).
+    t_path = mods.get("app.workers.turn")
+    if t_path is not None:
+        t_tree = ast.parse(t_path.read_text(encoding="utf-8"))
+        if _insert_outbox_calls(t_tree):
+            _err("S10", str(t_path.relative_to(ROOT)), 0,
+                 "app.workers.turn must not call insert_outbox (delegate to verify.insert_verified_outbox)")
+
+    # e: verified-text discipline - every insert_outbox text= in verify.py must be
+    #    approved.value or templates.template_text(...) (owner order).
+    if v_path is not None:
+        v_tree_e = ast.parse(v_path.read_text(encoding="utf-8"))
+        for c in _insert_outbox_calls(v_tree_e):
+            if not _call_text_is_verified(c):
+                _err("S10", str(v_path.relative_to(ROOT)), getattr(c, "lineno", 0),
+                     "insert_outbox text= must be approved.value or templates.template_text(...)")
 
     # ---- output -------------------------------------------------------------
     if _notes:

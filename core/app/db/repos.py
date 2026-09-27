@@ -210,7 +210,12 @@ def insert_whatsapp_channel_account(
 ) -> dict[str, Any]:
     """Create a whatsapp_baileys channel (status defaults to 'unknown'). Raises
     ChannelAlreadyExistsError when the tenant already has an active baileys
-    channel (the partial unique index enforces it at the DB level)."""
+    channel (the partial unique index enforces it at the DB level).
+
+    The transaction aborts in PostgreSQL after `UniqueViolation`; anyone who
+    catches `ChannelAlreadyExistsError` and wants to continue work in the SAME
+    transaction needs a `SAVEPOINT`. The current path raises `ApiError`
+    immediately so it rolls back, which is correct (P1.5b N1)."""
     try:
         cur = conn.execute(
             "INSERT INTO channel_accounts (tenant_id, type, session_id, engine) "

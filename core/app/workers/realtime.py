@@ -39,7 +39,7 @@ from app.db.context import system_tx, tenant_tx
 from app.obs import http as obs_http
 from app.obs import logging as obs_logging
 from app.obs import metrics
-from app.workers import catalog, dispatch, embed, evt, optout, schema, summary, turn
+from app.workers import catalog, dispatch, embed, evt, optout, schema, summary, turn, verify
 from app.workers.config import WorkerSettings
 from app.workers.stream import (
     PermanentError,
@@ -191,6 +191,7 @@ class RealtimeWorker:
         self.llm_router = turn.build_router(self.settings)
         self.embed_handle = embed.build_embed(self.settings)
         self.summary_handle = summary.build_summary(self.settings)
+        self.verify_rules = verify.build_rules(self.settings)
         metrics.core_worker_up.set(1)
 
     def _teardown(self) -> None:
@@ -626,6 +627,7 @@ class RealtimeWorker:
                             conversation_id=conversation_id, tenant_id=tenant_id,
                             router=self.llm_router,
                             embed=self.embed_handle, cache_client=self.cache_client,
+                            rules=self.verify_rules,
                         )
                         # Commit landed; publish the turn's queued inbox_events (H33).
                         ws_publish.flush_publishes()

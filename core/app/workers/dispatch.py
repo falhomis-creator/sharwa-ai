@@ -90,7 +90,11 @@ def _pre_send_checks(settings: WorkerSettings, row: repos_outbox.OutboxRow) -> s
     with tenant_tx(row.tenant_id) as conn:
         if row.origin == "bot" and row.conversation_id is not None:
             cur = repos_outbox.read_conversation_epoch_status(conn, row.conversation_id)
-            if cur is None or cur[1] != "active" or (
+            # F-P1-09 (PROMPT_P1_06 §0.2/§3, migration 0011): a bot row is stale iff
+            # its epoch no longer matches OR the conversation is CLOSED. 'paused_human'
+            # alone is NOT a drop reason - the old `cur[1] != "active"` dropped the very
+            # handoff_notice/safe_ack written by the transition that paused the bot.
+            if cur is None or cur[1] == "closed" or (
                 row.expected_epoch is not None and cur[0] != row.expected_epoch
             ):
                 repos_outbox.mark_outbox_status(conn, outbox_id=row.id, status="dropped_stale")

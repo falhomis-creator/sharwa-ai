@@ -377,4 +377,45 @@ groups:
           summary: "the vector source is being skipped for over half of searches"
           description: "more than 50% of searches skipped the vector source over 30 minutes - the embedding provider or budget is likely unavailable; lexical search is still serving (H42)."
 
+  # P1.6 (output verifier): four rules (PROMPT §7). Built on staleness/rate, not
+  # absence (lesson P1.3b D3) - except VerifierBlocklistEmpty, whose whole point
+  # is to catch an accidentally-empty blocklist while verify_enabled still reads 1.
+  - name: sharwa_ai_p1_6
+    rules:
+      - alert: VerifierDisabled
+        expr: verify_enabled == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "the output verifier is disabled"
+          description: "verify_enabled has been 0 for 5 minutes - turning the output verifier off in production is an incident, never a silent default."
+
+      - alert: VerifierViolationSpike
+        expr: rate(verify_violations_total[15m]) > 10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "verifier violations are spiking"
+          description: "the 15-minute rate of verify_violations_total is above 10 - either a prompt-injection attack or a blocklist rule producing false positives; both need a human look."
+
+      - alert: VerifierInternalErrors
+        expr: rate(verify_errors_total[10m]) > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "the output verifier is failing closed"
+          description: "verify_errors_total increased in the last 10 minutes - every verifier error means a customer got a safe template instead of a correct reply (H47)."
+
+      - alert: VerifierBlocklistEmpty
+        expr: verify_blocklist_phrases{category="profanity"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "the profanity blocklist is empty"
+          description: "verify_blocklist_phrases{category=\"profanity\"} is 0 for 5 minutes - an empty list is a toothless verifier while verify_enabled reassuringly reads 1."
+
 

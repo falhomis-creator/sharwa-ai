@@ -42,3 +42,8 @@ def template_text(template_id: str) -> str:
 # for it. This is a CLOSED list: adding anything to it is a policy decision
 # (PROMPT_P1_03 §0, F-P1-06), never a programming decision.
 POLICY_EXEMPT_TEMPLATES = frozenset({"safe_ack"})
+
+# P1.6 (§6): the templates the output verifier may send as its SAFE fallback when
+# a composed reply violates a blocklist. This is a CLOSED list - expanding it is a
+# policy decision (like POLICY_EXEMPT_TEMPLATES), never a programming decision.
+SAFE_FALLBACK_TEMPLATES = frozenset({"handoff_notice", "safe_ack"})
