@@ -13,6 +13,8 @@ from app.db import testsupport as db_testsupport
 
 from .conftest import TENANT_A, TENANT_B
 
+pytestmark = pytest.mark.db
+
 
 @pytest.fixture(autouse=True)
 def _seed_two_tenants_with_matching_channels():

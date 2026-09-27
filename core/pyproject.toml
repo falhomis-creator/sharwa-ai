@@ -28,3 +28,13 @@ exclude = ["migrations/"]
 [[tool.mypy.overrides]]
 module = ["psycopg_pool.*", "jwt.*"]
 ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+# M0 (P1.5 §0.3): tests that need live services (Postgres/Redis) are marked
+# `@pytest.mark.db` and SKIPPED by default, so a bare `pytest core/tests` runs
+# every pure test with no live Postgres.
+markers = [
+    "db: requires live services (Postgres/Redis) - skipped by default",
+    "tools: requires external dev tooling binaries (lint-imports/ruff/mypy/pip-audit) - skipped by default",
+]
+addopts = "-m 'not db and not tools'"

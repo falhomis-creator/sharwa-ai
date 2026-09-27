@@ -1,0 +1,17 @@
+# core/requirements-dev.txt - dev-only toolchain, pinned so any environment (or
+# the architect) can run the FULL layer with one command:
+#     pip install -r requirements.txt -r requirements-dev.txt
+#     pytest -q            # pure tests only (db/tools markers auto-skipped)
+#     pytest -q -m tools   # the import-linter structural tests
+#     ruff check . && mypy app && pip-audit -r requirements.txt
+#
+# N1 (P1.5 audit): `pytest` used to end with 2 failed because the `lint-imports`
+# binary (import-linter) was absent. These are the tools behind those 2 tests and
+# the static checks this repo declares as its bar. Pin versions to make the green
+# reproducible; re-confirm the exact pins against `pip` on a machine with the
+# toolchain if any of these has since moved.
+pytest==9.1.1
+import-linter==2.4
+ruff==0.14.10
+mypy==1.18.2
+pip-audit==2.9.1

@@ -96,3 +96,22 @@ class GatewayClient:
 
     def session_stats(self, session_id: str) -> httpx.Response:
         return self._request("GET", f"/sessions/{session_id}/stats")
+
+    def send(
+        self,
+        *,
+        session_id: str,
+        to: str,
+        text: str,
+        client_msg_id: str | None = None,
+        kind: str = "interactive",
+    ) -> httpx.Response:
+        """POST /sessions/:id/send (gateway/src/index.js:180-237, §5.1).
+
+        client_msg_id MUST be the outbox.idempotency_key itself - that is what
+        makes a retried dispatch idempotent at the gateway (H22). kind is
+        'marketing' for message_class='marketing', else 'interactive'."""
+        body: dict[str, str] = {"to": to, "text": text, "kind": kind}
+        if client_msg_id is not None:
+            body["client_msg_id"] = client_msg_id
+        return self._request("POST", f"/sessions/{session_id}/send", json=body)

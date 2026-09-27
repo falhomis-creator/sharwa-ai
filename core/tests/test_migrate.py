@@ -16,6 +16,8 @@ from app import cli
 from app.db import testsupport as db_testsupport
 from app.db.migrate import MigrationError, run_migrations
 
+pytestmark = pytest.mark.db
+
 # The advisory lock key run_migrations() takes is a single bigint
 # (ADVISORY_LOCK_KEY in app/db/migrate.py); pg_locks records a two-int-key
 # advisory lock as (classid, objid) - the high and low 32 bits of that

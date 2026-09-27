@@ -38,6 +38,7 @@ def rsa_keyfile(tmp_path):
     return priv_path, pub_pem
 
 
+@pytest.mark.db
 def test_create_tenant_inserts_a_real_row(capsys):
     platform_ref = f"cli-test-{uuid.uuid4()}"
     rc = cli.main([

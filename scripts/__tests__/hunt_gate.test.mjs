@@ -216,7 +216,7 @@ test('B1: CRLF (\\r) in LF-required files is flagged; LF-only files pass', () =>
     write(dirty, 'crlf.yml', 'services:\r\n  x: {}\r\n');
     write(dirty, 'Dockerfile', 'FROM alpine:3.19\r\n');
     const { violations } = runGate(dirty);
-    const cr = violations.filter((v) => v.rule === 'CRLF/rule9');
+    const cr = violations.filter((v) => v.rule === 'CRLF/B1');
     assert.equal(cr.length, 3);
   } finally {
     cleanup(dirty);
@@ -230,7 +230,7 @@ test('B1: CRLF (\\r) in LF-required files is flagged; LF-only files pass', () =>
     write(clean, 'clean.ini', '[pgbouncer]\npool_mode = transaction\n');
     write(clean, 'clean.sql', 'SELECT 1;\n');
     write(clean, 'Dockerfile', 'FROM alpine:3.19\n');
-    assert.equal(runGate(clean).violations.filter((v) => v.rule === 'CRLF/rule9').length, 0);
+    assert.equal(runGate(clean).violations.filter((v) => v.rule === 'CRLF/B1').length, 0);
   } finally {
     cleanup(clean);
   }

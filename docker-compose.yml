@@ -183,6 +183,10 @@ services:
       REDIS_CACHE_PORT: "6379"
       REDIS_CACHE_PASSWORD: ${REDIS_CACHE_PASSWORD:?REDIS_CACHE_PASSWORD is required (see .env)}
       METRICS_TOKEN: ${METRICS_TOKEN:?METRICS_TOKEN is required - the gateway refuses to start without it (see .env)}
+      # P1.0: single source of truth for shard count across gateway +
+      # gateway-forwarder + worker-realtime (the shards are NOT live-redistributable
+      # - changing this requires stopping all three together, see .env.example).
+      INGEST_SHARDS: ${INGEST_SHARDS:-4}
       NODE_OPTIONS: --max-old-space-size=900
     volumes:
       - gateway_auth_sessions:/app/auth_sessions   # WhatsApp session credentials survive restarts
@@ -218,6 +222,7 @@ services:
       REDIS_DURABLE_PASSWORD: ${REDIS_DURABLE_PASSWORD:?REDIS_DURABLE_PASSWORD is required (see .env)}
       METRICS_TOKEN: ${METRICS_TOKEN:?METRICS_TOKEN is required - the forwarder refuses to start without it (see .env)}
       FORWARDER_METRICS_PORT: ${FORWARDER_METRICS_PORT:-4002}
+      INGEST_SHARDS: ${INGEST_SHARDS:-4}
     networks: [data, app]
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -263,6 +268,7 @@ services:
   api:
     build:
       context: ./core
+    image: sharwa-ai-core:p1.0            # P1.0: shared tag with worker-realtime (built once, same image)
     environment:
       JWT_ISSUER: ${JWT_ISSUER:?JWT_ISSUER is required (see .env)}
       JWT_AUDIENCE: ${JWT_AUDIENCE:?JWT_AUDIENCE is required (see .env)}
@@ -309,13 +315,57 @@ services:
     logging: *default-logging
     restart: unless-stopped
 
+  # P1.0: realtime ingest worker (core/, same image as `api`, different command).
+  # Reads in:{shard} via the ai-core-ingest consumer group and commits each
+  # entry to PostgreSQL in one transaction (P1.0+P1.1). Same role wiring as
+  # `api`: CORE_DATABASE_URL via pgbouncer (RLS app role), CORE_SYSTEM_DATABASE_URL
+  # direct to postgres (SECURITY DEFINER-only role). On [data, app] like `api` so
+  # prometheus (app network) can reach /healthz + /metrics on :4003.
+  worker-realtime:
+    image: sharwa-ai-core:p1.0
+    command: ["python", "-m", "app.workers.realtime"]
+    environment:
+      ENV: production
+      CORE_DATABASE_URL: "host=pgbouncer port=5432 dbname=${POSTGRES_DB} user=${SHARWA_APP_USER} password=${SHARWA_APP_PASSWORD}"
+      CORE_SYSTEM_DATABASE_URL: "host=postgres port=5432 dbname=${POSTGRES_DB} user=${SHARWA_SYSTEM_USER} password=${SHARWA_SYSTEM_PASSWORD}"
+      REDIS_DURABLE_HOST: redis-durable
+      REDIS_DURABLE_PORT: "6379"
+      REDIS_DURABLE_PASSWORD: ${REDIS_DURABLE_PASSWORD:?REDIS_DURABLE_PASSWORD is required (see .env)}
+      # P1.3b (W5): the workers publish committed inbox_events to redis-cache
+      # Pub/Sub (tenant:{id}:inbox) for the api's live WebSocket feed.
+      REDIS_CACHE_HOST: redis-cache
+      REDIS_CACHE_PORT: "6379"
+      REDIS_CACHE_PASSWORD: ${REDIS_CACHE_PASSWORD:?REDIS_CACHE_PASSWORD is required (see .env)}
+      INGEST_SHARDS: ${INGEST_SHARDS:-4}
+      CORE_WORKER_METRICS_PORT: ${CORE_WORKER_METRICS_PORT:-4003}
+      # N4: same dedupe-done TTL the gateway already reads, from ONE variable,
+      # so a future tuning can't silently diverge between gateway and worker.
+      DEDUPE_DONE_TTL_S: ${DEDUPE_DONE_TTL_S:-172800}
+      METRICS_TOKEN: ${METRICS_TOKEN:?METRICS_TOKEN is required - the worker refuses to start without it (see .env)}
+    networks: [data, app]                  # data: pg/pgbouncer/redis-durable/redis-cache. app: prometheus scrape target
+    mem_limit: 512m                        # P1.2: raised 384m -> 512m for the turn/dispatch/evt thread groups
+    memswap_limit: 512m
+    cpus: 0.75
+    pids_limit: 100
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:4003/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    depends_on:
+      postgres: { condition: service_healthy }
+      pgbouncer: { condition: service_healthy }
+      redis-durable: { condition: service_healthy }
+      redis-cache: { condition: service_healthy }
+    logging: *default-logging
+    restart: unless-stopped
+
   # P0.6 Batch C: scrapes gateway:4001 and gateway-forwarder:4002 (see
-  # ops/prometheus/prometheus.yml). `api` is now built (P0.7) but is
-  # deliberately NOT added as a scrape target here - ops/prometheus/
-  # prometheus.yml itself needs its own real, current read before a scrape
-  # target is added to it (same "never guess at an unread file" rule this
-  # batch already applied to docker-compose.yml/.env.example); wiring it is
-  # a small, separate follow-up.
+  # ops/prometheus/prometheus.yml). P1.0 adds api:8080 and worker-realtime:4003
+  # as scrape targets there (ops/prometheus/prometheus.yml was read for real
+  # and updated in the same change), closing the P0.7 "follow-up" deferral.
   prometheus:
     image: prom/prometheus:v3.14.0       # explicit tag - confirmed pullable on this VPS; no `:latest` (project rule)
     command:

@@ -10,6 +10,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+# N1 (P1.5 audit): these two tests shell out to the real `lint-imports` binary,
+# which is a dev-tooling dependency (import-linter) not present in the minimal
+# runtime environment. Mark the module `tools` (same pattern as `db`) so a bare
+# `pytest core/tests` SKIPS them and ends green - red must always be news.
+pytestmark = pytest.mark.tools
+
 CORE_DIR = Path(__file__).resolve().parent.parent
 # The actual console-script entry point (a click command, not runnable via
 # `python -m importlinter.cli`) - resolved relative to the running

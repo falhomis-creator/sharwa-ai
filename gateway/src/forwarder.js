@@ -28,6 +28,8 @@ import { logger } from './logger.js';
 import { config } from './config.js';
 import { createRedisClient, closeRedisClient } from './redis.js';
 import { postInboundMessage } from './webhook.js';
+import { markDone } from './ingest/dedupe.js';
+import { dedupeKeyFor } from './ingest/wal.js';
 import { forwarderRegistry, forwarderAttemptsTotal, setForwarderRedisClient } from './forwarder_metrics.js';
 
 const CONSUMER_NAME = `forwarder-${process.pid}`;
@@ -162,6 +164,17 @@ async function deliverOne(client, stream, id, data) {
     logger.warn({ stream, id, attempts, max: config.forwardMaxAttempts }, '[forwarder] delivery failed; will retry');
     forwarderAttemptsTotal.labels('retry').inc();
     return false;
+  }
+  // P1.1.7 (F-P1-01): the dedupe marker was only ever extended in the
+  // phoneNumberShare path, so a delivered message's marker expired after
+  // DEDUPE_PENDING_TTL_S instead of the intended DEDUPE_DONE_TTL_S. Extend it
+  // here after a successful Django delivery - best-effort (a failed extend is
+  // logged but not a delivery failure; UNIQUE inbound_events is the real
+  // guarantee, this just restores the G2 "48h" window).
+  try {
+    await markDone(client, dedupeKeyFor(data.session_id, data.provider_message_id), config.dedupeDoneTtlS * 1000);
+  } catch (err) {
+    logger.warn({ stream, id, err: err.message }, '[forwarder] markDone after delivery failed (non-fatal; marker will expire at pending TTL)');
   }
   forwarderAttemptsTotal.labels('delivered').inc();
   return true;

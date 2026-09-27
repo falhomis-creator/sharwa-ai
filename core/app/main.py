@@ -15,20 +15,28 @@ request_id and audit_log's request_id column both come from.
 """
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
 from prometheus_client import CollectorRegistry
+from redis import asyncio as redis_asyncio
 
 from app import db as core_db
+from app import ws_publish
 from app.api.errors import ApiError, api_error_handler, unhandled_exception_handler
+from app.api.routes_catalog import router as catalog_router
 from app.api.routes_health import router as health_router
+from app.api.routes_inbox import router as inbox_router
 from app.api.routes_killswitches import router as killswitches_router
+from app.api.ws import WsHub
+from app.api.ws import router as ws_router
 from app.channels.gateway_client import GatewayClient
 from app.config import Settings
 from app.killswitch.redis_sync import RedisSync
+from app.obs import metrics
 
 
 @asynccontextmanager
@@ -38,11 +46,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     redis_sync = RedisSync(settings.redis, verify_timeout_s=settings.ks_publish_verify_timeout_s)
     gateway_client = GatewayClient(settings.gateway, api_key=settings.gateway_api_key)
+    ws_publish.configure(redis_sync._client)
 
     app.state.settings = settings
     app.state.redis_sync = redis_sync
     app.state.gateway_client = gateway_client
     app.state.metrics_registry = CollectorRegistry()
+
+    redis_async = redis_asyncio.Redis(
+        host=settings.redis.cache_host, port=settings.redis.cache_port,
+        password=settings.redis.cache_password, decode_responses=True,
+    )
+    app.state.redis_async = redis_async
+    app.state.ws_hub = WsHub(redis_async)
 
     rebuild_task = None
     if settings.env != "test":
@@ -58,6 +74,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         if rebuild_task is not None:
             rebuild_task.cancel()
+        try:
+            await redis_async.aclose()
+        except Exception:
+            pass
         core_db.close_pool()
 
 
@@ -74,11 +94,31 @@ def create_app() -> FastAPI:
         response.headers["X-Request-Id"] = request_id
         return response
 
+    @app.middleware("http")
+    async def inbox_metrics_middleware(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        path = request.url.path
+        if path.startswith("/v1/conversations"):
+            route = "conversations"
+        elif path.startswith("/v1/inbox"):
+            route = "inbox_events"
+        else:
+            return await call_next(request)
+        started = time.monotonic()
+        response = await call_next(request)
+        metrics.inbox_api_requests_total.labels(route, str(response.status_code)).inc()
+        metrics.inbox_api_request_seconds.labels(route).observe(time.monotonic() - started)
+        return response
+
     app.add_exception_handler(ApiError, api_error_handler)
     app.add_exception_handler(Exception, unhandled_exception_handler)
 
     app.include_router(health_router)
     app.include_router(killswitches_router)
+    app.include_router(inbox_router)
+    app.include_router(catalog_router)
+    app.include_router(ws_router)
 
     return app
 

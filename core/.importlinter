@@ -12,6 +12,36 @@ source_modules =
     app.killswitch
     app.main
     app.cli
+    app.workers
+    app.obs
 forbidden_modules =
     psycopg
+allow_indirect_imports = True
+
+[importlinter:contract:workers-no-http-layer]
+name = app.workers must not depend on the HTTP API layer (app.api/app.main)
+type = forbidden
+source_modules =
+    app.workers
+forbidden_modules =
+    app.api
+    app.main
+allow_indirect_imports = False
+
+[importlinter:contract:api-no-workers]
+name = app.api must not depend on app.workers
+type = forbidden
+source_modules =
+    app.api
+forbidden_modules =
+    app.workers
+allow_indirect_imports = False
+
+[importlinter:contract:workers-no-httpx]
+name = app.workers must not import httpx directly (outbound via app.channels only)
+type = forbidden
+source_modules =
+    app.workers
+forbidden_modules =
+    httpx
 allow_indirect_imports = True

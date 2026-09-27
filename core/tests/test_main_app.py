@@ -21,6 +21,8 @@ from fastapi.testclient import TestClient
 
 from app.db import testsupport as db_testsupport
 
+pytestmark = pytest.mark.db
+
 
 def _gen_keypair():
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)

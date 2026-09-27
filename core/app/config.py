@@ -37,6 +37,20 @@ def _int(name: str, default: int) -> int:
         raise ConfigError(f"{name} must be an integer, got {raw!r}") from exc
 
 
+# H36 / S7 (PROMPT_P1_04 §4.1): the field names that signal a cost/wholesale/
+# margin leak from the platform. The catalog read model must never store these;
+# an inbound event carrying one is dropped at the gate and counted. This list
+# lives here (not in app/db/repos_catalog.py) because the S7 static-gate stage
+# scans the catalog path for these literals as standalone tokens - keeping the
+# policy in the config layer leaves the catalog code free of the banned tokens,
+# while the runtime detector (repos_catalog) and the static gate (static_gate.py)
+# share the same vocabulary.
+CATALOG_FORBIDDEN_FIELDS: frozenset[str] = frozenset({
+    "cost", "cost_price", "wholesale", "margin", "profit", "purchase_price",
+    "تكلفة", "هامش", "جملة",
+})
+
+
 @dataclass(frozen=True)
 class DatabaseConfig:
     dsn: str
@@ -89,9 +103,17 @@ class Settings:
     sso_login_url: str
     console_stage: str
     gateway_api_key: str
+    # P1.4 catalog webhook: independent HMAC secret (required - empty refuses
+    # boot, H5).
+    platform_webhook_secret: str
     request_body_max_bytes: int = 1_000_000
     reconnect_rate_limit_s: int = 30
     ks_publish_verify_timeout_s: float = 2.0
+    inbox_events_retention_days: int = 7
+    # P1.4 catalog webhook: replay window and written batch/body ceilings (H4).
+    platform_timestamp_skew_s: int = 300
+    platform_event_batch_max: int = 1000
+    platform_webhook_body_max_bytes: int = 262_144
 
     @staticmethod
     def load() -> Settings:
@@ -128,4 +150,10 @@ class Settings:
             sso_login_url=_required("SSO_LOGIN_URL"),
             console_stage=_optional("CONSOLE_STAGE", "preview"),
             gateway_api_key=_required("GATEWAY_API_KEY"),
+            inbox_events_retention_days=_int("INBOX_EVENTS_RETENTION_DAYS", 7),
+            # Empty secret -> _required() raises at import time (H5: refuse boot).
+            platform_webhook_secret=_required("PLATFORM_WEBHOOK_SECRET"),
+            platform_timestamp_skew_s=_int("PLATFORM_TIMESTAMP_SKEW_S", 300),
+            platform_event_batch_max=_int("PLATFORM_EVENT_BATCH_MAX", 1000),
+            platform_webhook_body_max_bytes=_int("PLATFORM_WEBHOOK_BODY_MAX_BYTES", 262_144),
         )

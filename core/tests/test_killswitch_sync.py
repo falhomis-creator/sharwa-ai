@@ -11,6 +11,8 @@ import redis
 from app.db import testsupport as db_testsupport
 from app.killswitch.redis_sync import RedisSync, _hash_key, _message_for
 
+pytestmark = pytest.mark.db
+
 
 @pytest.fixture
 def redis_sync():

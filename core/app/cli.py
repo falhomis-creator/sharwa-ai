@@ -36,6 +36,7 @@ from pathlib import Path
 import jwt as pyjwt
 
 from app.db import repos
+from app.db import repos_inbox
 from app.db.migrate import MigrationError, run_migrations
 
 
@@ -90,6 +91,16 @@ def cmd_issue_dev_token(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_create_staff(args: argparse.Namespace) -> int:
+    staff_id = repos_inbox.create_staff(
+        _migration_dsn(), platform_ref=args.platform_ref,
+        platform_user_id=args.platform_user_id, display_name=args.display_name,
+        role=args.role,
+    )
+    _out(str(staff_id))
+    return 0
+
+
 def cmd_migrate(args: argparse.Namespace) -> int:
     migrations_dir = Path(args.migrations_dir).resolve()
     if not migrations_dir.is_dir():
@@ -125,6 +136,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_tenant.add_argument("--currency", default="SAR")
     p_tenant.add_argument("--timezone", default="Asia/Riyadh")
     p_tenant.set_defaults(func=cmd_create_tenant)
+
+    p_staff = sub.add_parser("create-staff", help="provision a staff_members row (operator CLI, never a JWT)")
+    p_staff.add_argument("--platform-ref", required=True, help="tenants.platform_ref to attach the staff member to")
+    p_staff.add_argument("--platform-user-id", required=True, help="the SSO/JWT `sub` for this staff member")
+    p_staff.add_argument("--display-name", required=True)
+    p_staff.add_argument("--role", required=True, choices=("owner", "manager", "agent", "viewer"))
+    p_staff.set_defaults(func=cmd_create_staff)
 
     p_token = sub.add_parser("issue-dev-token", help="mint a local dev RS256 JWT (refused in production)")
     p_token.add_argument("--private-key-path", required=True)

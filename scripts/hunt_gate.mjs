@@ -181,11 +181,14 @@ export function runGate(root = ROOT) {
       });
     }
 
-    // Rule 9 (B1) — CRLF line endings are forbidden in files executed/parsed
+    // Rule B1 (CRLF) — CRLF line endings are forbidden in files executed/parsed
     // inside Linux containers (shell scripts, Dockerfile, YAML, configs, SQL).
+    // Label is 'CRLF/B1' (not "rule9") to avoid colliding with the P1 rule-9
+    // ('H17/rule9-xack') - two different "rule 9" tags in one script confuse
+    // diagnosis (audit N2).
     if (raw && isLfRequired(full) && hasCR(full)) {
       violations.push({
-        file: rel, line: 1, rule: 'CRLF/rule9',
+        file: rel, line: 1, rule: 'CRLF/B1',
         detail: 'CRLF line endings (use LF; see .gitattributes/.editorconfig)',
       });
     }
@@ -244,6 +247,24 @@ export function runGate(root = ROOT) {
           // migration pipeline and are not this gate's concern.
           if (/(["'])(?:(?!\1).)*\b(SELECT|INSERT|UPDATE|DELETE)\b(?:(?!\1).)*\1/.test(line)) {
             violations.push({ file: rel, line: idx + 1, rule: 'H2/rule8', detail: 'raw SQL outside core/app/db/ or core/app/repos/' });
+          }
+        }
+        // Rule 9 (P1.0, H17) — XACK is owned by exactly one module. Every stream
+        // acknowledgement must go through core/app/workers/stream.py; a raw
+        // `xack(`/`XACK` anywhere else in core/ is a mechanical violation of the
+        // commit-before-ack single-owner rule.
+        if (relf.startsWith('core/') && !relf.startsWith('core/app/workers/stream.py')) {
+          if (/\bxack\s*\(/i.test(line)) {
+            violations.push({ file: rel, line: idx + 1, rule: 'H17/rule9-xack', detail: 'XACK outside core/app/workers/stream.py' });
+          }
+        }
+        // Rule 10 (P1.2, T8) — outbound HTTP to the gateway is owned by exactly
+        // one module (core/app/channels). A direct httpx/urllib/aiohttp import
+        // anywhere else in core/ is the mechanical proxy for "only channels may
+        // reach the network" (the counterpart of rule 9 for XACK).
+        if (relf.startsWith('core/') && !relf.startsWith('core/app/channels/')) {
+          if (/^\s*(import|from)\s+(httpx|urllib|aiohttp|requests)\b/.test(line)) {
+            violations.push({ file: rel, line: idx + 1, rule: 'H24/rule10-http', detail: 'outbound HTTP client import outside core/app/channels/' });
           }
         }
       });

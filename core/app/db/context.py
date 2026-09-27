@@ -32,20 +32,40 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Protocol
 
 import psycopg
 from psycopg_pool import ConnectionPool
 
-from app.config import Settings
+from app.config import DatabaseConfig
 
 _tenant_pool: ConnectionPool | None = None
 _system_pool: ConnectionPool | None = None
 
 
-def init_pool(settings: Settings, *, system_dsn: str | None = None) -> None:
+class HasDbPoolConfig(Protocol):
+    """Structural type satisfied by both app.config.Settings (the `api` role)
+    and app.workers.config.WorkerSettings (the `worker-realtime` role) - the
+    worker reuses this exact init_pool() (P1.0.3: "كما هو") without requiring
+    api's full Settings (JWT/Gateway/redis-cache vars the worker never needs)."""
+
+    db: DatabaseConfig
+
+
+def init_pool(
+    settings: HasDbPoolConfig,
+    *,
+    system_dsn: str | None = None,
+    system_pool_max: int | None = None,
+) -> None:
     """Called once at startup. Two separate pools (not one pool with two
     connection strings) so a tenant-role connection can never accidentally be
-    reused for a system_tx() call or vice versa."""
+    reused for a system_tx() call or vice versa.
+
+    system_pool_max: the worker passes an explicit system-pool size
+    (>= INGEST_SHARDS + 2) because its shard threads + healthcheck contend for
+    system_tx() concurrently (D2); `api` omits it and keeps the original
+    `max(2, pool_min)` sizing."""
     global _tenant_pool, _system_pool
     _tenant_pool = ConnectionPool(
         settings.db.dsn,
@@ -57,7 +77,7 @@ def init_pool(settings: Settings, *, system_dsn: str | None = None) -> None:
     _system_pool = ConnectionPool(
         system_dsn or settings.db.system_dsn,
         min_size=1,
-        max_size=max(2, settings.db.pool_min),
+        max_size=system_pool_max if system_pool_max is not None else max(2, settings.db.pool_min),
         kwargs={"prepare_threshold": None, "autocommit": False},
         open=True,
     )

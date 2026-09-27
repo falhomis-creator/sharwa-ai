@@ -3,17 +3,14 @@
 # built in Batch A/B) and gateway-forwarder (real /metrics, added in this same
 # batch - see gateway/src/forwarder.js/forwarder_metrics.js).
 #
-# `api` is NOT scraped here: the literal spec text asks for it
-# ("يجمع من البوابة والـforwarder والـapi"), but the `api` service does not
-# exist yet - it is P0.7 scope (docs/P0_DEVIATIONS.md D-22 already recorded
-# this exact gap for the reason monitoring itself was deferred to this
-# batch: a scrape target that doesn't exist is not "confirmed down", it's
-# fabricated). This file will need one more scrape job added once P0.7 stands
-# `api` up - tracked, not silently forgotten.
+# P1.0 (this change) adds the two remaining targets the spec always asked for
+# and that now exist for real: `api` (P0.7, :8080) and `worker-realtime`
+# (P1.0, :4003). P0_DEVIATIONS.md D-22's deferral ("api not scraped yet") is
+# now closed - every target below is a real, booting service, never fabricated.
 #
-# Both real jobs authenticate with the same METRICS_TOKEN both processes
-# already require to boot (H5) via bearer_token_file - the token itself is
-# never written into this file (never committed - see .gitignore).
+# All jobs authenticate with the same METRICS_TOKEN each process already
+# requires to boot (H5) via bearer_token_file - the token itself is never
+# written into this file (never committed - see .gitignore).
 
 global:
   scrape_interval: 15s
@@ -36,3 +33,17 @@ scrape_configs:
     bearer_token_file: /etc/prometheus/secrets/metrics_token
     static_configs:
       - targets: ['gateway-forwarder:4002']
+
+  - job_name: api
+    metrics_path: /metrics
+    scheme: http
+    bearer_token_file: /etc/prometheus/secrets/metrics_token
+    static_configs:
+      - targets: ['api:8080']
+
+  - job_name: worker-realtime
+    metrics_path: /metrics
+    scheme: http
+    bearer_token_file: /etc/prometheus/secrets/metrics_token
+    static_configs:
+      - targets: ['worker-realtime:4003']

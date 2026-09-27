@@ -116,3 +116,265 @@ groups:
         annotations:
           summary: "open file descriptors above 70% of the process cap"
           description: "{{ $labels.job }} is using more than 70% of its process_max_fds for at least 5 minutes."
+
+  # P1.0 (worker-realtime): the four rules the spec requires, against the
+  # worker's own registry (app/obs/metrics.py). Thresholds are written and
+  # justified in P1_01_REPORT.md §5.
+  - name: sharwa_ai_p1
+    rules:
+      - alert: IngestGroupLagHigh
+        expr: ingest_core_stream_lag > 1000
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "core-ingest consumer-group lag above 1000 on a shard"
+          description: "shard {{ $labels.shard }} has more than 1000 unread stream entries for at least 2 minutes - the worker may be falling behind."
+
+      - alert: IngestDlqGrowing
+        expr: increase(ingest_core_dlq_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "core-ingest dead-letter queue is growing"
+          description: "at least one entry was parked on dlq:in:core in the last 5 minutes - needs manual investigation/replay."
+
+      - alert: IngestPelTooLarge
+        expr: ingest_core_pel_size > 500
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "core-ingest pending-entry-list above 500 on a shard"
+          description: "shard {{ $labels.shard }} has more than 500 unacked (pending) entries for at least 5 minutes - a consumer may be stuck."
+
+      - alert: CoreWorkerDown
+        # D3: a dead container makes the metric ABSENT, not 0 - so this fires on
+        # the scrape target's `up` (which Prometheus synthesizes), not on
+        # core_worker_up (which only reads 0 during a clean _teardown()).
+        expr: up{job="worker-realtime"} == 0 or absent(up{job="worker-realtime"})
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "worker-realtime is down"
+          description: "Prometheus has not been able to scrape worker-realtime /metrics for at least 1 minute - the realtime ingest worker is not running."
+
+  # P1.2 (outbound & dispatcher): four rules against the worker's outbound
+  # registry. Thresholds justified in P1_02_REPORT.md. No "worker down" rule
+  # here - CoreWorkerDown (above) already covers absence via up/absent (D3).
+  - name: sharwa_ai_p1_2
+    rules:
+      - alert: DispatchOldestPendingHigh
+        expr: dispatch_oldest_pending_seconds > 120
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "oldest pending outbox row is older than 2 minutes"
+          description: "the dispatcher has been unable to drain the outbox for at least 2 minutes - a reply may be stuck."
+
+      - alert: DispatchFailuresGrowing
+        expr: increase(dispatch_attempts_total{result="failed"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "dispatch failures are occurring"
+          description: "at least one outbox row hit status='failed' in the last 5 minutes - a service reply could not be sent."
+
+      - alert: EvtStreamLagHigh
+        expr: evt_stream_lag > 1000
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "evt consumer-group lag above 1000 on a shard"
+          description: "shard {{ $labels.shard }} has more than 1000 unread evt stream entries - sent/failed events are not being reconciled into the inbox."
+
+      - alert: DroppedStaleRatioHigh
+        expr: (increase(dispatch_attempts_total{result="dropped_stale"}[10m]) / clamp_min(increase(dispatch_attempts_total{result="sent"}[10m]), 1)) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "dropped_stale is > 20% of sent volume"
+          description: "an unusually high fraction of outbox rows are being dropped as stale - possible epoch/logic bug, not natural human handoff."
+
+  # P1.3 (inbox): two rules. Thresholds justified in P1_03_REPORT.md.
+  # 5xx rate on /v1/conversations* is measured off the API request counter
+  # (inbox_api_requests_total{route="conversations",status}); absence/health is
+  # measured via up/absent by the existing CoreDown rules (D3) - never by a
+  # metric that is simply 0 when nothing has failed.
+  - name: sharwa_ai_p1_3
+    rules:
+      - alert: InboxConversations5xxRateHigh
+        expr: >-
+          sum(rate(inbox_api_requests_total{route="conversations",status=~"5.."}[5m]))
+          / clamp_min(sum(rate(inbox_api_requests_total{route="conversations"}[5m])), 0.0001)
+          > 0.02
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "inbox conversations API 5xx rate is above 2%"
+          description: "more than 2% of /v1/conversations* requests have failed with a 5xx over 5 minutes."
+
+      - alert: StateTransitionConflictsHigh
+        expr: increase(state_transitions_total{result="conflict_version"}[10m]) > 20
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "many CONFLICT_VERSION results on conversation state transitions"
+          description: "more than 20 optimistic-lock conflicts in 10 minutes - staff are acting on stale screens, or the version lock has a bug."
+
+  # P1.3b (WebSocket live stream): three rules (PROMPT §4.7). Absence/health of
+  # the retention sweep is the staleness rule below, not a "0 when idle" alert
+  # (D3: absence is measured via up/absent by the existing CoreDown rules).
+  - name: sharwa_ai_p1_3b
+    rules:
+      - alert: WsPerTenantRejectionsHigh
+        expr: increase(ws_rejected_total{reason="per_tenant"}[10m]) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "WebSocket connections rejected at the per-tenant ceiling"
+          description: "more than 5 per-tenant rejections in 10 minutes - a store is likely hitting its 200-connection ceiling."
+
+      - alert: WsPongTimeoutsGrowing
+        expr: increase(ws_pong_timeouts_total[10m]) > 3
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "WebSocket pong timeouts are occurring"
+          description: "at least 3 connections timed out waiting for a pong in the last 10 minutes."
+
+      - alert: WsRetentionStale
+        expr: time() - inbox_events_retention_last_run_timestamp > 7200
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "inbox_events retention sweep is stale"
+          description: "the retention sweep has not completed within 2x its interval (7200s = 2 x 3600s) - inbox_events may be growing unbounded."
+
+
+  # P1.4 (catalog read model): three rules. Absence/health is measured via
+  # up/absent by the existing CoreDown rules (D3) - never by a metric that is
+  # simply 0 when nothing has failed. The staleness threshold (1800s = 2x the
+  # 900s reconcile interval) means a tenant whose catalog has not reconciled in
+  # 30 minutes is untrustworthy, and that must be KNOWN (risk #9).
+  - name: sharwa_ai_p1_4
+    rules:
+      - alert: CatalogStale
+        expr: catalog_staleness_seconds > 1800
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "a tenant's catalog has not reconciled in over 30 minutes"
+          description: "catalog_staleness_seconds is above 1800s (2x the reconcile interval) for 5 minutes - some tenant's product data is untrustworthy."
+
+      - alert: CatalogForbiddenFieldSeen
+        expr: increase(catalog_cost_field_seen_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "a platform catalog event carried a forbidden field"
+          description: "the catalog gate saw a cost/wholesale/margin field arrive from the platform in the last 5 minutes - a platform-side leak worth investigating (H36)."
+
+      - alert: CatalogReconcileFailing
+        expr: increase(catalog_reconcile_runs_total{result="failed"}[30m]) > 3
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "catalog reconciliation is repeatedly failing"
+          description: "more than 3 failed reconcile runs in 30 minutes - the platform commerce API may be unreachable or misconfigured."
+
+
+  # P1.5 (LLM layer & governance): four rules (PROMPT §5.8). Absence/health is
+  # measured via up/absent by the existing CoreDown rules (D3) - never by a
+  # metric that is simply 0 when nothing has failed.
+  - name: sharwa_ai_p1_5
+    rules:
+      - alert: TenantBudgetDegraded
+        expr: budget_state{state="degraded"} > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "a tenant's monthly LLM budget is degraded"
+          description: "at least one tenant has been in budget state 'degraded' (>= 100% of its 20 USD/month limit) for 30 minutes - the bot is serving templates-only for that tenant."
+
+      - alert: RouterInvalidRateHigh
+        expr: increase(router_invalid_total[15m]) > 5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "router responses are failing strict schema validation"
+          description: "more than 5 router responses failed schema validation in 15 minutes - the provider's output shape may have changed."
+
+      - alert: LlmBreakerOpen
+        expr: llm_breaker_state == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "an LLM circuit breaker is open"
+          description: "llm_breaker_state is 1 (open) for 5 minutes - the provider is being skipped and turns are falling back to templates/handoff."
+
+      - alert: LlmFailureRatioHigh
+        expr: >-
+          sum(rate(llm_calls_total{status!="ok"}[10m]))
+          / clamp_min(sum(rate(llm_calls_total[10m])), 0.0001)
+          > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LLM call failure ratio is above 20%"
+          description: "more than 20% of LLM calls have failed (non-ok status) over 10 minutes - the provider may be degrading."
+
+  # P1.5b (embedding + vector search + rolling summary): three rules (PROMPT
+  # §5.7). Absence/health is measured via up/absent by the existing CoreDown rules
+  # (D3) - never by a metric that is simply 0 when nothing has failed.
+  - name: sharwa_ai_p1_5b
+    rules:
+      - alert: EmbedQueueBacklog
+        expr: embed_queue_depth > 1000
+        for: 60m
+        labels:
+          severity: warning
+        annotations:
+          summary: "product embedding queue is backed up"
+          description: "embed_queue_depth is above 1000 for 60 minutes - the catalog is being embedded slower than it changes; vector search is silently absent for those products (H42)."
+
+      - alert: EmbedDimMismatch
+        expr: increase(embed_dim_mismatch_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "an embedding provider returned a vector of the wrong width"
+          description: "embed_dim_mismatch_total increased in the last 5 minutes - the H44 vector-width contract (1024) is being violated; investigate immediately."
+
+      - alert: VectorSearchSkippedHigh
+        expr: >-
+          sum(rate(search_vector_skipped_total[30m]))
+          / clamp_min(sum(rate(search_queries_total[30m])), 0.0001)
+          > 0.5
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "the vector source is being skipped for over half of searches"
+          description: "more than 50% of searches skipped the vector source over 30 minutes - the embedding provider or budget is likely unavailable; lexical search is still serving (H42)."
+
+
