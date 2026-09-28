@@ -24,6 +24,7 @@ from app.db import repos_catalog
 from app.db import repos_inbox
 from app.db import repos_outbox
 from app.obs import metrics
+from app.workers import address
 from app.workers import compose
 from app.workers import optout
 from app.workers import orders
@@ -172,6 +173,25 @@ def _order_action(settings: WorkerSettings, order_lookup: Any) -> _Action:
     return _Action("order_unavailable", templates.template_text("order_unavailable"), False, None, "template", "order_unavailable")
 
 
+def _address_action(settings: WorkerSettings, decision: Any) -> _Action:
+    """Compose the reply for an address decision. Confirmed back to the customer
+    as a place NAME, never as coordinates (H67). coord_from_model => reject +
+    handoff; pin_outside_coverage => ask for another location."""
+    d = decision.decision
+    if d == "rejected":
+        if decision.reason_code == "pin_outside_coverage":
+            return _Action("address_out_of_coverage", templates.template_text("address_out_of_coverage"), False, None, "template", "address_out_of_coverage")
+        return _Action("address_rejected", templates.template_text("address_rejected"), True, "coord_from_model", "template", "address_rejected")
+    if d == "ask_for_pin":
+        return _Action("address_need_pin", templates.template_text("address_need_pin"), False, None, "template", "address_need_pin")
+    if d == "confirm_with_customer":
+        name = decision.candidates[0] if decision.candidates else ""
+        return _Action("address_confirm", compose.compose_address_options([name], template="address_confirm"), False, None, "template", "address_confirm")
+    if d == "disambiguate":
+        return _Action("address_disambiguate", compose.compose_address_options(list(decision.candidates), template="address_disambiguate"), False, None, "template", "address_disambiguate")
+    return _Action("handoff_notice", templates.template_text("handoff_notice"), True, "address_accepted", "template", "handoff_notice")
+
+
 def _resolve_action(
     conn: Any, settings: WorkerSettings, plan: _TurnPlan, router_result: Any,
     query_vector: list[float] | None = None,
@@ -194,6 +214,12 @@ def _resolve_action(
         if chunks:
             return _Action("policy_answer", compose.compose_policy_answer(chunks[0]["content"]), False, None, "policy_answer", "policy_answer")
         return _deterministic_action(plan.decision)
+    if intent == "delivery_address":
+        query = router_result.decision.query if router_result is not None else ""
+        decision = address.resolve_and_persist(
+            conn, settings, tenant_id=plan.tenant_id, conversation_id=plan.conversation_id, query=query,
+        )
+        return _address_action(settings, decision)
     return _deterministic_action(plan.decision)
 
 

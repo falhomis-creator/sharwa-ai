@@ -653,4 +653,13 @@ rate_limit_fail_open_total = Counter(
     registry=registry,
 )
 
+# --- P2.2 address resolver metrics (H67: no address/coords in labels) ---------
+address_resolutions_total = Counter(
+    "address_resolutions_total",
+    "Address resolutions, by decision (accepted|confirm_with_customer|disambiguate|ask_for_pin|rejected).",
+    labelnames=["decision"],
+    registry=registry,
+)
+
+
 

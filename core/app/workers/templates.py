@@ -34,6 +34,13 @@ TEMPLATES: dict[str, str] = {
     "order_blocked": "لأسباب أمنية، سأحوّل محادثتك لأحد ممثلي خدمة العملاء لمساعدتك في طلبك.",
     "order_status_unknown": "وصلتني حالة طلبك لكنها غير متاحة حالياً. سأحوّلك لأحد ممثلي خدمة العملاء.",
     "order_unavailable": "خدمة تتبع الطلبات غير متاحة حالياً. سأحوّل محادثتك لأحد ممثلي خدمة العملاء.",
+    # P2.2 address resolver (PROMPT §7). Conservative, no time promise, no
+    # "بوت"/"ذكاء اصطناعي" (OQ-P1-08), and NO coordinates in text (H67).
+    "address_need_pin": "لأحدد عنوان التوصيل بدقة، أرسل لي موقعك (الدبوس) من فضلك. 📍",
+    "address_confirm": "هل تقصد «name»؟",
+    "address_disambiguate": "وجدت أكثر من مكان مطابق:\n«options»\nأيها تقصد؟",
+    "address_rejected": "عذراً، لم أتمكن من تحديد عنوان التوصيل. سأحوّل محادثتك لأحد ممثلي خدمة العملاء.",
+    "address_out_of_coverage": "الموقع الذي أرسلته خارج منطقة التغطية حالياً. أرسل موقعاً آخر من فضلك.",
 }
 
 

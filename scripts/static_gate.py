@@ -38,6 +38,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 APP = ROOT / "core" / "app"
+TESTS = ROOT / "core" / "tests"
 METRICS_FILE = APP / "obs" / "metrics.py"
 ALERTS_FILE = ROOT / "ops" / "prometheus" / "alerts.yml"
 
@@ -486,6 +487,28 @@ def _module_files() -> dict[str, Path]:
     return out
 
 
+def _test_module_files() -> dict[str, Path]:
+    """core/tests/** -> tests.* (S16: the S1 name resolver scans tests too)."""
+    out: dict[str, Path] = {}
+    for p in sorted(TESTS.rglob("*.py")):
+        rel = p.relative_to(TESTS.parent)  # core/ -> tests/test_inbox.py
+        parts = list(rel.with_suffix("").parts)
+        if parts[-1] == "__init__":
+            parts = parts[:-1]
+        out[".".join(parts)] = p
+    return out
+
+
+def _script_module_files() -> dict[str, Path]:
+    """scripts/*.py as TOP-LEVEL modules (e.g. `import static_gate`), so the S1
+    resolver can check test_console_contract.py's calls into the gate script
+    (S16)."""
+    out: dict[str, Path] = {}
+    for p in sorted((ROOT / "scripts").glob("*.py")):
+        out[p.stem] = p
+    return out
+
+
 def _import_aliases(tree: ast.Module) -> dict[str, str]:
     """alias -> module dotted name."""
     out: dict[str, str] = {}
@@ -507,17 +530,19 @@ def _import_aliases(tree: ast.Module) -> dict[str, str]:
 # reviewed declaration that a module is outside core/app's name surface.
 _EXTERNAL_ALLOWLIST = frozenset({
     # stdlib
-    "abc", "argparse", "asyncio", "base64", "collections", "contextlib", "copy",
+    "abc", "argparse", "ast", "asyncio", "base64", "collections", "contextlib", "copy",
     "dataclasses", "datetime", "enum", "functools", "hashlib", "hmac",
     "importlib", "inspect", "itertools", "json", "logging", "math", "os",
     "pathlib", "random", "re", "secrets", "shutil", "signal", "socket",
-    "string", "sys", "tempfile", "threading", "time", "traceback", "types",
+    "string", "subprocess", "sys", "tempfile", "threading", "time", "traceback", "types",
     "typing", "unicodedata", "uuid", "warnings", "weakref",
     # external packages
     "fastapi", "starlette", "pydantic", "pydantic_core", "psycopg",
     "psycopg_pool", "prometheus_client", "jwt", "redis", "httpx", "httpcore",
     "anyio", "uvicorn", "multipart", "h11", "idna", "certifi", "cryptography",
     "annotated_types", "typing_extensions", "yaml",
+    # test-only packages (S16: core/tests/** is now scanned by S1)
+    "pytest", "unittest",
 })
 
 
@@ -689,14 +714,63 @@ def _config_required_keys(mods: dict[str, Path]) -> set[str]:
     return keys
 
 
+# --- S17 (P2.2): H64/H66/H68 - coordinates never come from the model ----------
+
+_S17_COORD_RE = re.compile(r"\b(?:lat|lng|latitude|longitude|coordinates)\b|ST_MakePoint")
+_S17_RESOLVE_ALLOWED_IMPORTS = frozenset({"dataclasses", "typing", "enum", "math", "__future__"})
+_S17_DECISIONS = frozenset({"accepted", "confirm_with_customer", "disambiguate", "ask_for_pin", "rejected"})
+
+
+def _s17b_bad_imports(tree: ast.Module) -> list[str]:
+    bad: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name.split(".")[0] not in _S17_RESOLVE_ALLOWED_IMPORTS:
+                    bad.append(a.name)
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            if node.module.split(".")[0] not in _S17_RESOLVE_ALLOWED_IMPORTS:
+                bad.append(node.module)
+    return bad
+
+
+def _s17c_violations(tree: ast.Module) -> list[str]:
+    bad: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fname = None
+        if isinstance(node.func, ast.Name):
+            fname = node.func.id
+        elif isinstance(node.func, ast.Attribute):
+            fname = node.func.attr
+        if fname != "insert_address_resolution":
+            continue
+        kwargs = {kw.arg: kw.value for kw in node.keywords if kw.arg is not None}
+        decision = kwargs.get("decision")
+        if isinstance(decision, ast.Constant) and isinstance(decision.value, str):
+            if decision.value not in _S17_DECISIONS:
+                bad.append(f"decision={decision.value!r} outside the closed 5-set")
+            if decision.value == "accepted":
+                loc = kwargs.get("location")
+                if loc is None or (isinstance(loc, ast.Constant) and loc.value is None):
+                    bad.append("decision='accepted' passed location=None (H64)")
+    return bad
+
+
 def main() -> int:
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     sys.stdout.write(f"[static_gate {ts}]\n")
     mods = _module_files()
     mod_names = {m: _top_level_names(ast.parse(p.read_text(encoding="utf-8"))) for m, p in mods.items()}
+    # S16 (P2.2): the S1 name resolver also scans core/tests/** and the
+    # scripts/*.py the tests import (e.g. `import static_gate`), so a test
+    # calling a missing name is caught. Other stages keep the app-only `mods`.
+    s1_mods = {**mods, **_test_module_files(), **_script_module_files()}
+    s1_names = {m: _top_level_names(ast.parse(p.read_text(encoding="utf-8"))) for m, p in s1_mods.items()}
 
     # ---- S1: name resolution (every mod.attr read/call/assign - S1-a) ------
-    for mod, path in mods.items():
+    for mod, path in s1_mods.items():
         rel = str(path.relative_to(ROOT))
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -712,7 +786,9 @@ def main() -> int:
             if alias not in aliases:
                 continue
             target = aliases[alias]
-            if target not in mod_names:
+            if node.attr.startswith("__") and node.attr.endswith("__"):
+                continue  # module dunders (__file__, __name__, ...) are always present
+            if target not in s1_names:
                 # S1-b: an unresolved module target is a violation, never a silent skip.
                 if _is_allowlisted(target):
                     continue
@@ -722,14 +798,14 @@ def main() -> int:
                 # last segment against its parent module's real top-level names.
                 if "." in target:
                     parent, _, last = target.rpartition(".")
-                    if parent in mod_names:
-                        parent_defined, parent_imported = mod_names[parent]
+                    if parent in s1_names:
+                        parent_defined, parent_imported = s1_names[parent]
                         if last in parent_defined or last in parent_imported:
                             continue
                 _err("S1", rel, getattr(node, "lineno", 0),
                      f"'{alias}.{node.attr}' - unresolved module target '{target}'")
                 continue
-            defined, imported = mod_names[target]
+            defined, imported = s1_names[target]
             if node.attr in defined:
                 continue
             if node.attr in imported:
@@ -1074,6 +1150,37 @@ def main() -> int:
               and not re.search(r"\b" + re.escape(key) + r"\b", env_example_text)):
             _err("S15", ".env.example", 0,
                  f"required env key '{key}' is read from .env via ${{{key}:?...}} but missing from .env.example (H60)")
+
+    # ---- S17 (P2.2): H64/H66/H68 - no coordinates from the model ------------
+    # a: app/llm/** must never name a coordinate token or build ST_MakePoint.
+    for mod, path in mods.items():
+        if not (mod == "app.llm" or mod.startswith("app.llm.")):
+            continue
+        text = path.read_text(encoding="utf-8")
+        for m in _S17_COORD_RE.finditer(text):
+            _err("S17", str(path.relative_to(ROOT)), 0,
+                 f"'{mod}' names coordinate token '{m.group(0)}' (H64: coordinates never from the model)")
+            break
+    # b: app.geo.resolve's import set is closed (dataclasses/typing/enum/math/__future__).
+    rp = mods.get("app.geo.resolve")
+    if rp is not None:
+        rtree = ast.parse(rp.read_text(encoding="utf-8"))
+        for bad in _s17b_bad_imports(rtree):
+            _err("S17", "core/app/geo/resolve.py", 0,
+                 f"app.geo.resolve imports '{bad}' (S17-b: closed import set)")
+    # c: an accepted address_resolutions write must carry a non-None location.
+    for mod, path in mods.items():
+        if not mod.startswith("app."):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for detail in _s17c_violations(tree):
+            _err("S17", str(path.relative_to(ROOT)), 0,
+                 f"'{mod}' writes address_resolutions with {detail}")
+    # d: geo_gazetteer writes (tenant_id NULL shared rows) belong in seed only.
+    for mod, path in mods.items():
+        if "INSERT INTO geo_gazetteer" in path.read_text(encoding="utf-8"):
+            _err("S17", str(path.relative_to(ROOT)), 0,
+                 f"'{mod}' writes geo_gazetteer (H68: shared rows are seeded by scripts/seed_gazetteer.py only)")
 
     # ---- output -------------------------------------------------------------
     if _notes:

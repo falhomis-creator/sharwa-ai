@@ -4,7 +4,8 @@ H38: no model text ever reaches a customer. Every outbox payload text is built
 here, from exactly four allowed sources: approved templates (templates.py),
 product titles from catalog_products (the merchant's own text), kb_chunks content
 (the merchant's own policy text), and the closed order-status map (P1.7 §6, the
-ONLY authorised fourth function). Four functions, no fifth.
+ONLY authorised fourth function). Five functions, no sixth - compose_address_options
+(P2.2) is the fifth.
 """
 from __future__ import annotations
 
@@ -80,3 +81,17 @@ def compose_order_status(card: dict[str, Any], *, labels: dict[str, str]) -> str
     ref_tail = ref[-3:] if ref else ""
     updated_label = _relative_updated(card.get("updated_at"))
     return ORDER_STATUS_TEMPLATE.format(ref_tail=ref_tail, status_label=label, updated_label=updated_label)
+
+
+def compose_address_options(candidates: list[str], *, template: str) -> str:
+    """List gazetteer names VERBATIM (H67: no generated description, no
+    coordinates - the pin is confirmed back to the customer as a place name,
+    never as numbers). `template` is one of the address_* templates; the two with
+    sentinels (address_confirm -> «name», address_disambiguate -> «options») are
+    filled with the literal names only."""
+    text = templates.template_text(template)
+    if "«options»" in text:
+        return text.replace("«options»", "\n".join(f"• {c}" for c in candidates))
+    if "«name»" in text and candidates:
+        return text.replace("«name»", candidates[0])
+    return text

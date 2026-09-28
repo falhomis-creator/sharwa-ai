@@ -36,10 +36,12 @@ class ToolSpec:
     run: Callable[[ToolContext], Any]
 
 
-# Imported AFTER ToolContext/ToolSpec so track_order (which imports ToolContext
-# back) does not deadlock on a partially-initialised registry module.
+# Imported AFTER ToolContext/ToolSpec so track_order / resolve_address (which
+# import ToolContext back) do not deadlock on a partially-initialised registry.
+from app.tools import resolve_address  # noqa: E402
 from app.tools import track_order  # noqa: E402
 
 TOOLS: dict[str, ToolSpec] = {
     "track_order": ToolSpec("track_order", track_order.run),
+    "resolve_address": ToolSpec("resolve_address", resolve_address.run),
 }

@@ -37,10 +37,13 @@ def settings() -> Settings:
 
 
 # M0 (P1.5 §0.3, owner decision): the two Postgres-dependent fixtures below are
-# NOT autouse any more. They are auto-applied ONLY to tests marked
-# `@pytest.mark.db` via pytest_collection_modifyitems(), so a bare
-# `pytest core/tests` runs every pure test with no live Postgres and simply
-# skips the db-marked ones (addopts = -m "not db" in pyproject.toml).
+# NOT autouse. F-P2-02 (P2.1 audit): binding them via
+# pytest_collection_modifyitems() stopped working on pytest 9.1.1 (fixture
+# closure is computed before that hook, so the marker added there had no effect).
+# They are now pulled in by the autouse `_db_for_marked` fixture below, which
+# reads the `db` marker AT RUNTIME - so a bare `pytest tests` runs pure tests
+# with no live Postgres, while a db-marked test still gets its pool + clean
+# table (both directions proven in §1.1).
 
 
 @pytest.fixture(scope="session")
@@ -66,8 +69,15 @@ def _clean_kill_switches():
     yield
 
 
-def pytest_collection_modifyitems(config, items):
-    for item in items:
-        if item.get_closest_marker("db"):
-            item.add_marker(pytest.mark.usefixtures("db_pool", "_clean_kill_switches"))
+@pytest.fixture(autouse=True)
+def _db_for_marked(request):
+    # F-P2-02: an autouse fixture that reads the marker at runtime works on
+    # pytest 9.1.1 in BOTH directions - pure tests request nothing (no live
+    # Postgres), db-marked tests pull in the pool + a clean table. (The old
+    # pytest_collection_modifyitems() + add_marker(usefixtures(...)) binding is
+    # dead on 9.1.1: Function.__init__ computes the fixture closure eagerly,
+    # before that hook. getfixturevalue is the dynamic, hook-independent path.)
+    if request.node.get_closest_marker("db"):
+        request.getfixturevalue("db_pool")
+        request.getfixturevalue("_clean_kill_switches")
 

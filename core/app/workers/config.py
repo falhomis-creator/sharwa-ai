@@ -117,6 +117,14 @@ DEFAULT_LLM_PRICE_TABLE: dict[str, Any] = {
     "fake": {"fake-router": {"input": 0, "output": 0}},
 }
 
+# P2.2 address resolver: written confidence weights (H65). JSON-overridable
+# without a code deploy; these mirror app/geo/resolve.py's documented defaults.
+DEFAULT_ADDRESS_W_LEVEL: dict[str, Any] = {
+    "landmark": 1.00, "neighborhood": 0.95, "area": 0.90,
+    "district": 0.85, "governorate": 0.50, "country": 0.30,
+}
+DEFAULT_ADDRESS_W_MATCH: dict[str, Any] = {"exact": 1.00, "synonym": 0.90, "prefix": 0.70}
+
 
 def _float(name: str, default: float) -> float:
     raw = os.environ.get(name, "").strip()
@@ -289,6 +297,13 @@ class WorkerSettings:
     national_number_len: int = 9
     mobile_prefixes: tuple[str, ...] = ("7",)
     order_ref_hash_key: str = ""
+    # P2.2 address resolver (H64-H68). All defaults written (H4); the weight
+    # tables are JSON-overridable without a code deploy.
+    address_accept_threshold: float = 0.75
+    address_max_candidates: int = 3
+    address_parent_bonus: float = 1.05
+    address_w_level: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_ADDRESS_W_LEVEL))
+    address_w_match: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_ADDRESS_W_MATCH))
 
     @staticmethod
     def load() -> WorkerSettings:
@@ -366,6 +381,9 @@ class WorkerSettings:
         except re.error as exc:
             raise ConfigError(f"ORDER_REF_PATTERN does not compile: {exc}") from exc
         order_ref_hash_key = _required("ORDER_REF_HASH_KEY")
+
+        address_w_level = _json_table("ADDRESS_W_LEVEL", DEFAULT_ADDRESS_W_LEVEL)
+        address_w_match = _json_table("ADDRESS_W_MATCH", DEFAULT_ADDRESS_W_MATCH)
 
         return WorkerSettings(
             db=db,
@@ -467,4 +485,9 @@ class WorkerSettings:
             national_number_len=_int("NATIONAL_NUMBER_LEN", 9),
             mobile_prefixes=_csv("MOBILE_PREFIXES", "7"),
             order_ref_hash_key=order_ref_hash_key,
+            address_accept_threshold=_float("ADDRESS_ACCEPT_THRESHOLD", 0.75),
+            address_max_candidates=_int("ADDRESS_MAX_CANDIDATES", 3),
+            address_parent_bonus=_float("ADDRESS_PARENT_BONUS", 1.05),
+            address_w_level=address_w_level,
+            address_w_match=address_w_match,
         )

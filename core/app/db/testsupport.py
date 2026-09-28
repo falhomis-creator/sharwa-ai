@@ -23,6 +23,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -112,6 +113,59 @@ def delete_tenant(dsn: str, tenant_id: uuid.UUID) -> None:
         conn.execute("DELETE FROM tenants WHERE id = %s", (tenant_id,))
 
 
+def delete_tenant_full(dsn: str, tenant_id: uuid.UUID) -> None:
+    """Full tenant cleanup in foreign-key order (children before parents).
+
+    F-P2-02: this name was called by test_routes_channels' real_tenant fixture
+    but never defined. The channel-lifecycle/idempotency tests create
+    channel_accounts and api_idempotency rows - neither has ON DELETE CASCADE to
+    tenants - so those (and every other tenant-scoped row) are deleted before the
+    tenant itself. Order respects the intra-tenant FKs (messages before
+    conversations/staff_members; conversations before channel_accounts/
+    customers; campaign_recipients before campaigns; etc.). Tables that are
+    ON DELETE CASCADE children of conversations / catalog_products are NOT named
+    here - their cascade handles them, keeping this helper clear of H57 (S12)
+    and the embeddings isolation (S9)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        for sql in (
+            "DELETE FROM messages WHERE tenant_id = %s",
+            "DELETE FROM inbox_events WHERE tenant_id = %s",
+            "DELETE FROM campaign_recipients WHERE tenant_id = %s",
+            "DELETE FROM consents WHERE tenant_id = %s",
+            "DELETE FROM suppressions WHERE tenant_id = %s",
+            "DELETE FROM waitlist_entries WHERE tenant_id = %s",
+            "DELETE FROM order_lookup_attempts WHERE tenant_id = %s",
+            "DELETE FROM address_resolutions WHERE tenant_id = %s",
+            "DELETE FROM checkout_sessions WHERE tenant_id = %s",
+            "DELETE FROM verifier_blocks WHERE tenant_id = %s",
+            "DELETE FROM llm_calls WHERE tenant_id = %s",
+            "DELETE FROM outbox WHERE tenant_id = %s",
+            "DELETE FROM conversations WHERE tenant_id = %s",
+            "DELETE FROM campaigns WHERE tenant_id = %s",
+            "DELETE FROM number_health WHERE tenant_id = %s",
+            "DELETE FROM inbound_events WHERE tenant_id = %s",
+            "DELETE FROM catalog_variants WHERE tenant_id = %s",
+            "DELETE FROM catalog_products WHERE tenant_id = %s",
+            "DELETE FROM kb_chunks WHERE tenant_id = %s",
+            "DELETE FROM size_chart_rows WHERE tenant_id = %s",
+            "DELETE FROM size_charts WHERE tenant_id = %s",
+            "DELETE FROM catalog_sync_cursor WHERE tenant_id = %s",
+            "DELETE FROM stock_holds WHERE tenant_id = %s",
+            "DELETE FROM stock_levels WHERE tenant_id = %s",
+            "DELETE FROM geo_gazetteer WHERE tenant_id = %s",
+            "DELETE FROM scheduled_jobs WHERE tenant_id = %s",
+            "DELETE FROM tenant_counters WHERE tenant_id = %s",
+            "DELETE FROM tenant_budgets WHERE tenant_id = %s",
+            "DELETE FROM staff_members WHERE tenant_id = %s",
+            "DELETE FROM customers WHERE tenant_id = %s",
+            "DELETE FROM channel_accounts WHERE tenant_id = %s",
+            "DELETE FROM audit_log WHERE tenant_id = %s",
+            "DELETE FROM api_idempotency WHERE tenant_id = %s",
+            "DELETE FROM tenants WHERE id = %s",
+        ):
+            conn.execute(sql, (tenant_id,))
+
+
 def reset_tenants_and_channels(dsn: str) -> None:
     with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute("DELETE FROM channel_accounts")
@@ -128,12 +182,53 @@ def seed_two_tenants(dsn: str, tenant_a: uuid.UUID, tenant_b: uuid.UUID) -> None
 
 
 def insert_channel_account(
-    dsn: str, *, tenant_id: uuid.UUID, type_: str, session_id: str, status: str = "connected",
+    dsn: str, *, tenant_id: uuid.UUID, type_: str, session_id: str,
+    status: str = "connected", engine: str = "ai_core",
+) -> uuid.UUID:
+    """Inserts a channel_accounts row and returns its id (F-P2-02: the callers
+    already passed `engine=` and used the returned id, but this helper neither
+    accepted `engine` nor returned anything - signature drift between the test
+    support and its callers)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "INSERT INTO channel_accounts (tenant_id, type, session_id, status, engine) "
+            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+            (str(tenant_id), type_, session_id, status, engine),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("INSERT ... RETURNING id produced no row")
+    return row[0]
+
+
+def fetch_channel_account_row(dsn: str, channel_id: uuid.UUID) -> dict[str, object] | None:
+    """Independent-of-app-code verification: the channel_accounts row by id, as
+    a dict keyed by column name (F-P2-02: called by test_routes_channels but
+    never defined - the name-resolver gap that S16 now closes)."""
+    with psycopg.connect(dsn) as conn:
+        row = conn.execute(
+            "SELECT id, tenant_id, type, session_id, phone_e164, engine, status, created_at "
+            "FROM channel_accounts WHERE id = %s", (channel_id,)
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row[0], "tenant_id": row[1], "type": row[2], "session_id": row[3],
+        "phone_e164": row[4], "engine": row[5], "status": row[6], "created_at": row[7],
+    }
+
+
+def insert_idempotency_record(
+    dsn: str, *, tenant_id: uuid.UUID, idempotency_key: str, request_hash: str,
+    response_status: int, response_body: dict,
 ) -> None:
+    """Seeds an api_idempotency row directly (F-P2-02: called by
+    test_routes_channels to prove the conflict branch, but never defined)."""
     with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute(
-            "INSERT INTO channel_accounts (tenant_id, type, session_id, status) VALUES (%s, %s, %s, %s)",
-            (str(tenant_id), type_, session_id, status),
+            "INSERT INTO api_idempotency "
+            "(tenant_id, idempotency_key, request_hash, response_status, response_body) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (tenant_id, idempotency_key, request_hash, response_status, Jsonb(response_body)),
         )
 
 
@@ -210,14 +305,17 @@ __all__: Sequence[str] = (
     "count_tenants",
     "delete_tenant",
     "delete_tenant_and_its_audit",
+    "delete_tenant_full",
     "exec_sql_autocommit",
     "fetch_audit_log_by_action",
+    "fetch_channel_account_row",
     "fetch_audit_log_by_tenant",
     "fetch_schema_migration_checksum",
     "fetch_schema_migrations",
     "fetch_tenant_row",
     "function_exists",
     "insert_channel_account",
+    "insert_idempotency_record",
     "insert_tenant_returning_id",
     "reset_tenants_and_channels",
     "seed_kill_switch",
