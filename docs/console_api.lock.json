@@ -1,0 +1,74 @@
+{
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/v1/conversations",
+      "permission": "conversation.read"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/conversations/{conversation_id}",
+      "permission": "conversation.read"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/conversations/{conversation_id}/messages",
+      "permission": "conversation.read"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/conversations/{conversation_id}/notes",
+      "permission": "note"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/inbox/events",
+      "permission": "conversation.read"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/conversations/{conversation_id}/assign",
+      "permission": "conversation.assign"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/conversations/{conversation_id}/claim",
+      "permission": "conversation.assign"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/conversations/{conversation_id}/close",
+      "permission": "conversation.handoff"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/conversations/{conversation_id}/handoff",
+      "permission": "conversation.handoff"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/conversations/{conversation_id}/messages",
+      "permission": "conversation.reply"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/conversations/{conversation_id}/notes",
+      "permission": "note"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/conversations/{conversation_id}/resume",
+      "permission": "conversation.handoff"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/conversations/{conversation_id}/transfer",
+      "permission": "conversation.assign_others"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/ws/ticket",
+      "permission": "conversation.read"
+    }
+  ]
+}

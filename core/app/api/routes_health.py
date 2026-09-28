@@ -19,7 +19,28 @@ router = APIRouter()
 
 
 @router.get("/healthz")
-def healthz() -> dict[str, str]:
+def healthz(request: Request) -> dict[str, str]:
+    # H61 (P2.1): the compose healthcheck must reflect this process's ability to
+    # do work, not merely that the process is alive. Both the DB pool and
+    # redis-cache must respond, otherwise 503 (never a leaked exception). The
+    # full dependency set is still /readyz; /healthz is the liveness gate the
+    # orchestrator polls.
+    checks: dict[str, bool] = {}
+    try:
+        with core_db.system_tx() as conn:
+            repos.check_alive(conn)
+        checks["postgres"] = True
+    except Exception:  # noqa: BLE001
+        checks["postgres"] = False
+
+    try:
+        request.app.state.redis_sync.client.ping()
+        checks["redis_cache"] = True
+    except Exception:  # noqa: BLE001
+        checks["redis_cache"] = False
+
+    if not all(checks.values()):
+        raise HTTPException(status_code=503, detail=checks)
     return {"status": "ok"}
 
 

@@ -13,7 +13,7 @@
 FROM python:3.12.8-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends wget \
+    && apt-get install -y --no-install-recommends bash wget \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --system app && useradd --system --gid app --home-dir /app --no-create-home app
@@ -25,8 +25,10 @@ RUN pip install --no-cache-dir --no-compile -r requirements.txt
 
 COPY app ./app
 COPY migrations ./migrations
+COPY entrypoint.sh /usr/local/bin/entrypoint
 
-RUN chown -R app:app /app
+RUN chmod +x /usr/local/bin/entrypoint \
+    && chown -R app:app /app
 USER app
 
 EXPOSE 8080
@@ -39,4 +41,8 @@ EXPOSE 8080
 # deliberate operator step: `docker compose run --rm api python -m app.cli
 # migrate [--adopt-existing-schema ...]` - see the delivery script's own
 # post-install instructions.
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
+# The shared bootstrap (core/entrypoint.sh) waits for PG + redis, verifies the
+# migrations are applied (never applies them - H62), then execs the role command.
+# `CMD` supplies the role; worker-realtime overrides it to "worker" in compose.
+ENTRYPOINT ["/usr/local/bin/entrypoint"]
+CMD ["api"]

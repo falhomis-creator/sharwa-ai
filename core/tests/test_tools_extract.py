@@ -63,3 +63,68 @@ def test_purity_same_output_ten_times():
     for _ in range(10):
         assert extract.extract_order_ref(texts, _REF) == ref
         assert extract.extract_phone_candidates(texts) == phones
+
+
+# --- F-P1-10 (P1.8 step zero): the eight real Yemeni phone formats -------------
+
+
+def test_fp1_10_local_nine_digits_starting_7():
+    # The standard Yemeni mobile: 9 digits, leading 7, no zero.
+    raw = extract.extract_phone_candidates(("رقمي 771234567",))
+    assert raw == ("771234567",)
+    assert extract.to_e164(raw[0], "967") == "+967771234567"
+
+
+def test_fp1_10_local_nine_digits_in_english_sentence():
+    raw = extract.extract_phone_candidates(("my number is 771234567",))
+    assert raw == ("771234567",)
+    assert extract.to_e164(raw[0], "967") == "+967771234567"
+
+
+def test_fp1_10_international_with_spaces():
+    raw = extract.extract_phone_candidates(("رقمي +967 771 234 567",))
+    assert raw == ("967771234567",)
+    assert extract.to_e164(raw[0], "967") == "+967771234567"
+
+
+def test_fp1_10_local_with_dashes():
+    raw = extract.extract_phone_candidates(("رقمي 771-234-567",))
+    assert raw == ("771234567",)
+    assert extract.to_e164(raw[0], "967") == "+967771234567"
+
+
+def test_fp1_10_local_with_space_groups():
+    raw = extract.extract_phone_candidates(("رقمي 77 123 4567",))
+    assert raw == ("771234567",)
+    assert extract.to_e164(raw[0], "967") == "+967771234567"
+
+
+def test_fp1_10_leading_zero_local():
+    raw = extract.extract_phone_candidates(("رقمي 0771234567",))
+    assert raw == ("0771234567",)
+    assert extract.to_e164(raw[0], "967") == "+967771234567"
+
+
+def test_fp1_10_bare_country_code():
+    raw = extract.extract_phone_candidates(("رقمي 967771234567",))
+    assert raw == ("967771234567",)
+    assert extract.to_e164(raw[0], "967") == "+967771234567"
+
+
+def test_fp1_10_double_zero_country_code():
+    raw = extract.extract_phone_candidates(("رقمي 00967771234567",))
+    assert raw == ("00967771234567",)
+    assert extract.to_e164(raw[0], "967") == "+967771234567"
+
+
+def test_fp1_10_adjacent_numbers_stay_two_candidates():
+    # A space between two complete numbers is a boundary, not a separator: the
+    # two must NOT be glued into one 16-digit run.
+    raw = extract.extract_phone_candidates(("77123456 99887766",))
+    assert raw == ("77123456", "99887766")
+
+
+def test_fp1_10_parentheses_and_dash():
+    raw = extract.extract_phone_candidates(("رقمي (771) 234-567",))
+    assert raw == ("771234567",)
+    assert extract.to_e164(raw[0], "967") == "+967771234567"

@@ -34,10 +34,11 @@ from pydantic import BaseModel
 from app import db as core_db
 from app import ws_publish
 from app.api.errors import ApiError
+from app.api.rate_limit import rate_limited
 from app.db import repos_inbox
 from app.db import repos_outbox
 from app.obs import metrics
-from app.security.permissions import StaffContext, require_permission
+from app.security.permissions import StaffContext
 
 router = APIRouter()
 
@@ -145,7 +146,7 @@ def list_conversations(
     assigned: str | None = Query(default=None),
     cursor: str | None = Query(default=None),
     limit: int | None = Query(default=None),
-    staff: StaffContext = Depends(require_permission("conversation.read")),
+    staff: StaffContext = Depends(rate_limited("read", "conversation.read")),
 ) -> dict[str, Any]:
     if status is not None and status not in _BOT_STATUSES:
         raise ApiError("VALIDATION_FAILED")
@@ -179,7 +180,7 @@ def list_conversations(
 @router.get("/v1/conversations/{conversation_id}")
 def get_conversation(
     conversation_id: uuid.UUID,
-    staff: StaffContext = Depends(require_permission("conversation.read")),
+    staff: StaffContext = Depends(rate_limited("read", "conversation.read")),
 ) -> dict[str, Any]:
     with core_db.tenant_tx(staff.tenant_id) as conn:
         conv = repos_inbox.fetch_conversation(
@@ -199,7 +200,7 @@ def list_messages(
     conversation_id: uuid.UUID,
     before_seq: int | None = Query(default=None),
     limit: int | None = Query(default=None),
-    staff: StaffContext = Depends(require_permission("conversation.read")),
+    staff: StaffContext = Depends(rate_limited("read", "conversation.read")),
 ) -> dict[str, Any]:
     limit = _clamp_limit(limit, MESSAGES_LIMIT_MAX, MESSAGES_LIMIT_MAX)
     with core_db.tenant_tx(staff.tenant_id) as conn:
@@ -226,7 +227,7 @@ def reply_to_conversation(
     body: ReplyBody,
     response: Response,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-    staff: StaffContext = Depends(require_permission("conversation.reply")),
+    staff: StaffContext = Depends(rate_limited("write", "conversation.reply")),
 ) -> dict[str, Any]:
     if not idempotency_key:
         raise ApiError("IDEMPOTENCY_KEY_REQUIRED")
@@ -348,7 +349,7 @@ def _transition(
 @router.post("/v1/conversations/{conversation_id}/handoff")
 def handoff_conversation(
     conversation_id: uuid.UUID, body: TransitionBody,
-    staff: StaffContext = Depends(require_permission("conversation.handoff")),
+    staff: StaffContext = Depends(rate_limited("write", "conversation.handoff")),
 ) -> dict[str, Any]:
     return _transition(conversation_id, body, "handoff", "paused_human", "manual_handoff", staff)
 
@@ -356,7 +357,7 @@ def handoff_conversation(
 @router.post("/v1/conversations/{conversation_id}/resume")
 def resume_conversation(
     conversation_id: uuid.UUID, body: TransitionBody,
-    staff: StaffContext = Depends(require_permission("conversation.handoff")),
+    staff: StaffContext = Depends(rate_limited("write", "conversation.handoff")),
 ) -> dict[str, Any]:
     return _transition(conversation_id, body, "resume", "active", "staff_resumed", staff)
 
@@ -364,7 +365,7 @@ def resume_conversation(
 @router.post("/v1/conversations/{conversation_id}/close")
 def close_conversation(
     conversation_id: uuid.UUID, body: TransitionBody,
-    staff: StaffContext = Depends(require_permission("conversation.handoff")),
+    staff: StaffContext = Depends(rate_limited("write", "conversation.handoff")),
 ) -> dict[str, Any]:
     return _transition(conversation_id, body, "close", "closed", "staff_closed", staff)
 
@@ -396,7 +397,7 @@ def _assign(
 @router.post("/v1/conversations/{conversation_id}/claim")
 def claim_conversation(
     conversation_id: uuid.UUID, body: ClaimBody,
-    staff: StaffContext = Depends(require_permission("conversation.assign")),
+    staff: StaffContext = Depends(rate_limited("write", "conversation.assign")),
 ) -> dict[str, Any]:
     return _assign(conversation_id, body.version, staff.staff_id, staff)
 
@@ -404,7 +405,7 @@ def claim_conversation(
 @router.post("/v1/conversations/{conversation_id}/assign")
 def assign_conversation(
     conversation_id: uuid.UUID, body: AssignBody,
-    staff: StaffContext = Depends(require_permission("conversation.assign")),
+    staff: StaffContext = Depends(rate_limited("write", "conversation.assign")),
 ) -> dict[str, Any]:
     if body.staff_id != staff.staff_id and "conversation.assign_others" not in staff.permissions:
         raise ApiError("FORBIDDEN_PERMISSION")
@@ -414,7 +415,7 @@ def assign_conversation(
 @router.post("/v1/conversations/{conversation_id}/transfer")
 def transfer_conversation(
     conversation_id: uuid.UUID, body: TransferBody,
-    staff: StaffContext = Depends(require_permission("conversation.assign_others")),
+    staff: StaffContext = Depends(rate_limited("write", "conversation.assign_others")),
 ) -> dict[str, Any]:
     return _assign(conversation_id, body.version, body.staff_id, staff)
 
@@ -426,7 +427,7 @@ def transfer_conversation(
 def list_notes(
     conversation_id: uuid.UUID,
     limit: int | None = Query(default=None),
-    staff: StaffContext = Depends(require_permission("note")),
+    staff: StaffContext = Depends(rate_limited("write", "note")),
 ) -> dict[str, Any]:
     limit = _clamp_limit(limit, NOTES_LIMIT_MAX, NOTES_LIMIT_MAX)
     with core_db.tenant_tx(staff.tenant_id) as conn:
@@ -443,7 +444,7 @@ def list_notes(
 @router.post("/v1/conversations/{conversation_id}/notes", status_code=201)
 def add_note(
     conversation_id: uuid.UUID, body: NoteBody,
-    staff: StaffContext = Depends(require_permission("note")),
+    staff: StaffContext = Depends(rate_limited("write", "note")),
 ) -> dict[str, Any]:
     text = body.body.strip()
     if not text or len(text) > MAX_NOTE_CHARS:
@@ -467,7 +468,7 @@ def add_note(
 def list_inbox_events(
     since: int = Query(default=0),
     limit: int | None = Query(default=None),
-    staff: StaffContext = Depends(require_permission("conversation.read")),
+    staff: StaffContext = Depends(rate_limited("read", "conversation.read")),
 ) -> dict[str, Any]:
     if since < 0:
         raise ApiError("VALIDATION_FAILED")
@@ -477,6 +478,4 @@ def list_inbox_events(
             conn, tenant_id=staff.tenant_id, since_seq=since, limit=limit,
         )
     return {"items": rows, "latest_seq": latest_seq}
-
-    return _assign(conversation_id, body.version, body.staff_id, staff)
 

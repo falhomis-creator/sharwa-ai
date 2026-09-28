@@ -294,6 +294,8 @@ services:
       GATEWAY_API_KEY: ${SHARWA_AI_GATEWAY_API_KEY:?SHARWA_AI_GATEWAY_API_KEY is required (see .env)}
       METRICS_TOKEN: ${METRICS_TOKEN:?METRICS_TOKEN is required - the api service refuses to start without it (see .env)}
       SSO_LOGIN_URL: ${SSO_LOGIN_URL:?SSO_LOGIN_URL is required (see .env)}
+      # P1.4 catalog webhook HMAC secret (app/config.py _required - empty refuses boot, H5).
+      PLATFORM_WEBHOOK_SECRET: ${PLATFORM_WEBHOOK_SECRET:?PLATFORM_WEBHOOK_SECRET is required (see .env)}
     networks: [data, app]                  # data: postgres/pgbouncer/redis-cache. app: gateway + outbound (JWKS_URL)
     ports:
       - "127.0.0.1:8080:8080"              # loopback only, same convention as gateway/gateway-forwarder/prometheus
@@ -323,7 +325,7 @@ services:
   # prometheus (app network) can reach /healthz + /metrics on :4003.
   worker-realtime:
     image: sharwa-ai-core:p1.0
-    command: ["python", "-m", "app.workers.realtime"]
+    command: ["worker"]                      # entrypoint.sh role -> python -m app.workers.realtime
     environment:
       ENV: production
       CORE_DATABASE_URL: "host=pgbouncer port=5432 dbname=${POSTGRES_DB} user=${SHARWA_APP_USER} password=${SHARWA_APP_PASSWORD}"
@@ -342,6 +344,10 @@ services:
       # so a future tuning can't silently diverge between gateway and worker.
       DEDUPE_DONE_TTL_S: ${DEDUPE_DONE_TTL_S:-172800}
       METRICS_TOKEN: ${METRICS_TOKEN:?METRICS_TOKEN is required - the worker refuses to start without it (see .env)}
+      # P1.7 order-tracking HMAC key (workers/config.py _required, H54): a long
+      # random value generated ONCE and kept stable - changing it resets the
+      # "5 rejections per order" counter because all prior fingerprints stop matching.
+      ORDER_REF_HASH_KEY: ${ORDER_REF_HASH_KEY:?ORDER_REF_HASH_KEY is required (see .env)}
     networks: [data, app]                  # data: pg/pgbouncer/redis-durable/redis-cache. app: prometheus scrape target
     mem_limit: 512m                        # P1.2: raised 384m -> 512m for the turn/dispatch/evt thread groups
     memswap_limit: 512m

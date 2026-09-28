@@ -10,8 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from app.tools import extract
-
 if TYPE_CHECKING:
     from app.tools.registry import ToolContext
 
@@ -34,24 +32,20 @@ def resolve_path(channel_phone_e164: str | None, phone_candidates: tuple[str, ..
 
 
 def run(ctx: ToolContext) -> OrderLookup:
-    order_ref = extract.extract_order_ref(ctx.message_texts, ctx.settings.order_ref_pattern)
-    if order_ref is None:
-        return OrderLookup(kind="need_order_ref")
-
-    raw = extract.extract_phone_candidates(
-        ctx.message_texts, max_candidates=ctx.settings.order_lookup_max_phone_candidates,
-    )
-    country = ctx.settings.default_country_code
-    candidates = tuple(c for c in (extract.to_e164(r, country) for r in raw) if c)
-
-    path = resolve_path(ctx.channel_phone_e164, candidates)
+    # N2 (P1.7 audit): order_ref, phone_candidates and path are pre-extracted and
+    # frozen in ctx by the coordinator (orders.py phase 1). This tool is now pure
+    # decision + platform call only - it never re-extracts, so the fingerprint the
+    # coordinator logged is guaranteed to be the very same request that is looked
+    # up here (single source of truth for the order-ref/phone/path).
+    path = ctx.path
+    candidates = ctx.phone_candidates
     phones = (ctx.channel_phone_e164,) if path == "same_number" else candidates
 
     if path == "other_number" and not phones:
         return OrderLookup(kind="need_phone")
 
     card = ctx.commerce.lookup_order(
-        tenant_ref=ctx.tenant_ref, order_ref=order_ref,
+        tenant_ref=ctx.tenant_ref, order_ref=ctx.order_ref,
         phone_candidates=phones, path=path,
     )
     if card is None:

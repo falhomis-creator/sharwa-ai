@@ -310,14 +310,15 @@ def process_turn(
         and settings.tools_enabled
         and commerce is not None
     ):
-        from app.tools.registry import TOOLS
-        if "track_order" in TOOLS:
-            order_lookup = orders.run_order_lookup(
-                settings, tenant_id=tenant_id, conversation_id=conversation_id,
-                commerce=commerce, bodies=plan.bodies,
-            )
-        else:
-            metrics.tool_unknown_total.inc()
+        # N4 (P1.7 audit): the previous `if "track_order" in TOOLS: ... else:
+        # tool_unknown_total.inc()` had an unreachable else - "track_order" is a
+        # closed-literal member of TOOLS (enforced by S11-c), so the alert could
+        # never fire. The dead metric/alert are removed; the 1:1 intent->tool
+        # mapping means the order lookup is a direct, honest call.
+        order_lookup = orders.run_order_lookup(
+            settings, tenant_id=tenant_id, conversation_id=conversation_id,
+            commerce=commerce, bodies=plan.bodies,
+        )
 
     # ---- Phase 3: write + account (second short transaction) ----
     with core_db.tenant_tx(tenant_id) as conn:

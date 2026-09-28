@@ -21,6 +21,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import CollectorRegistry
 from redis import asyncio as redis_asyncio
 
@@ -82,7 +83,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def create_app() -> FastAPI:
+    settings = Settings.load()
     app = FastAPI(title="sharwa_ai core", lifespan=lifespan)
+    app.state.settings = settings
+
+    # CORS (P1.8, H56): the console is a browser on a different origin. Origins are
+    # an explicit env allowlist (CONSOLE_ALLOWED_ORIGINS); an empty list => the
+    # middleware is NOT registered (no open cross-origin default, and never
+    # allow_origins=["*"] + allow_credentials). Methods/headers are explicit.
+    if settings.console_allowed_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(settings.console_allowed_origins),
+            allow_credentials=False,
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=["Authorization", "Idempotency-Key", "X-Request-Id", "Content-Type"],
+            expose_headers=["X-Request-Id"],
+        )
 
     @app.middleware("http")
     async def request_id_middleware(

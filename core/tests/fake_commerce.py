@@ -22,7 +22,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from app.commerce.port import CommercePort
+from app.commerce.port import CommercePort, project_order_card
 
 
 class FakeCommerce(CommercePort):
@@ -66,4 +66,6 @@ class FakeCommerce(CommercePort):
         order_phone = order.get("phone")
         if not phone_candidates or order_phone not in phone_candidates:
             return None  # phone mismatch (identical None)
-        return order
+        # N3 (P1.7 audit): closed projection - the platform never sends a phone,
+        # address or amount back to core; only ref/status/updated_at cross here.
+        return project_order_card(order)

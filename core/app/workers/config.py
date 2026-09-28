@@ -284,6 +284,10 @@ class WorkerSettings:
     order_lookup_max_per_conversation_per_day: int = 10
     order_status_max_chars: int = 600
     default_country_code: str = DEFAULT_COUNTRY_CODE
+    # F-P1-10: the Yemeni national mobile format (9 digits starting with 7, no
+    # leading zero) - written, overridable settings, not hardcoded in extract.py.
+    national_number_len: int = 9
+    mobile_prefixes: tuple[str, ...] = ("7",)
     order_ref_hash_key: str = ""
 
     @staticmethod
@@ -460,5 +464,7 @@ class WorkerSettings:
             order_lookup_max_per_conversation_per_day=_int("ORDER_LOOKUP_MAX_PER_CONVERSATION_PER_DAY", 10),
             order_status_max_chars=_int("ORDER_STATUS_MAX_CHARS", 600),
             default_country_code=_optional("DEFAULT_COUNTRY_CODE", DEFAULT_COUNTRY_CODE),
+            national_number_len=_int("NATIONAL_NUMBER_LEN", 9),
+            mobile_prefixes=_csv("MOBILE_PREFIXES", "7"),
             order_ref_hash_key=order_ref_hash_key,
         )

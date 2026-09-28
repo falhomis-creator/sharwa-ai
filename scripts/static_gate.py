@@ -16,6 +16,17 @@ exit 1 = violations as `file:line: [phase] detail`.
   S5 - `internal_notes` must never be referenced by a send path: any module in
        the import closure of app.workers.dispatch / app.channels that mentions
        `internal_notes` (in SQL or as a name) is a structural violation (H28).
+  S12 - P1.8 (H57/H58): a) `internal_notes` only named in repos_inbox + note
+        routes; b) no serialization whitelist names a note key; c) every WS event
+        key is a REST field or a documented envelope key (one truth per field).
+  S13 - P1.8 (H56): the frozen console API contract (docs/console_api.lock.json)
+        must equal the actual @router routes + permissions in app/api/**.
+  S14 - P2.1 (F-P1-11 guard): a) a function declaring a non-None return type
+        whose every return is bare/None; b) a statement after a terminal
+        (return/raise/continue/break) in the same block.
+  S15 - P2.1 (H60): every _required("X") key is provided by docker-compose.yml,
+        and any key compose reads from .env via ${X:?...} is in .env.example.
+
 """
 from __future__ import annotations
 
@@ -325,6 +336,99 @@ def _s11d_third_party_callers(mods: dict[str, Path]) -> list[str]:
     return bad
 
 
+# --- S12 (P1.8) vocabulary + helpers -----------------------------------------
+
+_S12_NOTE_KEYS = frozenset({"note", "notes", "internal_note", "internal_notes"})
+_S12_ALLOWED_INTERNAL_NOTES = frozenset({"app.db.repos_inbox", "app.api.routes_inbox"})
+# H58/S12-c: the event-envelope keys that legitimately differ from REST naming -
+# an event references a conversation/message by *_id and carries a transition
+# `reason`, while REST returns `id` and `handoff_reason`. Documented in the
+# contract §4. A WS key outside REST and outside this envelope is two truths.
+_S12_ENVELOPE_KEYS = frozenset({"conversation_id", "message_id", "reason"})
+
+
+def _named_frozenset_strings(tree: ast.Module, name: str) -> set[str]:
+    """String elements of the module-level `name = frozenset({...})` assignment."""
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name) and node.targets[0].id == name):
+            val = node.value
+            if isinstance(val, ast.Call) and val.args and isinstance(val.args[0], ast.Set):
+                return {e.value for e in val.args[0].elts if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+            if isinstance(val, ast.Set):
+                return {e.value for e in val.elts if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+    return set()
+
+
+def _field_whitelist_strings(tree: ast.Module, skip_assign: str) -> set[str]:
+    """String elements of every tuple/list/set literal, skipping the named
+    assignment's subtree (so the event whitelist is not double-counted as REST)."""
+    found: set[str] = set()
+
+    def visit(node: ast.AST) -> None:
+        if isinstance(node, ast.Assign):
+            if (len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id == skip_assign):
+                return
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+        if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+            for elt in node.elts:
+                if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                    found.add(elt.value)
+
+    visit(tree)
+    return found
+
+
+def _router_decorator(dec: ast.expr) -> tuple[str | None, str | None]:
+    if isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute):
+        f = dec.func
+        if isinstance(f.value, ast.Name) and f.value.id == "router":
+            if f.attr in ("get", "post", "put", "delete", "patch") and dec.args:
+                first = dec.args[0]
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    return f.attr.upper(), first.value
+    return None, None
+
+
+def _route_permission(node: ast.FunctionDef) -> str | None:
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Call):
+            continue
+        f = child.func
+        name = f.id if isinstance(f, ast.Name) else None
+        if name == "require_permission":
+            if child.args and isinstance(child.args[0], ast.Constant) and isinstance(child.args[0].value, str):
+                return child.args[0].value
+        if name == "rate_limited":
+            if len(child.args) >= 2 and isinstance(child.args[1], ast.Constant) and isinstance(child.args[1].value, str):
+                return child.args[1].value
+    return None
+
+
+def _console_routes(mods: dict[str, Path]) -> set[tuple[str, str, str]]:
+    """(method, path, permission) of every @router.<method> route in app/api/** that
+    carries a require_permission(...)/rate_limited(..., ...) dependency."""
+    routes: set[tuple[str, str, str]] = set()
+    for mod, path in mods.items():
+        if not mod.startswith("app.api."):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for dec in node.decorator_list:
+                method, route_path = _router_decorator(dec)
+                if method is None:
+                    continue
+                perm = _route_permission(node)
+                if perm is None:
+                    continue
+                routes.add((method, route_path, perm))
+    return routes
+
+
 _violations: list[str] = []
 _notes: list[str] = []  # informational (S1-c re-exports) - never cause a failure
 
@@ -474,6 +578,115 @@ def _labelcount(node: ast.AST) -> int:
         if kw.arg == "labelnames" and isinstance(kw.value, (ast.List, ast.Tuple)):
             return len(kw.value.elts)
     return 0
+
+
+# --- S14 (P2.1): a function must be able to return what its signature promises ----
+# F-P1-11 lived five batches because no gate asked "can this function actually
+# return its declared type?". Two AST checks, near-zero false positives:
+#   a) a FunctionDef with a non-None/non-NoReturn return annotation, no `yield`,
+#      >=1 explicit return, and EVERY return bare or `return None` => the
+#      signature promises a value the body can never produce.
+#   b) any statement after a terminal (return/raise/continue/break) in the SAME
+#      block => unreachable code (the displaced `return StaffRow(...)`).
+
+
+def _scoped_nodes(func: ast.AST, kinds: tuple[type, ...]) -> list[ast.AST]:
+    """Nodes of `kinds` inside `func`, without descending into nested scopes."""
+    out: list[ast.AST] = []
+
+    def walk(node: ast.AST) -> None:
+        if node is not func and isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef),
+        ):
+            return
+        if isinstance(node, kinds):
+            out.append(node)
+            return
+        for child in ast.iter_child_nodes(node):
+            walk(child)
+
+    walk(func)
+    return out
+
+
+def _promises_non_none(ann: ast.expr | None) -> bool:
+    if ann is None:
+        return False
+    if isinstance(ann, ast.Constant) and ann.value is None:
+        return False
+    if isinstance(ann, ast.Name) and ann.id == "NoReturn":
+        return False
+    return True
+
+
+def _is_none_return(node: ast.Return) -> bool:
+    if node.value is None:
+        return True
+    if isinstance(node.value, ast.Constant) and node.value.value is None:
+        return True
+    if isinstance(node.value, ast.Name) and node.value.id == "None":
+        return True
+    return False
+
+
+_S14_TERMINALS = (ast.Return, ast.Raise, ast.Continue, ast.Break)
+
+
+def _s14a_violations(tree: ast.Module) -> list[ast.FunctionDef]:
+    bad: list[ast.FunctionDef] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not _promises_non_none(node.returns):
+            continue
+        if _scoped_nodes(node, (ast.Yield, ast.YieldFrom)):
+            continue
+        returns = [r for r in _scoped_nodes(node, (ast.Return,)) if isinstance(r, ast.Return)]
+        if not returns:
+            continue
+        if all(_is_none_return(r) for r in returns):
+            bad.append(node)
+    return bad
+
+
+def _s14b_violations(tree: ast.Module) -> list[ast.stmt]:
+    bad: list[ast.stmt] = []
+
+    def scan(stmts: list[ast.stmt]) -> None:
+        terminal = False
+        for stmt in stmts:
+            if terminal:
+                bad.append(stmt)
+            if isinstance(stmt, _S14_TERMINALS):
+                terminal = True
+
+    for node in ast.walk(tree):
+        for attr in ("body", "orelse", "finalbody"):
+            seq = getattr(node, attr, None)
+            if isinstance(seq, list):
+                scan(seq)
+        for handler in getattr(node, "handlers", None) or ():
+            scan(handler.body)
+    return bad
+
+
+# --- S15 (P2.1, H60): no boot with incomplete config --------------------------
+
+
+def _config_required_keys(mods: dict[str, Path]) -> set[str]:
+    keys: set[str] = set()
+    for mod in ("app.config", "app.workers.config"):
+        path = mods.get(mod)
+        if path is None:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "_required"
+                    and node.args and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)):
+                keys.add(node.args[0].value)
+    return keys
 
 
 def main() -> int:
@@ -778,8 +991,89 @@ def main() -> int:
 
     # d: order_lookup_blocked / insert_order_lookup_attempt have one consumer
     for mod in _s11d_third_party_callers(mods):
-        _err("S11", mod, 0,
+        _err("S11", str(mods[mod].relative_to(ROOT)), 0,
              f"'{mod}' calls order_lookup_blocked/insert_order_lookup_attempt (only app.workers.orders)")
+
+    # ---- S12 (P1.8, H57/H58): internal-notes isolation on the READ path ---------
+    # a: `internal_notes` may only be named in repos_inbox (definition) + note routes.
+    for mod, path in mods.items():
+        if mod in _S12_ALLOWED_INTERNAL_NOTES:
+            continue
+        if "internal_notes" in path.read_text(encoding="utf-8"):
+            _err("S12", str(path.relative_to(ROOT)), 0,
+                 f"'{mod}' references 'internal_notes' (H57: read-path isolation - only "
+                 "app.db.repos_inbox and the note routes may name it)")
+
+    # b: no message/conversation serialization whitelist may name a note key.
+    for mod in ("app.db.repos_inbox", "app.api.routes_inbox", "app.api.ws_frames"):
+        path = mods.get(mod)
+        if path is None:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+                for elt in node.elts:
+                    if (isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+                            and elt.value in _S12_NOTE_KEYS):
+                        _err("S12", str(path.relative_to(ROOT)), getattr(node, "lineno", 0),
+                             f"serialization whitelist in '{mod}' names note key '{elt.value}' (H57)")
+
+    # c (H58): every WS event key must be a REST field or an envelope key.
+    inbox_path = mods.get("app.db.repos_inbox")
+    if inbox_path is not None:
+        inbox_tree = ast.parse(inbox_path.read_text(encoding="utf-8"))
+        event_keys = _named_frozenset_strings(inbox_tree, "INBOX_EVENT_ALLOWED_KEYS")
+        rest_keys = _field_whitelist_strings(inbox_tree, "INBOX_EVENT_ALLOWED_KEYS")
+        routes_path = mods.get("app.api.routes_inbox")
+        if routes_path is not None:
+            rest_keys |= _field_whitelist_strings(
+                ast.parse(routes_path.read_text(encoding="utf-8")), "INBOX_EVENT_ALLOWED_KEYS",
+            )
+        for key in sorted(event_keys - rest_keys - _S12_ENVELOPE_KEYS):
+            _err("S12", str(inbox_path.relative_to(ROOT)), 0,
+                 f"WS event key '{key}' is not a REST field nor an envelope key (H58: one truth per field)")
+
+    # ---- S13 (P1.8, H56): the frozen contract is a rule, not an intention -----
+    lock_path = ROOT / "docs" / "console_api.lock.json"
+    if not lock_path.exists():
+        _err("S13", "docs/console_api.lock.json", 0,
+             "missing contract lock - generate it with scripts/generate_console_lock.py")
+    else:
+        import json as _json
+        locked_routes = {
+            (r["method"], r["path"], r["permission"])
+            for r in _json.loads(lock_path.read_text(encoding="utf-8"))["routes"]
+        }
+        actual_routes = _console_routes(mods)
+        for method, path, perm in sorted(locked_routes - actual_routes):
+            _err("S13", "docs/console_api.lock.json", 0,
+                 f"{method} {path} ({perm}) is in the contract but not in app/api/**")
+        for method, path, perm in sorted(actual_routes - locked_routes):
+            _err("S13", "docs/console_api.lock.json", 0,
+                 f"{method} {path} ({perm}) is in app/api/** but not frozen in the contract - update the contract")
+
+    # ---- S14 (P2.1): a function must be able to return its promised type -----
+    for mod, path in mods.items():
+        rel = str(path.relative_to(ROOT))
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for fn in _s14a_violations(tree):
+            _err("S14", rel, getattr(fn, "lineno", 0),
+                 f"{fn.name}() declares a non-None return type but every return is bare/None (F-P1-11 guard)")
+        for stmt in _s14b_violations(tree):
+            _err("S14", rel, getattr(stmt, "lineno", 0),
+                 "unreachable statement after return/raise/continue/break in the same block")
+
+    # ---- S15 (P2.1, H60): every _required key is provided + documented ------
+    compose_text = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    env_example_text = (ROOT / ".env.example").read_text(encoding="utf-8")
+    for key in sorted(_config_required_keys(mods)):
+        if not re.search(r"\b" + re.escape(key) + r"\b", compose_text):
+            _err("S15", "docker-compose.yml", 0,
+                 f"required env key '{key}' is not provided by docker-compose.yml (H60)")
+        elif (re.search(r"\$\{" + re.escape(key) + r":\?", compose_text)
+              and not re.search(r"\b" + re.escape(key) + r"\b", env_example_text)):
+            _err("S15", ".env.example", 0,
+                 f"required env key '{key}' is read from .env via ${{{key}:?...}} but missing from .env.example (H60)")
 
     # ---- output -------------------------------------------------------------
     if _notes:

@@ -39,41 +39,75 @@ def run_order_lookup(
     commerce: Any,
     bodies: tuple[str, ...],
 ) -> track_order.OrderLookup:
-    # ---- Phase 1: read + brute-force gate (short transaction) ----
+    # ---- Phase 1: read + gates (short transaction) ----
     ref_hash: str = ""
     path: str = "other_number"
     customer_id: uuid.UUID | None = None
     channel_phone: str | None = None
     platform_ref: str = ""
+    order_ref: str = ""
+    candidates: tuple[str, ...] = ()
 
     with core_db.tenant_tx(tenant_id) as conn:
         customer_id = repos_outbox.customer_id_for_conversation(conn, conversation_id)
         wa_id = repos_outbox.wa_id_for_conversation(conn, conversation_id)
         platform_ref = repos.platform_ref_for_tenant(conn, tenant_id) or ""
-        channel_phone = extract.to_e164(wa_id, settings.default_country_code) if wa_id else None
+        channel_phone = (
+            extract.to_e164(
+                wa_id, settings.default_country_code,
+                national_len=settings.national_number_len,
+                mobile_prefixes=settings.mobile_prefixes,
+            ) if wa_id else None
+        )
 
+        # N2: extract ONCE here - order_ref, phone candidates and path are frozen
+        # into the ToolContext below, so the fingerprint (ref_hash/path) logged
+        # here and the values the tool uses are guaranteed to be the same request.
         order_ref = extract.extract_order_ref(bodies, settings.order_ref_pattern)
         if order_ref is None:
             metrics.tool_calls_total.labels("track_order", "need_order_ref").inc()
             return track_order.OrderLookup(kind="need_order_ref")
 
+        # N5: the order-ref match must not also be read as a phone candidate
+        # (an 8-digit order-ref starting with 967 would otherwise be normalized
+        # to a phone and push the customer down other_number for no reason).
         raw = extract.extract_phone_candidates(
-            bodies, max_candidates=settings.order_lookup_max_phone_candidates,
+            bodies,
+            max_candidates=settings.order_lookup_max_phone_candidates,
+            exclude=frozenset((order_ref,)),
         )
-        candidates = tuple(c for c in (extract.to_e164(r, settings.default_country_code) for r in raw) if c)
+        candidates = tuple(
+            c for c in (
+                extract.to_e164(
+                    r, settings.default_country_code,
+                    national_len=settings.national_number_len,
+                    mobile_prefixes=settings.mobile_prefixes,
+                ) for r in raw
+            ) if c
+        )
         path = track_order.resolve_path(channel_phone, candidates)
         if path == "other_number" and not candidates:
             metrics.tool_calls_total.labels("track_order", "need_phone").inc()
             return track_order.OrderLookup(kind="need_phone")
 
         ref_hash = order_ref_hash(order_ref, settings.order_ref_hash_key)
-        if customer_id is not None and repos_outbox.order_lookup_blocked(
-            conn, customer_id=customer_id, order_ref_hash=ref_hash,
-        ):
-            repos_outbox.insert_order_lookup_attempt(
-                conn, tenant_id=tenant_id, conversation_id=conversation_id,
-                customer_id=customer_id, path=path, order_ref_hash=ref_hash, outcome="blocked",
-            )
+
+        # N1 (P1.7): the operational per-conversation-per-day ceiling - a
+        # platform-call usage ceiling on top of the 3/24h + 5/24h brute-force
+        # thresholds (which stay exactly as they are in SQL). Above it => blocked.
+        attempts_today = repos_outbox.count_order_lookup_attempts_for_conversation(
+            conn, conversation_id=conversation_id,
+        )
+        brute_force_blocked = (
+            customer_id is not None
+            and repos_outbox.order_lookup_blocked(conn, customer_id=customer_id, order_ref_hash=ref_hash)
+        )
+        if attempts_today >= settings.order_lookup_max_per_conversation_per_day or brute_force_blocked:
+            if customer_id is not None:
+                repos_outbox.insert_order_lookup_attempt(
+                    conn, tenant_id=tenant_id, conversation_id=conversation_id,
+                    customer_id=customer_id, path=path, order_ref_hash=ref_hash, outcome="blocked",
+                )
             metrics.order_lookup_total.labels(path, "blocked").inc()
             metrics.tool_calls_total.labels("track_order", "blocked").inc()
             return track_order.OrderLookup(kind="blocked")
@@ -82,6 +116,7 @@ def run_order_lookup(
     ctx = ToolContext(
         tenant_id=tenant_id, conversation_id=conversation_id, tenant_ref=platform_ref,
         channel_phone_e164=channel_phone, message_texts=bodies, commerce=commerce, settings=settings,
+        order_ref=order_ref, phone_candidates=candidates, path=path,
     )
     started = time.monotonic()
     try:

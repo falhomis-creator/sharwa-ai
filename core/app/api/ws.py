@@ -27,10 +27,11 @@ from starlette.concurrency import run_in_threadpool
 
 from app import db as core_db
 from app.api.errors import ApiError
+from app.api.rate_limit import rate_limited
 from app.api.ws_frames import to_frame
 from app.db import repos_inbox
 from app.obs import metrics
-from app.security.permissions import StaffContext, require_permission
+from app.security.permissions import StaffContext
 from app.ws_publish import inbox_channel
 
 router = APIRouter()
@@ -302,7 +303,7 @@ class WsHub:
 @router.post("/v1/ws/ticket")
 def create_ws_ticket(
     request: Request,
-    staff: StaffContext = Depends(require_permission("conversation.read")),
+    staff: StaffContext = Depends(rate_limited("ticket", "conversation.read")),
 ) -> dict[str, Any]:
     try:
         ticket, ttl = issue_ticket(
@@ -326,6 +327,16 @@ async def websocket_endpoint(
     hub: WsHub = websocket.app.state.ws_hub
     redis_async: redis_asyncio.Redis = websocket.app.state.redis_async
     settings = websocket.app.state.settings
+
+    # CORS (P1.8): the WebSocket handshake is NOT protected by CORSMiddleware, so
+    # the Origin header is checked against the same explicit allowlist. A browser
+    # Origin outside the list is rejected (1008); a missing Origin (non-browser
+    # client) is not subject to CORS and is allowed.
+    origin = websocket.headers.get("origin")
+    if origin and origin not in settings.console_allowed_origins:
+        metrics.ws_rejected_total.labels("origin_not_allowed").inc()
+        await websocket.close(code=1008)
+        return
 
     # H31: a JWT in the URL is forbidden - auth is ticket-only. Reject before
     # accepting any frame.

@@ -56,6 +56,7 @@ def resolve_staff_member(
     ).fetchone()
     if row is None:
         return None
+    return StaffRow(id=row[0], role=row[1], active=row[2])
 
 
 # --- api_idempotency (H30) ---------------------------------------------------
@@ -192,8 +193,6 @@ def fetch_customer_card(
         "suppression_scopes": [s[0] for s in scopes],
         "last_message_at": last_message_at,
     }
-
-    return StaffRow(id=row[0], role=row[1], active=row[2])
 
 
 # --- messages (I1) -----------------------------------------------------------

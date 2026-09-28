@@ -609,12 +609,6 @@ tool_calls_total = Counter(
     registry=registry,
 )
 
-tool_unknown_total = Counter(
-    "tool_unknown_total",
-    "Turns that requested a tool not present in the closed registry.",
-    registry=registry,
-)
-
 tools_enabled = Gauge(
     "tools_enabled",
     "1 when the tools layer is enabled, 0 when disabled (H4: visible, not hidden).",
@@ -639,6 +633,23 @@ order_lookup_platform_errors_total = Counter(
     "order_lookup_platform_errors_total",
     "Order-lookup platform errors, by kind (timeout|unavailable|client_error).",
     labelnames=["kind"],
+    registry=registry,
+)
+
+# --- P1.8 console rate limiting (H59) -----------------------------------------
+
+rate_limit_hits_total = Counter(
+    "rate_limit_hits_total",
+    "Console requests rejected by the rate limiter, by group (read|write|ticket).",
+    labelnames=["group"],
+    registry=registry,
+)
+
+rate_limit_fail_open_total = Counter(
+    "rate_limit_fail_open_total",
+    "Console requests that PASSED because redis-cache was unavailable (fail-open, "
+    "H59: a down cache must not take the console down), by group.",
+    labelnames=["group"],
     registry=registry,
 )
 

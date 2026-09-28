@@ -37,6 +37,14 @@ def _int(name: str, default: int) -> int:
         raise ConfigError(f"{name} must be an integer, got {raw!r}") from exc
 
 
+def _csv(name: str, default: str) -> tuple[str, ...]:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        raw = default
+    parts = [p.strip() for p in raw.split(",")]
+    return tuple(p for p in parts if p)
+
+
 # H36 / S7 (PROMPT_P1_04 §4.1): the field names that signal a cost/wholesale/
 # margin leak from the platform. The catalog read model must never store these;
 # an inbound event carrying one is dropped at the gate and counted. This list
@@ -114,6 +122,15 @@ class Settings:
     platform_timestamp_skew_s: int = 300
     platform_event_batch_max: int = 1000
     platform_webhook_body_max_bytes: int = 262_144
+    # P1.8 console (H56/H59): explicit CORS origins (empty => CORS middleware is
+    # NOT registered, so no open cross-origin default) and the three rate-limit
+    # group ceilings (read/write/ticket - ticket is the narrowest). The numbers
+    # are a written estimate, not a measurement (OQ-P1-30).
+    console_allowed_origins: tuple[str, ...] = ()
+    console_rate_limit_read: int = 120
+    console_rate_limit_write: int = 60
+    console_rate_limit_ticket: int = 10
+    console_rate_limit_window_s: float = 60.0
 
     @staticmethod
     def load() -> Settings:
@@ -156,4 +173,9 @@ class Settings:
             platform_timestamp_skew_s=_int("PLATFORM_TIMESTAMP_SKEW_S", 300),
             platform_event_batch_max=_int("PLATFORM_EVENT_BATCH_MAX", 1000),
             platform_webhook_body_max_bytes=_int("PLATFORM_WEBHOOK_BODY_MAX_BYTES", 262_144),
+            console_allowed_origins=_csv("CONSOLE_ALLOWED_ORIGINS", ""),
+            console_rate_limit_read=_int("CONSOLE_RATE_LIMIT_READ", 120),
+            console_rate_limit_write=_int("CONSOLE_RATE_LIMIT_WRITE", 60),
+            console_rate_limit_ticket=_int("CONSOLE_RATE_LIMIT_TICKET", 10),
+            console_rate_limit_window_s=float(_optional("CONSOLE_RATE_LIMIT_WINDOW_S", "60.0")),
         )

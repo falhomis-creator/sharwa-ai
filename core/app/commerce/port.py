@@ -9,6 +9,20 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+# N3 (P1.7 audit): the order card that reaches core carries ONLY these fields -
+# never phone, address, amounts, or any other platform field. The read model must
+# not even name a field beyond this closed set (H36 in spirit). Both the real
+# adapter and the test FakeCommerce project through this same constant.
+ORDER_CARD_FIELDS = ("ref", "status", "updated_at")
+
+
+def project_order_card(card: dict[str, Any]) -> dict[str, Any]:
+    """Closed projection of one platform order row. Anything not in
+    ORDER_CARD_FIELDS is dropped at the boundary, so a phone/address/amount on the
+    platform side never reaches core (fail-closed: a missing field is simply
+    absent from the projected dict)."""
+    return {k: card[k] for k in ORDER_CARD_FIELDS if k in card}
+
 
 class CommercePort(Protocol):
     """The two platform read operations the catalog needs in this batch (P1.4)."""

@@ -167,6 +167,22 @@ def insert_order_lookup_attempt(
     )
 
 
+def count_order_lookup_attempts_for_conversation(
+    conn: psycopg.Connection, *, conversation_id: uuid.UUID,
+) -> int:
+    """The operational per-conversation-per-day ceiling (N1, P1.7 audit): count
+    EVERY attempt of this conversation in the last 24h, whatever its outcome.
+    Above ORDER_LOOKUP_MAX_PER_CONVERSATION_PER_DAY the coordinator blocks - this
+    is a platform-call cost ceiling on top of the 3/24h + 5/24h brute-force
+    thresholds, not a replacement for them."""
+    row = conn.execute(
+        "SELECT count(*) FROM order_lookup_attempts "
+        "WHERE conversation_id = %s AND created_at > now() - interval '24 hours'",
+        (conversation_id,),
+    ).fetchone()
+    return int(row[0]) if row is not None else 0
+
+
 def mark_turn_processed(
     conn: psycopg.Connection, *, conversation_id: uuid.UUID, last_processed_seq: int,
 ) -> None:

@@ -70,6 +70,16 @@ class RedisSync:
         )
         self._verify_timeout_s = verify_timeout_s
 
+    @property
+    def client(self) -> redis.Redis:
+        """Public accessor for the redis-cache client (N1, P1.8 audit).
+
+        Callers (e.g. the rate limiter, /readyz) must reach the cache through
+        this rather than `_client`, so an internal rename can never surface as
+        an AttributeError instead of the fail-open path.
+        """
+        return self._client
+
     def publish_and_verify(self, *, scope: str, tenant_id: str | None,
                             channel_id: str | None, capability: str, state: str) -> None:
         key = _hash_key(scope, tenant_id, channel_id)

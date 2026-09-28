@@ -21,6 +21,13 @@ class ToolContext:
     message_texts: tuple[str, ...]  # this turn's texts
     commerce: Any                   # injected CommercePort
     settings: Any
+    # N2 (P1.7 audit): extracted ONCE in the coordinator (orders.py phase 1) and
+    # frozen here, so the fingerprint logged (order_ref_hash/path) and the values
+    # used for the platform call come from ONE extraction - never two that could
+    # silently diverge.
+    order_ref: str
+    phone_candidates: tuple[str, ...]  # already-normalized E.164 candidates
+    path: str                          # same_number | other_number
 
 
 @dataclass(frozen=True)

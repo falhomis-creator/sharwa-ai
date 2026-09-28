@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.channels.commerce_client import CommerceClient
-from app.commerce.port import CommercePort
+from app.commerce.port import CommercePort, project_order_card
 
 
 class SharwaCommerceAdapter(CommercePort):
@@ -26,4 +26,8 @@ class SharwaCommerceAdapter(CommercePort):
         self, *, tenant_ref: str, order_ref: str,
         phone_candidates: tuple[str, ...], path: str,
     ) -> dict[str, Any] | None:
-        return self._client.lookup_order(tenant_ref, order_ref, phone_candidates, path)
+        card = self._client.lookup_order(tenant_ref, order_ref, phone_candidates, path)
+        if card is None:
+            return None
+        # N3: closed projection - only ref/status/updated_at reach core.
+        return project_order_card(card)

@@ -68,6 +68,7 @@ class FakeWebSocket:
     def __init__(self, messages=None, query_params=None) -> None:
         self.messages = list(messages or [])
         self.query_params = query_params or {}
+        self.headers: dict[str, str] = {}
         self.app = SimpleNamespace(
             state=SimpleNamespace(ws_hub=None, redis_async=None, settings=None),
         )
