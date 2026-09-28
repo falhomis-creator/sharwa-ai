@@ -71,7 +71,10 @@ def _self_check(settings: WorkerSettings, rules: verify_rules.BlocklistSet) -> N
     samples: list[tuple[str, str]] = [(tid, text) for tid, text in templates.TEMPLATES.items()]
     samples.append(("product_list", compose.PRODUCT_LIST_TEMPLATE.format(items="منتج متوفر")))
     for name, text in samples:
-        verdict = verify_rules.check_text(text, rules=rules, max_chars=settings.verify_max_chars)
+        verdict = verify_rules.check_text(
+            text, rules=rules, max_chars=settings.verify_max_chars,
+            window_max=settings.verify_join_window_max,
+        )
         if not verdict.ok:
             raise ConfigError(f"approved template {name!r} violates verifier rule {verdict.rule_id}")
 
@@ -111,28 +114,28 @@ def insert_verified_outbox(
 
         metrics.verify_enabled.set(1)
         try:
-            verdict = verify_rules.check_text(text, rules=rules, max_chars=settings.verify_max_chars)
+            result = verify_rules.approve(
+                text, rules=rules, max_chars=settings.verify_max_chars,
+                window_max=settings.verify_join_window_max,
+            )
         except Exception as exc:  # noqa: BLE001 - H47: fail closed on verifier error
             obs_logging.log_event(
                 _log, event="verify.error", component="verify", level=logging.ERROR,
                 conversation_id=str(conversation_id), error=str(exc),
             )
             metrics.verify_errors_total.inc()
-            verdict = verify_rules.RuleVerdict(ok=False, rule_id="verifier_error", category="internal")
+            result = verify_rules.RuleVerdict(ok=False, rule_id="verifier_error", category="internal")
 
-        if verdict.ok:
-            # approve() re-runs the pure check (idempotent) and yields the
-            # VerifiedText that S10-e requires as the only accepted text= form.
-            approved = verify_rules.approve(text, rules=rules, max_chars=settings.verify_max_chars)
+        if isinstance(result, verify_rules.VerifiedText):
             return _write_approved(
                 conn, tenant_id=tenant_id, conversation_id=conversation_id,
                 channel_account_id=channel_account_id, idempotency_key=idempotency_key,
                 message_class=message_class, expected_epoch=expected_epoch,
-                to_wa_id=to_wa_id, template_id=template_id, approved=approved,
+                to_wa_id=to_wa_id, template_id=template_id, approved=result,
                 count_check=True,
             )
         return _write_safe(
-            conn, settings=settings, verdict=verdict, tenant_id=tenant_id,
+            conn, settings=settings, verdict=result, tenant_id=tenant_id,
             conversation_id=conversation_id, channel_account_id=channel_account_id,
             idempotency_key=idempotency_key, to_wa_id=to_wa_id, draft_text=text,
         )
@@ -224,18 +227,22 @@ def _write_safe(
     )
     metrics.inbox_events_written_total.labels("handoff.requested").inc()
 
-    new_version = (version + 1) if paused else (version or 0)
-    updated_payload = {
-        "conversation_id": str(conversation_id), "bot_status": "paused_human",
-        "epoch": new_epoch, "version": new_version, "handoff_reason": reason,
-    }
-    updated_seq = repos_inbox.write_inbox_event(
-        conn, tenant_id=tenant_id, event_type="conversation.updated", payload=updated_payload,
-    )
-    ws_publish.queue_publish(
-        tenant_id=tenant_id, seq=updated_seq, event_type="conversation.updated", payload=updated_payload,
-    )
-    metrics.inbox_events_written_total.labels("conversation.updated").inc()
+    # N1 (PROMPT_P1_07 §0.4): announce conversation.updated ONLY when THIS call
+    # actually transitioned the bot (paused=True). When it was already paused, the
+    # state did not change - and the old payload's handoff_reason=verifier_* would
+    # lie to the UI while the DB column still holds turn.py's reason.
+    if paused:
+        updated_payload = {
+            "conversation_id": str(conversation_id), "bot_status": "paused_human",
+            "epoch": new_epoch, "version": version + 1, "handoff_reason": reason,
+        }
+        updated_seq = repos_inbox.write_inbox_event(
+            conn, tenant_id=tenant_id, event_type="conversation.updated", payload=updated_payload,
+        )
+        ws_publish.queue_publish(
+            tenant_id=tenant_id, seq=updated_seq, event_type="conversation.updated", payload=updated_payload,
+        )
+        metrics.inbox_events_written_total.labels("conversation.updated").inc()
 
     metrics.verify_checks_total.labels("violation").inc()
     metrics.verify_violations_total.labels(rule_id).inc()

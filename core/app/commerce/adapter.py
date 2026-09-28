@@ -21,3 +21,9 @@ class SharwaCommerceAdapter(CommercePort):
     def get_snapshot(self, tenant_ref: str, page: str | None) -> tuple[list[dict[str, Any]], str | None]:
         payload = self._client.get_snapshot(tenant_ref, page)
         return payload["events"], payload.get("next_page")
+
+    def lookup_order(
+        self, *, tenant_ref: str, order_ref: str,
+        phone_candidates: tuple[str, ...], path: str,
+    ) -> dict[str, Any] | None:
+        return self._client.lookup_order(tenant_ref, order_ref, phone_candidates, path)

@@ -50,3 +50,20 @@ class FakeCommerce(CommercePort):
     def get_snapshot(self, tenant_ref: str, page: str | None) -> tuple[list[dict[str, Any]], str | None]:
         events = self._data.get("snapshot", {}).get(tenant_ref, [])
         return list(events), None
+
+    def lookup_order(
+        self, *, tenant_ref: str, order_ref: str,
+        phone_candidates: tuple[str, ...], path: str,
+    ) -> dict[str, Any] | None:
+        """The anti-oracle boundary (PROMPT_P1_07 §5.2): None identically for
+        'not found', 'phone mismatch', 'another tenant' and 'no matching
+        candidate'. Phone matching happens HERE (inside the fake = the platform),
+        never in core/."""
+        orders = self._data.get("orders", {}).get(tenant_ref, {})
+        order = orders.get(order_ref)
+        if order is None:
+            return None  # not found OR another tenant (identical None)
+        order_phone = order.get("phone")
+        if not phone_candidates or order_phone not in phone_candidates:
+            return None  # phone mismatch (identical None)
+        return order

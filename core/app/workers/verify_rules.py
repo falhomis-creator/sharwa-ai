@@ -39,7 +39,10 @@ _END_STRIP_RE = re.compile(r"^[\W_]+|[\W_]+$")
 
 # Separator characters used to smuggle a word through a naive matcher, plus the
 # Arabic tatweel (U+0640). Removed before collapsing runs of one character.
-_SQUEEZE_TRANS = str.maketrans("", "", " .-_*+'\"\u0640")
+# NOTE: the space is deliberately ABSENT here (it never reaches squeeze - tokens
+# are split on spaces first). Space-evasion ('ك ل ب' -> 'كلب') is caught by the
+# joined-window match in _match_joined instead (PROMPT_P1_07 §0.2).
+_SQUEEZE_TRANS = str.maketrans("", "", ".-_*+'\"\u0640")
 
 
 def squeeze(token: str) -> str:
@@ -66,6 +69,7 @@ def _strip_token(token: str) -> str:
 class _Phrase:
     tokens: tuple[str, ...]      # normalized, end-stripped tokens
     squeezed: tuple[str, ...]    # squeeze() of each token
+    joined: str                  # squeeze("".join(tokens)) - the space-evasion form
 
 
 def _match_phrase(tokens: list[str], phrase: _Phrase) -> bool:
@@ -83,6 +87,23 @@ def _match_phrase(tokens: list[str], phrase: _Phrase) -> bool:
             for w, p, sq in zip(window, phrase.tokens, phrase.squeezed)
         ):
             return True
+    return False
+
+
+def _match_joined(tokens: list[str], phrases: tuple[_Phrase, ...], window_max: int) -> bool:
+    """Space-evasion match (PROMPT_P1_07 §0.2): a blocked phrase smuggled by
+    spaces ('ك ل ب' -> 'كلب', 's a l l a' -> 'salla'). For every window of
+    2..window_max adjacent tokens, join then squeeze, and compare to
+    squeeze(joined phrase) by EQUALITY - never substring, so the 'زبون'/'كلبي'
+    trap stays closed."""
+    joined_forms = {p.joined for p in phrases if p.joined}
+    if not joined_forms:
+        return False
+    n = len(tokens)
+    for w in range(2, min(window_max, n) + 1):
+        for i in range(n - w + 1):
+            if squeeze("".join(tokens[i:i + w])) in joined_forms:
+                return True
     return False
 
 
@@ -123,7 +144,10 @@ def _build_phrases(raw: tuple[str, ...]) -> tuple[tuple[_Phrase, ...], int]:
         if not tokens:
             ignored += 1
             continue
-        phrases.append(_Phrase(tokens=tokens, squeezed=tuple(squeeze(t) for t in tokens)))
+        phrases.append(
+            _Phrase(tokens=tokens, squeezed=tuple(squeeze(t) for t in tokens),
+                    joined=squeeze("".join(tokens)))
+        )
     return tuple(phrases), ignored
 
 
@@ -145,7 +169,7 @@ def _violation(rule_id: str, category: str) -> RuleVerdict:
     return RuleVerdict(ok=False, rule_id=rule_id, category=category)
 
 
-def check_text(text: str, *, rules: BlocklistSet, max_chars: int) -> RuleVerdict:
+def check_text(text: str, *, rules: BlocklistSet, max_chars: int, window_max: int = 6) -> RuleVerdict:
     """The single pure entry point. Structure checks first (empty -> oversize ->
     control_chars -> placeholder), then blocklists (profanity -> competitor ->
     disclosure). The FIRST violation wins - order is fixed and written (H45)."""
@@ -168,12 +192,14 @@ def check_text(text: str, *, rules: BlocklistSet, max_chars: int) -> RuleVerdict
         for phrase in phrases:
             if _match_phrase(tokens, phrase):
                 return _violation(rule_id, "blocklist")
+        if _match_joined(tokens, phrases, window_max):
+            return _violation(rule_id, "blocklist")
     return RuleVerdict(ok=True, rule_id=None, category=None)
 
 
-def approve(text: str, *, rules: BlocklistSet, max_chars: int) -> VerifiedText | RuleVerdict:
+def approve(text: str, *, rules: BlocklistSet, max_chars: int, window_max: int = 6) -> VerifiedText | RuleVerdict:
     """The ONLY constructor of VerifiedText: check_text first, then approve."""
-    verdict = check_text(text, rules=rules, max_chars=max_chars)
+    verdict = check_text(text, rules=rules, max_chars=max_chars, window_max=window_max)
     if verdict.ok:
         return VerifiedText(value=text)
     return verdict

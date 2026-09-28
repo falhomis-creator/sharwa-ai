@@ -192,6 +192,7 @@ class RealtimeWorker:
         self.embed_handle = embed.build_embed(self.settings)
         self.summary_handle = summary.build_summary(self.settings)
         self.verify_rules = verify.build_rules(self.settings)
+        metrics.tools_enabled.set(1 if self.settings.tools_enabled else 0)
         metrics.core_worker_up.set(1)
 
     def _teardown(self) -> None:
@@ -627,7 +628,7 @@ class RealtimeWorker:
                             conversation_id=conversation_id, tenant_id=tenant_id,
                             router=self.llm_router,
                             embed=self.embed_handle, cache_client=self.cache_client,
-                            rules=self.verify_rules,
+                            rules=self.verify_rules, commerce=self.commerce_port,
                         )
                         # Commit landed; publish the turn's queued inbox_events (H33).
                         ws_publish.flush_publishes()

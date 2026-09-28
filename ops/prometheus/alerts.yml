@@ -418,4 +418,53 @@ groups:
           summary: "the profanity blocklist is empty"
           description: "verify_blocklist_phrases{category=\"profanity\"} is 0 for 5 minutes - an empty list is a toothless verifier while verify_enabled reassuringly reads 1."
 
+  # P1.7 (order tracking): five rules (PROMPT §8). Built on rate/change, not
+  # absence (lesson P1.3b D3).
+  - name: sharwa_ai_p1_7
+    rules:
+      - alert: OrderLookupDeniedSpike
+        expr: rate(order_lookup_total{outcome="denied"}[15m]) > 5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "order-lookup denials are spiking"
+          description: "the 15-minute rate of order_lookup_total{outcome=\"denied\"} is above 5 - either brute-force guessing or a wrong order-ref pattern; both need a human look."
+
+      - alert: OrderLookupBlockedRising
+        expr: rate(order_lookup_total{outcome="blocked"}[1h]) > 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "order-lookup brute-force blocking is active"
+          description: "order_lookup_total{outcome=\"blocked\"} increased in the last hour - the 3/24h or 5/24h threshold is closing paths; a human should see this."
+
+      - alert: CommerceLookupUnavailable
+        expr: rate(order_lookup_platform_errors_total[10m]) > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "the commerce order-lookup API is unavailable"
+          description: "order_lookup_platform_errors_total increased in the last 10 minutes - order tracking is failing to the unavailable template."
+
+      - alert: ToolUnknownSelected
+        expr: increase(tool_unknown_total[1h]) > 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "the model requested an unregistered tool"
+          description: "tool_unknown_total increased in the last hour - the router asked for a tool not in the closed registry; a routing defect, not a customer defect."
+
+      - alert: ToolsDisabled
+        expr: tools_enabled == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "the tools layer is disabled"
+          description: "tools_enabled has been 0 for 15 minutes - order-status turns fall back to handoff; visible, but should not be the silent default."
+
 

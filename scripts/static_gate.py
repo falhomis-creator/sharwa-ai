@@ -51,7 +51,7 @@ _CATALOG_S7_ARABIC_TOKENS = ("تكلفة", "هامش", "جملة")
 
 
 def _is_catalog_path(mod: str) -> bool:
-    """The four P1.4 catalog globs, as module dotted names."""
+    """The four P1.4 catalog globs, plus the P1.7 order-tracking path (S7 §6)."""
     if mod == "app.db.repos_catalog":
         return True
     if mod.startswith("app.workers.catalog"):
@@ -59,6 +59,12 @@ def _is_catalog_path(mod: str) -> bool:
     if mod.startswith("app.api.routes_catalog"):
         return True
     if mod == "app.commerce" or mod.startswith("app.commerce."):
+        return True
+    if mod.startswith("app.tools"):
+        return True
+    if mod == "app.workers.orders":
+        return True
+    if mod == "app.workers.compose":
         return True
     return False
 
@@ -238,6 +244,85 @@ def _call_text_is_verified(call: ast.Call) -> bool:
         if isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute) and v.func.attr == "template_text":
             return True
     return False
+
+
+# --- S11 (P1.7): H50 - the tools layer has no direct DB/network reach ----------
+_TOOLS_FORBIDDEN_ROOTS = (
+    "app.db", "psycopg", "psycopg_pool", "httpx", "redis", "app.llm",
+    "app.channels", "app.ws_publish",
+)
+_SQL_CALL_ATTRS = frozenset({"execute", "executemany", "fetchone", "fetchall", "cursor"})
+_S11_REGISTRY_KEYS = frozenset({"track_order"})
+
+
+def _import_module_names(tree: ast.Module) -> list[str]:
+    names: list[str] = []
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                names.append(a.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                names.append(node.module)
+    return names
+
+
+def _forbidden_tool_imports(tree: ast.Module) -> list[str]:
+    bad: list[str] = []
+    for mod in _import_module_names(tree):
+        for root in _TOOLS_FORBIDDEN_ROOTS:
+            if mod == root or mod.startswith(root + "."):
+                bad.append(mod)
+                break
+    return bad
+
+
+def _s11_sql_calls(tree: ast.Module) -> list[str]:
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in _SQL_CALL_ATTRS:
+            found.append(node.attr)
+    return found
+
+
+def _s11_registry_violations(tree: ast.Module) -> list[str]:
+    bad: list[str] = []
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == "TOOLS":
+                if not isinstance(node.value, ast.Dict):
+                    bad.append("TOOLS is not a literal dict")
+                    continue
+                keys = [k.value for k in node.value.keys if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+                if len(keys) != len(node.value.keys) or set(keys) != _S11_REGISTRY_KEYS:
+                    bad.append(f"TOOLS keys {sorted(keys)} != {sorted(_S11_REGISTRY_KEYS)}")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            f = node.func
+            name = f.attr if isinstance(f, ast.Attribute) else (f.id if isinstance(f, ast.Name) else None)
+            if name in ("register", "update", "setdefault"):
+                bad.append(f"call to {name}")
+        if isinstance(node, ast.Name) and node.id in ("globals", "importlib", "getattr"):
+            bad.append(f"use of {node.id}")
+    return bad
+
+
+def _s11d_third_party_callers(mods: dict[str, Path]) -> list[str]:
+    bad: list[str] = []
+    for mod, path in mods.items():
+        if mod in ("app.db.repos_outbox", "app.workers.orders"):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                f = node.func
+                name = f.attr if isinstance(f, ast.Attribute) else (f.id if isinstance(f, ast.Name) else None)
+                if name in ("order_lookup_blocked", "insert_order_lookup_attempt"):
+                    bad.append(mod)
+                    break
+    return bad
 
 
 _violations: list[str] = []
@@ -639,9 +724,9 @@ def main() -> int:
         if not fns:
             _err("S10", str(v_path.relative_to(ROOT)), 0,
                  "app.workers.verify must define insert_verified_outbox (H46)")
-        elif not any(_calls_name(f, "check_text") for f in fns):
+        elif not any(_calls_name(f, "approve") for f in fns):
             _err("S10", str(v_path.relative_to(ROOT)), 0,
-                 "insert_verified_outbox body must call check_text (H45)")
+                 "insert_verified_outbox body must call approve (H45 - the single check+approve entry point)")
         n_calls = len(_insert_outbox_calls(v_tree))
         if n_calls > 2:
             _err("S10", str(v_path.relative_to(ROOT)), 0,
@@ -663,6 +748,38 @@ def main() -> int:
             if not _call_text_is_verified(c):
                 _err("S10", str(v_path.relative_to(ROOT)), getattr(c, "lineno", 0),
                      "insert_outbox text= must be approved.value or templates.template_text(...)")
+
+    # ---- S11 (P1.7): H50 - tools layer has no direct DB/network reach ---------
+    # a: closed import set for app.tools.*
+    for mod, path in mods.items():
+        if not (mod == "app.tools" or mod.startswith("app.tools.")):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for target in _forbidden_tool_imports(tree):
+            _err("S11", str(path.relative_to(ROOT)), 0,
+                 f"'{mod}' imports '{target}' (H50: tools must not import app.db/psycopg/httpx/redis/app.llm/app.channels/app.ws_publish)")
+
+    # b: no SQL in the tools layer
+    for mod, path in mods.items():
+        if not (mod == "app.tools" or mod.startswith("app.tools.")):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for attr in _s11_sql_calls(tree):
+            _err("S11", str(path.relative_to(ROOT)), 0,
+                 f"'{mod}' calls .{attr} (H50: no SQL in the tools layer)")
+
+    # c: the registry is closed and literal
+    reg_path = mods.get("app.tools.registry")
+    if reg_path is not None:
+        reg_tree = ast.parse(reg_path.read_text(encoding="utf-8"))
+        for detail in _s11_registry_violations(reg_tree):
+            _err("S11", str(reg_path.relative_to(ROOT)), 0,
+                 f"app.tools.registry: {detail} (closed literal registry)")
+
+    # d: order_lookup_blocked / insert_order_lookup_attempt have one consumer
+    for mod in _s11d_third_party_callers(mods):
+        _err("S11", mod, 0,
+             f"'{mod}' calls order_lookup_blocked/insert_order_lookup_attempt (only app.workers.orders)")
 
     # ---- output -------------------------------------------------------------
     if _notes:

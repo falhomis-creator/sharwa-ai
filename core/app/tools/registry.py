@@ -1,0 +1,38 @@
+"""core/app/tools/registry.py - the closed, literal-keyed tool registry (S11-c).
+
+ToolContext carries only pre-read values + the injected port; ToolSpec binds a
+name to a run callable. TOOLS is a literal dict - no register(), no dynamic
+import, no globals(). Adding a tool means editing this literal and passing review.
+"""
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+from typing import Any, Callable
+
+
+@dataclass(frozen=True)
+class ToolContext:
+    """Everything a tool needs, read in advance. No DB connection here."""
+    tenant_id: uuid.UUID
+    conversation_id: uuid.UUID
+    tenant_ref: str                 # platform_ref for the platform call
+    channel_phone_e164: str | None  # the channel's phone identity (E.164), or None
+    message_texts: tuple[str, ...]  # this turn's texts
+    commerce: Any                   # injected CommercePort
+    settings: Any
+
+
+@dataclass(frozen=True)
+class ToolSpec:
+    name: str
+    run: Callable[[ToolContext], Any]
+
+
+# Imported AFTER ToolContext/ToolSpec so track_order (which imports ToolContext
+# back) does not deadlock on a partially-initialised registry module.
+from app.tools import track_order  # noqa: E402
+
+TOOLS: dict[str, ToolSpec] = {
+    "track_order": ToolSpec("track_order", track_order.run),
+}

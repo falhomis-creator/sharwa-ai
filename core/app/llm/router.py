@@ -21,14 +21,14 @@ from app.llm.port import LlmJsonResult, LlmProvider, LlmProviderError
 from app.obs import metrics
 from app.text.redact import mask_phones  # noqa: F401 - re-exported for H21 back-compat (P1.6 C6)
 
-INTENTS = ("product_search", "policy_question", "handoff_request", "other")
+INTENTS = ("product_search", "policy_question", "handoff_request", "order_status", "other")
 
 # H19: fixed Arabic system prompt - the task and output only. No tenant data, no
 # product names, and nothing the customer's text could turn into an instruction.
 ROUTER_SYSTEM_PROMPT = (
     "أنت موجِّه رسائل لخدمة عملاء متجر. حدِّد نية رسالة العميل إلى واحدة فقط، "
     "وأعد JSON حصراً بهذا الشكل بلا أي نص إضافي: "
-    '{"intent": "product_search|policy_question|handoff_request|other", '
+    '{"intent": "product_search|policy_question|handoff_request|order_status|other", '
     '"query": "نص البحث المستخرج أو سلسلة فارغة", "confidence": 0.0}'
 )
 
@@ -57,7 +57,7 @@ class RouterDecision:
 
 class _RouterResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    intent: Literal["product_search", "policy_question", "handoff_request", "other"]
+    intent: Literal["product_search", "policy_question", "handoff_request", "order_status", "other"]
     query: str
     confidence: float
 

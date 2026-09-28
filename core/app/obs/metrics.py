@@ -600,4 +600,46 @@ verify_safe_template_sent_total = Counter(
     registry=registry,
 )
 
+# --- P1.7 order-tracking metrics (PROMPT §8) ---------------------------------
+
+tool_calls_total = Counter(
+    "tool_calls_total",
+    "Tool calls, by tool and result (card|unverified|need_order_ref|need_phone|unavailable|blocked).",
+    labelnames=["tool", "result"],
+    registry=registry,
+)
+
+tool_unknown_total = Counter(
+    "tool_unknown_total",
+    "Turns that requested a tool not present in the closed registry.",
+    registry=registry,
+)
+
+tools_enabled = Gauge(
+    "tools_enabled",
+    "1 when the tools layer is enabled, 0 when disabled (H4: visible, not hidden).",
+    registry=registry,
+)
+
+order_lookup_total = Counter(
+    "order_lookup_total",
+    "Order-tracking attempts, by path (same_number|other_number) and outcome (allowed|denied|blocked).",
+    labelnames=["path", "outcome"],
+    registry=registry,
+)
+
+order_lookup_duration_seconds = Histogram(
+    "order_lookup_duration_seconds",
+    "Seconds for one order lookup platform call.",
+    buckets=(0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.5, 5.0),
+    registry=registry,
+)
+
+order_lookup_platform_errors_total = Counter(
+    "order_lookup_platform_errors_total",
+    "Order-lookup platform errors, by kind (timeout|unavailable|client_error).",
+    labelnames=["kind"],
+    registry=registry,
+)
+
 

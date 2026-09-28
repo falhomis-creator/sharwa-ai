@@ -35,6 +35,15 @@ def resolve_tenant(conn: psycopg.Connection, platform_ref: str) -> tuple[uuid.UU
     return row[0], row[1]
 
 
+def platform_ref_for_tenant(conn: psycopg.Connection, tenant_id: uuid.UUID) -> str | None:
+    """The merchant's platform_ref for one tenant (P1.7 order tracking needs it
+    for the platform call). RLS scopes the row to the current tenant."""
+    row = conn.execute(
+        "SELECT platform_ref FROM tenants WHERE id = %s", (tenant_id,),
+    ).fetchone()
+    return None if row is None else row[0]
+
+
 # --- routes_health.py (readyz) -----------------------------------------------
 
 

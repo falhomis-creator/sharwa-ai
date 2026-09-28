@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -95,6 +96,12 @@ DEFAULT_VERIFY_DISCLOSURE = (
     "بوت", "ذكاء اصطناعي", "روبوت", "نموذج لغوي", "chatbot",
     "deepseek", "gpt", "claude", "openai", "anthropic",
 )
+
+# P1.7 order tracking: a reasonable order-reference pattern (a 4-8 digit token).
+# The real sharwa_saas format is UNCONFIRMED (OQ-P1-24) - this is a placeholder,
+# compiled at load and overridable via ORDER_REF_PATTERN.
+DEFAULT_ORDER_REF_PATTERN = r"\b\d{4,8}\b"
+DEFAULT_COUNTRY_CODE = "967"
 
 # ops/pgbouncer.ini default_pool_size (read in P1.0.1, not assumed). The
 # worker's tenant pool goes THROUGH PgBouncer, so it must leave headroom for
@@ -266,6 +273,18 @@ class WorkerSettings:
     verify_profanity_en: tuple[str, ...] = DEFAULT_VERIFY_PROFANITY_EN
     verify_competitors: tuple[str, ...] = DEFAULT_VERIFY_COMPETITORS
     verify_disclosure: tuple[str, ...] = DEFAULT_VERIFY_DISCLOSURE
+    # P1.7 §0.2: the space-evasion join-window cap (written cap, H4).
+    verify_join_window_max: int = 6
+    # P1.7 order tracking (PROMPT §7). All defaults written (H4) except the HMAC
+    # key (order_ref_hash_key), which is _required at load (H5/H54).
+    tools_enabled: bool = True
+    order_ref_pattern: Any = None  # compiled at load (re.Pattern) - no static default
+    order_lookup_timeout_s: float = 4.0
+    order_lookup_max_phone_candidates: int = 3
+    order_lookup_max_per_conversation_per_day: int = 10
+    order_status_max_chars: int = 600
+    default_country_code: str = DEFAULT_COUNTRY_CODE
+    order_ref_hash_key: str = ""
 
     @staticmethod
     def load() -> WorkerSettings:
@@ -336,6 +355,13 @@ class WorkerSettings:
 
         verify_safe_template_id = _optional("VERIFY_SAFE_TEMPLATE_ID", "handoff_notice")
         validate_safe_template_id(verify_safe_template_id)
+
+        order_ref_pattern_src = _optional("ORDER_REF_PATTERN", DEFAULT_ORDER_REF_PATTERN)
+        try:
+            order_ref_pattern = re.compile(order_ref_pattern_src)
+        except re.error as exc:
+            raise ConfigError(f"ORDER_REF_PATTERN does not compile: {exc}") from exc
+        order_ref_hash_key = _required("ORDER_REF_HASH_KEY")
 
         return WorkerSettings(
             db=db,
@@ -426,4 +452,13 @@ class WorkerSettings:
             verify_profanity_en=_csv("VERIFY_PROFANITY_EN", ",".join(DEFAULT_VERIFY_PROFANITY_EN)),
             verify_competitors=_csv("VERIFY_COMPETITORS", ",".join(DEFAULT_VERIFY_COMPETITORS)),
             verify_disclosure=_csv("VERIFY_DISCLOSURE", ",".join(DEFAULT_VERIFY_DISCLOSURE)),
+            verify_join_window_max=_int("VERIFY_JOIN_WINDOW_MAX", 6),
+            tools_enabled=_bool("TOOLS_ENABLED", True),
+            order_ref_pattern=order_ref_pattern,
+            order_lookup_timeout_s=_float("ORDER_LOOKUP_TIMEOUT_S", 4.0),
+            order_lookup_max_phone_candidates=_int("ORDER_LOOKUP_MAX_PHONE_CANDIDATES", 3),
+            order_lookup_max_per_conversation_per_day=_int("ORDER_LOOKUP_MAX_PER_CONVERSATION_PER_DAY", 10),
+            order_status_max_chars=_int("ORDER_STATUS_MAX_CHARS", 600),
+            default_country_code=_optional("DEFAULT_COUNTRY_CODE", DEFAULT_COUNTRY_CODE),
+            order_ref_hash_key=order_ref_hash_key,
         )

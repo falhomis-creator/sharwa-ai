@@ -20,6 +20,7 @@ def _base_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("METRICS_TOKEN", "tok")
     monkeypatch.setenv("GATEWAY_BASE_URL", "http://127.0.0.1:4001")
     monkeypatch.setenv("GATEWAY_API_KEY", "gk")
+    monkeypatch.setenv("ORDER_REF_HASH_KEY", "test-order-ref-hash-key")
     monkeypatch.delenv("INGEST_SHARDS", raising=False)
     monkeypatch.delenv("CORE_DB_POOL_MAX", raising=False)
     monkeypatch.delenv("CORE_INGEST_BLOCK_MS", raising=False)

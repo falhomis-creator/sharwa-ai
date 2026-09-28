@@ -100,7 +100,7 @@ def test_write_phase_delegates_to_verifier_and_skips_metrics_on_violation(monkey
     monkeypatch.setattr(turn.repos_outbox, "mark_turn_processed",
                         lambda conn, conversation_id, last_processed_seq: None)
     monkeypatch.setattr(turn, "_resolve_action",
-                        lambda conn, settings, plan, router_result, query_vector=None: action)
+                        lambda conn, settings, plan, router_result, query_vector=None, order_lookup=None: action)
     monkeypatch.setattr(turn.metrics, "turn_processed_total", _Counter())
     monkeypatch.setattr(turn.metrics, "turn_skipped_total", _Counter())
     monkeypatch.setattr(turn.metrics, "outbox_written_total", _Counter())

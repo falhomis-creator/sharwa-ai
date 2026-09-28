@@ -144,6 +144,29 @@ def insert_verifier_block(
     return int(row[0])
 
 
+def order_lookup_blocked(conn: psycopg.Connection, *, customer_id: uuid.UUID, order_ref_hash: str) -> bool:
+    """app.order_lookup_blocked (0001, STABLE) - the single authority for the
+    3/24h + 5/24h brute-force thresholds. Never re-implemented in Python."""
+    row = conn.execute(
+        "SELECT app.order_lookup_blocked(%s, %s)", (customer_id, order_ref_hash),
+    ).fetchone()
+    return bool(row is not None and row[0])
+
+
+def insert_order_lookup_attempt(
+    conn: psycopg.Connection, *, tenant_id: uuid.UUID, conversation_id: uuid.UUID | None,
+    customer_id: uuid.UUID, path: str, order_ref_hash: str, outcome: str,
+) -> None:
+    """Append-only audit of one order-tracking attempt (0001 REVOKEs UPDATE/DELETE).
+    `order_ref_hash` is the HMAC, never the raw order number (H54)."""
+    conn.execute(
+        "INSERT INTO order_lookup_attempts "
+        "(tenant_id, conversation_id, customer_id, path, order_ref_hash, outcome) "
+        "VALUES (%s, %s, %s, %s, %s, %s)",
+        (tenant_id, conversation_id, customer_id, path, order_ref_hash, outcome),
+    )
+
+
 def mark_turn_processed(
     conn: psycopg.Connection, *, conversation_id: uuid.UUID, last_processed_seq: int,
 ) -> None:

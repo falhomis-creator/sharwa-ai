@@ -71,9 +71,34 @@ def test_profanity_multiword():
 
 
 def test_substring_trap_passes():
-    # 'كلب' (blocked) is a prefix of 'كلاب' (dogs) - equality must NOT match.
+    # 'كلب' (blocked) is a prefix/substring of 'كلبي'/'كلبين' - equality must NOT
+    # match them (a naive `in` matcher WOULD). 'كلاب' is NOT a substring (ك-ل-ا-ب),
+    # and 'زبون'/'زبدة' are the classic Arabic trap for a hypothetical short blocked
+    # word (PROMPT_P1_07 §0.3).
     rules = _rules(profanity=("كلب",))
+    assert _check("اشتريت كلبي", rules=rules).ok
+    assert _check("اشتريت كلبين", rules=rules).ok
     assert _check("اشتريت كلاب", rules=rules).ok
+    assert _check("الزبون سعيد", rules=rules).ok
+    assert _check("زبدة الفول السوداني", rules=rules).ok
+
+
+def test_space_evasion_profanity_blocked():
+    # PROMPT_P1_07 §0.2: 'ك ل ب' smuggles 'كلب' through the token splitter.
+    rules = _rules(profanity=("كلب",))
+    assert _check("ك ل ب", rules=rules).rule_id == "profanity"
+
+
+def test_space_evasion_competitor_blocked():
+    # 's a l l a' smuggles 'salla'.
+    rules = _rules(competitor=("salla",))
+    assert _check("s a l l a", rules=rules).rule_id == "competitor"
+
+
+def test_space_join_does_not_false_positive():
+    # 'كل بلد' joined = 'كلبلد' != 'كلب' (equality, not substring) - must pass.
+    rules = _rules(profanity=("كلب",))
+    assert _check("كل بلد", rules=rules).ok
 
 
 # --- competitors --------------------------------------------------------------

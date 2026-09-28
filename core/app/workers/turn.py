@@ -26,6 +26,7 @@ from app.db import repos_outbox
 from app.obs import metrics
 from app.workers import compose
 from app.workers import optout
+from app.workers import orders
 from app.workers import templates
 from app.workers import verify
 from app.workers.config import WorkerSettings
@@ -151,10 +152,33 @@ def _deterministic_action(decision: TurnDecision) -> _Action:
     )
 
 
+def _order_action(settings: WorkerSettings, order_lookup: Any) -> _Action:
+    """Compose the reply for an order-tracking result. order_unverified and
+    order_blocked hand off to a human (single unified failure templates - H53)."""
+    kind = order_lookup.kind
+    if kind == "card":
+        text = compose.compose_order_status(order_lookup.card, labels=compose.ORDER_STATUS_LABELS)
+        if text is None:
+            return _Action("order_status_unknown", templates.template_text("order_status_unknown"), False, None, "template", "order_status_unknown")
+        return _Action("order_status", text[:settings.order_status_max_chars], False, None, "template", "order_status")
+    if kind == "unverified":
+        return _Action("order_unverified", templates.template_text("order_unverified"), True, "order_unverified", "template", "order_unverified")
+    if kind == "blocked":
+        return _Action("order_blocked", templates.template_text("order_blocked"), True, "order_blocked", "template", "order_blocked")
+    if kind == "need_order_ref":
+        return _Action("order_need_ref", templates.template_text("order_need_ref"), False, None, "template", "order_need_ref")
+    if kind == "need_phone":
+        return _Action("order_need_phone", templates.template_text("order_need_phone"), False, None, "template", "order_need_phone")
+    return _Action("order_unavailable", templates.template_text("order_unavailable"), False, None, "template", "order_unavailable")
+
+
 def _resolve_action(
     conn: Any, settings: WorkerSettings, plan: _TurnPlan, router_result: Any,
     query_vector: list[float] | None = None,
+    order_lookup: Any = None,
 ) -> _Action:
+    if order_lookup is not None:
+        return _order_action(settings, order_lookup)
     intent = router_result.decision.intent if router_result is not None else "other"
     if intent == "product_search":
         query = router_result.decision.query if router_result is not None else ""
@@ -203,7 +227,7 @@ def _account(conn: Any, settings: WorkerSettings, plan: _TurnPlan, router: LlmRo
 def process_turn(
     *, settings: WorkerSettings, conversation_id: uuid.UUID, tenant_id: uuid.UUID,
     router: LlmRouterHandle | None = None, embed: Any = None, cache_client: Any = None,
-    rules: Any = None,
+    rules: Any = None, commerce: Any = None,
 ) -> str:
     """Run one turn. The provider call (if any) runs OUTSIDE any transaction
     (H40): read + decide in one short tx, route, then write + account in a
@@ -277,9 +301,27 @@ def process_turn(
             tenant_id=tenant_id, cache_client=cache_client,
         )
 
+    # P1.7 (H40): the order lookup runs its own short read-tx + platform call +
+    # short write-tx; the platform call must stay OUTSIDE any transaction.
+    order_lookup = None
+    if (
+        router_result is not None
+        and router_result.decision.intent == "order_status"
+        and settings.tools_enabled
+        and commerce is not None
+    ):
+        from app.tools.registry import TOOLS
+        if "track_order" in TOOLS:
+            order_lookup = orders.run_order_lookup(
+                settings, tenant_id=tenant_id, conversation_id=conversation_id,
+                commerce=commerce, bodies=plan.bodies,
+            )
+        else:
+            metrics.tool_unknown_total.inc()
+
     # ---- Phase 3: write + account (second short transaction) ----
     with core_db.tenant_tx(tenant_id) as conn:
-        outcome = _write_phase(conn, settings, plan, router, router_result, query_vector=query_vector, rules=rules)
+        outcome = _write_phase(conn, settings, plan, router, router_result, query_vector=query_vector, rules=rules, order_lookup=order_lookup)
 
     metrics.turn_duration_seconds.observe(time.monotonic() - started)
     return outcome
@@ -291,6 +333,7 @@ def _write_phase(
     router: LlmRouterHandle | None, router_result: Any,
     query_vector: list[float] | None = None,
     rules: Any = None,
+    order_lookup: Any = None,
 ) -> str:
     conv = repos_outbox.lock_conversation(conn, conversation_id=plan.conversation_id, tenant_id=plan.tenant_id)
     if conv is None:
@@ -303,7 +346,7 @@ def _write_phase(
     if router_result is not None and router is not None:
         _account(conn, settings, plan, router, router_result)
 
-    action = _resolve_action(conn, settings, plan, router_result, query_vector=query_vector)
+    action = _resolve_action(conn, settings, plan, router_result, query_vector=query_vector, order_lookup=order_lookup)
 
     wa_id = repos_outbox.wa_id_for_conversation(conn, plan.conversation_id)
     expected_epoch = conv.epoch

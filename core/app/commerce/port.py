@@ -27,3 +27,15 @@ class CommercePort(Protocol):
         Returns (events, next_page) where next_page is None on the last page.
         """
         ...
+
+    def lookup_order(
+        self, *, tenant_ref: str, order_ref: str,
+        phone_candidates: tuple[str, ...], path: str,
+    ) -> dict[str, Any] | None:
+        """Fetch one order card, or None when no card can be returned.
+
+        None is the ONLY failure value - no reason, no error code (H53, the
+        anti-oracle boundary). "not found", "phone mismatch", "another tenant"
+        and "no matching candidate" all collapse to the same None.
+        """
+        ...

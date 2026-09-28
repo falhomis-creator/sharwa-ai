@@ -79,3 +79,31 @@ class CommerceClient:
         if page is not None:
             params["page"] = page
         return self._get("/snapshot", params)
+
+    def lookup_order(
+        self, tenant_ref: str, order_ref: str,
+        phone_candidates: tuple[str, ...], path: str,
+    ) -> dict[str, Any] | None:
+        """Order lookup. A 404 (or a 200 body with no 'order' key) collapses to
+        None - the single anti-oracle value (H53)."""
+        params: dict[str, Any] = {
+            "tenant_ref": tenant_ref, "order_ref": order_ref, "path": path,
+            "phones": ",".join(phone_candidates),
+        }
+        self._breaker.before_call()
+        try:
+            resp = self._client.get("/order_lookup", params=params)
+        except httpx.HTTPError as exc:
+            self._breaker.on_failure()
+            raise CommerceUnavailableError(str(exc)) from exc
+        if resp.status_code == 404:
+            self._breaker.on_success()
+            return None
+        if resp.status_code >= 500:
+            self._breaker.on_failure()
+            raise CommerceUnavailableError(f"commerce API returned {resp.status_code}")
+        self._breaker.on_success()
+        if resp.status_code != 200:
+            raise CommerceClientError(f"commerce API returned {resp.status_code}")
+        card = resp.json().get("order")
+        return card if isinstance(card, dict) else None

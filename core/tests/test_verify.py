@@ -23,6 +23,7 @@ class Settings:
     verify_max_chars = 4000
     verify_excerpt_max_chars = 200
     verify_safe_template_id = "handoff_notice"
+    verify_join_window_max = 6
     verify_profanity_ar = ("كلب",)
     verify_profanity_en = ()
     verify_competitors = ()
@@ -132,6 +133,15 @@ def test_violation_already_paused_does_not_repause(monkeypatch):
     outs = _named(log, "insert_outbox")
     assert len(outs) == 1
     assert outs[0][1]["expected_epoch"] == 5
+
+
+def test_no_conversation_updated_when_already_paused(monkeypatch):
+    # PROMPT_P1_07 §0.4: when the bot was already paused (paused=False), the
+    # verifier emits handoff.requested alone - never a conversation.updated that
+    # would announce a handoff_reason the DB column does not hold.
+    _, log = _call(monkeypatch, "كلب", status="paused_human", epoch=5, version=4)
+    events = _named(log, "write_inbox_event")
+    assert [e[1]["event_type"] for e in events] == ["handoff.requested"]
 
 
 def test_stale_version_raises_transient(monkeypatch):
