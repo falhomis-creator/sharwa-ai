@@ -304,6 +304,13 @@ class WorkerSettings:
     address_parent_bonus: float = 1.05
     address_w_level: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_ADDRESS_W_LEVEL))
     address_w_match: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_ADDRESS_W_MATCH))
+    # P2.3 back-in-stock (PROMPT §7). All defaults written (H4). The per-customer
+    # ceiling is enforced in code (not just documented), unlike a bare constant.
+    stock_hold_ttl_s: int = 3600
+    stock_observation_max_age_s: int = 300
+    stock_sweep_interval_s: int = 60
+    stock_max_variants_per_cycle: int = 50
+    stock_max_waitlist_per_customer: int = 10
 
     @staticmethod
     def load() -> WorkerSettings:
@@ -490,4 +497,9 @@ class WorkerSettings:
             address_parent_bonus=_float("ADDRESS_PARENT_BONUS", 1.05),
             address_w_level=address_w_level,
             address_w_match=address_w_match,
+            stock_hold_ttl_s=_int("STOCK_HOLD_TTL_S", 3600),
+            stock_observation_max_age_s=_int("STOCK_OBSERVATION_MAX_AGE_S", 300),
+            stock_sweep_interval_s=_int("STOCK_SWEEP_INTERVAL_S", 60),
+            stock_max_variants_per_cycle=_int("STOCK_MAX_VARIANTS_PER_CYCLE", 50),
+            stock_max_waitlist_per_customer=_int("STOCK_MAX_WAITLIST_PER_CUSTOMER", 10),
         )

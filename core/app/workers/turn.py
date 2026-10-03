@@ -28,6 +28,7 @@ from app.workers import address
 from app.workers import compose
 from app.workers import optout
 from app.workers import orders
+from app.workers import stock
 from app.workers import templates
 from app.workers import verify
 from app.workers.config import WorkerSettings
@@ -173,6 +174,17 @@ def _order_action(settings: WorkerSettings, order_lookup: Any) -> _Action:
     return _Action("order_unavailable", templates.template_text("order_unavailable"), False, None, "template", "order_unavailable")
 
 
+def _stock_action(decision: Any) -> _Action:
+    """Compose the reply for a join-waitlist result (P2.3 §5.4). No handoff for a
+    successful join; a customer already waiting gets the explicit template."""
+    kind = decision.kind
+    if kind == "joined":
+        return _Action("stock_joined", templates.template_text("stock_joined"), False, None, "template", "stock_joined")
+    if kind == "already_waiting":
+        return _Action("stock_already_waiting", templates.template_text("stock_already_waiting"), False, None, "template", "stock_already_waiting")
+    return _Action("stock_unavailable", templates.template_text("stock_unavailable"), False, None, "template", "stock_unavailable")
+
+
 def _address_action(settings: WorkerSettings, decision: Any) -> _Action:
     """Compose the reply for an address decision. Confirmed back to the customer
     as a place NAME, never as coordinates (H67). coord_from_model => reject +
@@ -220,6 +232,12 @@ def _resolve_action(
             conn, settings, tenant_id=plan.tenant_id, conversation_id=plan.conversation_id, query=query,
         )
         return _address_action(settings, decision)
+    if intent == "stock_waitlist":
+        decision = stock.join_waitlist(
+            conn, settings, tenant_id=plan.tenant_id,
+            conversation_id=plan.conversation_id, bodies=plan.bodies,
+        )
+        return _stock_action(decision)
     return _deterministic_action(plan.decision)
 
 

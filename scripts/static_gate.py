@@ -478,6 +478,50 @@ def _served_console_paths() -> set[tuple[str, str]] | None:
         return None
 
 
+# --- S19 (P2.3): no out-of-transaction lock in the stock path -----------------
+_S19_STOCK_MODULES = ("app.workers.stock", "app.db.repos_stock", "app.tools.join_waitlist")
+_S19_LOCK_RE = re.compile(r"\block\b")
+
+
+def _imports_module(tree: ast.Module, name: str) -> bool:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name == name or a.name.startswith(name + "."):
+                    return True
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            if node.module == name or node.module.startswith(name + "."):
+                return True
+    return False
+
+
+def _s19_tx_network_violations(tree: ast.Module) -> list[str]:
+    """A commerce/port network call lexically inside a tenant_tx/system_tx block
+    in app/workers/stock.py (H40 enforced structurally on the stock path)."""
+    bad: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.With):
+            continue
+        in_tx = False
+        for item in node.items:
+            for n in ast.walk(item.context_expr):
+                if isinstance(n, ast.Attribute) and n.attr in ("tenant_tx", "system_tx"):
+                    in_tx = True
+                    break
+            if in_tx:
+                break
+        if not in_tx:
+            continue
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute):
+                v = sub.func.value
+                if isinstance(v, ast.Name) and v.id in ("commerce", "port"):
+                    bad.append("commerce call inside a transaction block (H40)")
+                elif isinstance(v, ast.Attribute) and v.attr == "commerce_port":
+                    bad.append("commerce call inside a transaction block (H40)")
+    return bad
+
+
 _violations: list[str] = []
 _notes: list[str] = []  # informational (S1-c re-exports) - never cause a failure
 
@@ -1206,6 +1250,26 @@ def main() -> int:
             if not any(a in mounted for a, t in aliases.items() if t == target):
                 _err("S18", str(mods[mod].relative_to(ROOT)), 0,
                      f"'{mod}' defines `router` but it is not mounted in app.main (F-P2-03)")
+
+    # ---- S19 (P2.3, H69/H40): no out-of-transaction lock in the stock path ----
+    for mod in _S19_STOCK_MODULES:
+        path = mods.get(mod)
+        if path is None:
+            continue
+        text = path.read_text(encoding="utf-8")
+        tree = ast.parse(text)
+        if _imports_module(tree, "redis"):
+            _err("S19", str(path.relative_to(ROOT)), 0,
+                 f"'{mod}' imports redis (H69: no Redis lock in the stock path)")
+        if "setnx" in text or "nx=True" in text:
+            _err("S19", str(path.relative_to(ROOT)), 0,
+                 f"'{mod}' references setnx/nx=True (H69: no Redis lock in the stock path)")
+        if _S19_LOCK_RE.search(text):
+            _err("S19", str(path.relative_to(ROOT)), 0,
+                 f"'{mod}' references 'lock' (H69: the data row itself is the serialization point)")
+        if mod == "app.workers.stock":
+            for detail in _s19_tx_network_violations(tree):
+                _err("S19", str(path.relative_to(ROOT)), 0, detail)
 
     # ---- S14 (P2.1): a function must be able to return its promised type -----
     for mod, path in mods.items():

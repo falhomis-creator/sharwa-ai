@@ -39,7 +39,7 @@ from app.db.context import system_tx, tenant_tx
 from app.obs import http as obs_http
 from app.obs import logging as obs_logging
 from app.obs import metrics
-from app.workers import catalog, dispatch, embed, evt, optout, schema, summary, turn, verify
+from app.workers import catalog, dispatch, embed, evt, optout, schema, stock, summary, turn, verify
 from app.workers.config import WorkerSettings
 from app.workers.stream import (
     PermanentError,
@@ -785,6 +785,25 @@ class RealtimeWorker:
             elapsed = time.monotonic() - started
             self.stop_event.wait(max(1.0, self.settings.summary_interval_s - elapsed))
 
+    def _run_stock_sweep(self) -> None:
+        """P2.3 §5.2: periodically sweep waiting variants - read the platform
+        stock observation (OUTSIDE any transaction, H40), then allocate + notify
+        in ONE short transaction. A background refresh, not a fail-fast path."""
+        while not self.stop_event.is_set():
+            started = time.monotonic()
+            try:
+                if self.commerce_port is not None:
+                    stock.sweep_once(
+                        self.commerce_port, settings=self.settings, rules=self.verify_rules,
+                    )
+            except Exception as exc:  # noqa: BLE001 - background refresh, keep the thread alive
+                obs_logging.log_event(
+                    _log, event="stock.sweep.crash", component="stock",
+                    level=logging.ERROR, error=str(exc),
+                )
+            elapsed = time.monotonic() - started
+            self.stop_event.wait(max(1.0, self.settings.stock_sweep_interval_s - elapsed))
+
     def run(self) -> int:
         self._setup()
 
@@ -828,6 +847,9 @@ class RealtimeWorker:
         summary_thread = threading.Thread(target=self._run_summary, daemon=True)
         summary_thread.start()
         threads.append(summary_thread)
+        stock_thread = threading.Thread(target=self._run_stock_sweep, daemon=True)
+        stock_thread.start()
+        threads.append(stock_thread)
 
         obs_logging.log_event(_log, event="worker.started", component="realtime")
 

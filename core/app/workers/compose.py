@@ -4,8 +4,8 @@ H38: no model text ever reaches a customer. Every outbox payload text is built
 here, from exactly four allowed sources: approved templates (templates.py),
 product titles from catalog_products (the merchant's own text), kb_chunks content
 (the merchant's own policy text), and the closed order-status map (P1.7 §6, the
-ONLY authorised fourth function). Five functions, no sixth - compose_address_options
-(P2.2) is the fifth.
+ONLY authorised fourth function). Six functions - compose_address_options (P2.2)
+is the fifth and compose_stock_notice (P2.3) the sixth.
 """
 from __future__ import annotations
 
@@ -94,4 +94,14 @@ def compose_address_options(candidates: list[str], *, template: str) -> str:
         return text.replace("«options»", "\n".join(f"• {c}" for c in candidates))
     if "«name»" in text and candidates:
         return text.replace("«name»", candidates[0])
+    return text
+
+
+def compose_stock_notice(kind: str, title: str) -> str:
+    """The sixth (P2.3) composition function: a back-in-stock notice. The product
+    title is the merchant's own text, filled verbatim into the «name» sentinel
+    (H35: title only - no price, no available quantity)."""
+    text = templates.template_text(kind)
+    if "«name»" in text:
+        return text.replace("«name»", title)
     return text

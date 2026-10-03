@@ -41,6 +41,14 @@ TEMPLATES: dict[str, str] = {
     "address_disambiguate": "وجدت أكثر من مكان مطابق:\n«options»\nأيها تقصد؟",
     "address_rejected": "عذراً، لم أتمكن من تحديد عنوان التوصيل. سأحوّل محادثتك لأحد ممثلي خدمة العملاء.",
     "address_out_of_coverage": "الموقع الذي أرسلته خارج منطقة التغطية حالياً. أرسل موقعاً آخر من فضلك.",
+    # P2.3 back-in-stock (PROMPT §5.4). Conservative; H35: title only («name»),
+    # never a price and never an available quantity («توفّر» not «بقيت 3 قطع»).
+    "stock_joined": "تم تسجيلك في قائمة الانتظار لهذا المنتج. سنُشعرك فور توفره. 📦",
+    "stock_available": "عاد «name» للتوفر! سارع بالطلب الآن. 🛍️",
+    "stock_hold_expired": "انتهت مدة حجزك. ما زال بإمكانك الطلب من جديد متى شئت.",
+    "stock_cancelled": "تم إلغاء تسجيلك من قائمة الانتظار.",
+    "stock_already_waiting": "أنت مسجّل مسبقاً في قائمة الانتظار لهذا المنتج. سنُشعرك فور توفره.",
+    "stock_unavailable": "هذا المنتج غير متوفر حالياً. هل تريد أن أسجّلك في قائمة الانتظار ليصل لك تنبيه فور توفره؟",
 }
 
 

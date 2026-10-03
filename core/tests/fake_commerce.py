@@ -69,3 +69,10 @@ class FakeCommerce(CommercePort):
         # N3 (P1.7 audit): closed projection - the platform never sends a phone,
         # address or amount back to core; only ref/status/updated_at cross here.
         return project_order_card(order)
+
+    def get_stock_observation(
+        self, *, tenant_ref: str, platform_variant_id: str,
+    ) -> dict[str, Any] | None:
+        """A dated observation from the fake's `stock` map, or None."""
+        obs = self._data.get("stock", {}).get(tenant_ref, {}).get(platform_variant_id)
+        return obs if isinstance(obs, dict) else None

@@ -662,4 +662,41 @@ address_resolutions_total = Counter(
 )
 
 
+# --- P2.3 back-in-stock metrics (PROMPT §7) -----------------------------------
+# action is a bounded enum: joined|duplicate|no_variant / held|expired|converted|released.
+
+waitlist_entries_total = Counter(
+    "waitlist_entries_total",
+    "Waitlist writes, by action (joined|duplicate|no_variant|cap).",
+    labelnames=["action"],
+    registry=registry,
+)
+
+stock_holds_total = Counter(
+    "stock_holds_total",
+    "Stock-hold transitions, by action (held|expired|converted|released).",
+    labelnames=["action"],
+    registry=registry,
+)
+
+stock_allocation_duration_seconds = Histogram(
+    "stock_allocation_duration_seconds",
+    "Seconds for one app.allocate_stock_holds call (the short allocation transaction).",
+    buckets=(0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0),
+    registry=registry,
+)
+
+stock_observation_stale_total = Counter(
+    "stock_observation_stale_total",
+    "Sweep observations skipped because they are older than STOCK_OBSERVATION_MAX_AGE_S (H73).",
+    registry=registry,
+)
+
+stock_sweep_runs_total = Counter(
+    "stock_sweep_runs_total",
+    "Back-in-stock sweep cycles.",
+    registry=registry,
+)
+
+
 

@@ -346,14 +346,135 @@ def count_gazetteer_rows_on_conn(conn: psycopg.Connection) -> int:
     return int(row[0])
 
 
+# --- stock / waitlist (P2.3 §6.1 db tests) -----------------------------------
+
+
+def clean_stock(dsn: str, *, tenant_id: uuid.UUID) -> None:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("DELETE FROM stock_holds WHERE tenant_id = %s", (tenant_id,))
+        conn.execute("DELETE FROM waitlist_entries WHERE tenant_id = %s", (tenant_id,))
+        conn.execute("DELETE FROM stock_levels WHERE tenant_id = %s", (tenant_id,))
+        conn.execute("DELETE FROM customers WHERE tenant_id = %s", (tenant_id,))
+
+
+def insert_customer(dsn: str, *, tenant_id: uuid.UUID, wa_id: str) -> uuid.UUID:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "INSERT INTO customers (tenant_id, wa_id) VALUES (%s, %s) RETURNING id",
+            (tenant_id, wa_id),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("INSERT ... RETURNING id produced no row")
+    return row[0]
+
+
+def insert_test_waitlist_entry(
+    dsn: str, *, tenant_id: uuid.UUID, customer_id: uuid.UUID,
+    platform_variant_id: str, offset_seconds: int = 0,
+) -> uuid.UUID:
+    """A waitlist row (no conversation) - the race-test fixture shape."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "INSERT INTO waitlist_entries (tenant_id, customer_id, platform_variant_id, created_at) "
+            "VALUES (%s, %s, %s, now() - make_interval(secs => %s)) RETURNING id",
+            (tenant_id, customer_id, platform_variant_id, offset_seconds),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("INSERT ... RETURNING id produced no row")
+    return row[0]
+
+
+def stock_held_count_and_qty(dsn: str, *, tenant_id: uuid.UUID, variant: str) -> tuple[int, int]:
+    with psycopg.connect(dsn) as conn:
+        row = conn.execute(
+            "SELECT count(*), COALESCE(sum(qty), 0) FROM stock_holds "
+            "WHERE tenant_id = %s AND platform_variant_id = %s AND status = 'held'",
+            (tenant_id, variant),
+        ).fetchone()
+    assert row is not None
+    return int(row[0]), int(row[1])
+
+
+def waitlist_status_counts(dsn: str, *, tenant_id: uuid.UUID, variant: str) -> dict[str, int]:
+    with psycopg.connect(dsn) as conn:
+        rows = conn.execute(
+            "SELECT status, count(*) FROM waitlist_entries "
+            "WHERE tenant_id = %s AND platform_variant_id = %s GROUP BY status",
+            (tenant_id, variant),
+        ).fetchall()
+    return {r[0]: int(r[1]) for r in rows}
+
+
+def held_wa_ids(dsn: str, *, tenant_id: uuid.UUID, variant: str) -> list[str]:
+    """The wa_id of every held entry, in FIFO order - proves the hold goes to the
+    OLDEST waiter (H72)."""
+    with psycopg.connect(dsn) as conn:
+        rows = conn.execute(
+            "SELECT c.wa_id FROM stock_holds h "
+            "JOIN waitlist_entries w ON w.id = h.waitlist_entry_id "
+            "JOIN customers c ON c.id = w.customer_id "
+            "WHERE h.tenant_id = %s AND h.platform_variant_id = %s AND h.status = 'held' "
+            "ORDER BY w.created_at, w.id",
+            (tenant_id, variant),
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
+def force_expire_held_holds(dsn: str, *, tenant_id: uuid.UUID, variant: str) -> None:
+    """Move every held hold for a variant into the past so app.expire_stock_holds
+    sees them as overdue (the expiry-cascade test)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE stock_holds SET expires_at = now() - interval '1 minute' "
+            "WHERE tenant_id = %s AND platform_variant_id = %s AND status = 'held'",
+            (tenant_id, variant),
+        )
+
+
+def allocate_holds_race(
+    app_dsn: str, *, tenant_id: uuid.UUID, variant: str,
+    available: int, ttl_s: int, n: int,
+) -> list[int]:
+    """n concurrent callers on a threading.Barrier, each on its OWN app-role
+    connection, calling app.allocate_stock_holds at the same instant. Returns
+    the per-caller number of created holds (PROMPT P2.3 §6.1)."""
+    import threading
+
+    barrier = threading.Barrier(n)
+    results = [0] * n
+
+    def worker(i: int) -> None:
+        with psycopg.connect(app_dsn, autocommit=True) as conn:
+            conn.execute("SELECT set_config('app.tenant_id', %s, false)", (str(tenant_id),))
+            barrier.wait()
+            rows = conn.execute(
+                "SELECT * FROM app.allocate_stock_holds(%s, %s, make_interval(secs => %s))",
+                (variant, available, ttl_s),
+            ).fetchall()
+            results[i] = len(rows)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return results
+
+
 __all__: Sequence[str] = (
+    "allocate_holds_race",
     "channel_account_exists_by_session",
     "clean_geo",
     "clean_kill_switches_and_audit",
+    "clean_stock",
     "count_advisory_lock_holders",
     "count_channel_accounts_on_conn",
     "count_gazetteer_rows_on_conn",
     "count_tenants",
+    "force_expire_held_holds",
+    "held_wa_ids",
+    "insert_customer",
+    "insert_test_waitlist_entry",
     "delete_tenant",
     "delete_tenant_and_its_audit",
     "delete_tenant_full",
@@ -373,4 +494,6 @@ __all__: Sequence[str] = (
     "seed_kill_switch",
     "seed_tenant_gazetteer",
     "seed_two_tenants",
+    "stock_held_count_and_qty",
+    "waitlist_status_counts",
 )

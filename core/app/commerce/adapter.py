@@ -31,3 +31,8 @@ class SharwaCommerceAdapter(CommercePort):
             return None
         # N3: closed projection - only ref/status/updated_at reach core.
         return project_order_card(card)
+
+    def get_stock_observation(
+        self, *, tenant_ref: str, platform_variant_id: str,
+    ) -> dict[str, Any] | None:
+        return self._client.get_stock_observation(tenant_ref, platform_variant_id)

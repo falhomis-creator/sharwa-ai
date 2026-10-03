@@ -28,6 +28,10 @@ class ToolContext:
     order_ref: str
     phone_candidates: tuple[str, ...]  # already-normalized E.164 candidates
     path: str                          # same_number | other_number
+    # P2.3: the ids of the last product cards shown to this customer (<= 3),
+    # pre-read from conversations.slots by the stock coordinator - the tool
+    # resolves the requested variant from these (never by guessing).
+    last_shown_product_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -38,10 +42,12 @@ class ToolSpec:
 
 # Imported AFTER ToolContext/ToolSpec so track_order / resolve_address (which
 # import ToolContext back) do not deadlock on a partially-initialised registry.
+from app.tools import join_waitlist  # noqa: E402
 from app.tools import resolve_address  # noqa: E402
 from app.tools import track_order  # noqa: E402
 
 TOOLS: dict[str, ToolSpec] = {
     "track_order": ToolSpec("track_order", track_order.run),
     "resolve_address": ToolSpec("resolve_address", resolve_address.run),
+    "join_waitlist": ToolSpec("join_waitlist", join_waitlist.run),
 }

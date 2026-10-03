@@ -107,3 +107,30 @@ class CommerceClient:
             raise CommerceClientError(f"commerce API returned {resp.status_code}")
         card = resp.json().get("order")
         return card if isinstance(card, dict) else None
+
+    def get_stock_observation(
+        self, tenant_ref: str, platform_variant_id: str,
+    ) -> dict[str, Any] | None:
+        """A dated stock observation {available, observed_at}, or None on 404
+        (no observation for this variant). Same anti-oracle boundary as order
+        lookup: 404 and a missing key collapse to None."""
+        params: dict[str, Any] = {
+            "tenant_ref": tenant_ref, "variant": platform_variant_id,
+        }
+        self._breaker.before_call()
+        try:
+            resp = self._client.get("/stock_observation", params=params)
+        except httpx.HTTPError as exc:
+            self._breaker.on_failure()
+            raise CommerceUnavailableError(str(exc)) from exc
+        if resp.status_code == 404:
+            self._breaker.on_success()
+            return None
+        if resp.status_code >= 500:
+            self._breaker.on_failure()
+            raise CommerceUnavailableError(f"commerce API returned {resp.status_code}")
+        self._breaker.on_success()
+        if resp.status_code != 200:
+            raise CommerceClientError(f"commerce API returned {resp.status_code}")
+        obs = resp.json().get("observation")
+        return obs if isinstance(obs, dict) else None

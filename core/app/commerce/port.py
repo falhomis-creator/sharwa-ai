@@ -53,3 +53,11 @@ class CommercePort(Protocol):
         and "no matching candidate" all collapse to the same None.
         """
         ...
+
+    def get_stock_observation(
+        self, *, tenant_ref: str, platform_variant_id: str,
+    ) -> dict[str, Any] | None:
+        """A fresh, dated stock observation for one variant, or None when the
+        platform has no observation. H73: the platform is the stock authority;
+        `observed_at` is the platform's own timestamp, never a clock core owns."""
+        ...

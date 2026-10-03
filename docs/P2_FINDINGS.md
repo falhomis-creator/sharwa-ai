@@ -74,3 +74,48 @@ body.version, body.staff_id, staff)` منزاحاً بعد `return` نهائية
 
 - `scripts/static_gate.py` ⇒ `STATIC GATE PASSED — 0 violations`.
 - `python -m pytest tests -q` ⇒ `241 passed, 249 deselected` (النقية، بصفر أحمر؛ 238 + 3).
+
+---
+
+# نتائج P2.3 — وكيل الحجز والتخصيص الذري (Back-In-Stock)
+
+**المنفّذ:** DeepSeek (داخل Cline) · **التاريخ:** 2026-10-03
+
+## 0. الخطوة صفر (إصلاحات P2.2 المؤجَّلة)
+
+- **F-P2-03 [مُصلَح]:** `routes_channels` صار مُركَّباً في `app/main.py` (استيراد +
+  `include_router`). **S18** الجديدة تحرسه: كل وحدة تحت `app/api/` تعرّف `router`
+  يجب أن تكون مستوردة ومُمرَّرة إلى `include_router` في `main.py` — إزالة التركيب
+  مؤقتاً ⇒ مخالفة.
+- **F-P2-04 [مُصلَح]:** `search_gazetteer` يحسب الآن `ST_Y(ST_Centroid(geom))` و
+  `ST_X(ST_Centroid(geom))`، و`AddressCandidate` يحمل `lat/lng`، و
+  `resolve_and_persist` يكتب النقطة الحقيقية للـ`gazetteer_centroid` المقبول.
+- **F-P2-05 [مُصلَح]:** `ST_GeomFromText` يستقبل الآن WKT نقيّاً (بلا `SRID=`) بلا
+  تحذير.
+- **N1 [مُصلَح]:** `ORDER BY sort_key, id` حتميّ في `search_gazetteer`.
+- **N2 [مُصلَح]:** `AddressDecision.__post_init__` يفرض القوائم المغلقة، وثقة
+  الـgazetteer مسقوفة عند `0.99` دون 1.0.
+- **S13 [مُصلَح]:** تقارن `console_api.lock.json` بوثيقة OpenAPI للتطبيق **المبنيّ**
+  (`create_app().openapi()["paths"]`)، مع بند موسوم يتخطّى عند غياب الإعداد.
+- **S17-c [مُوسَّع]:** يفحص `insert_address_resolution` **و** `persist_decision`.
+- **الاختبارات الثلاثة الموسومة من P2.2** كُتبت في `core/tests/test_geo_db.py`.
+
+## 1. OQ-P2-08 — قيد وحدانية `waitlist_entries` (مُسجَّل للقرار، لم يُنشأ)
+
+أمر المعماري بمنع التكرار برمجياً (Application Level) وبتسجيل القيد كبند قرار
+دون إنشاء ترحيل. **مُلاحظة أمانة:** `0001_baseline.sql` يحمل بالفعل فهرساً جزئياً
+وحيداً `waitlist_active_uq ON waitlist_entries (tenant_id, customer_id,
+platform_variant_id) WHERE status IN ('waiting','held')` — أي أن قاعدة البيانات
+تمنع الصفّ الحيّ الثاني فعلاً. نفّذتُ فوقه **قراءة قبل الكتابة في المعاملة نفسها**
+(`repos_stock.has_active_waitlist` ثم `insert_waitlist_entry`) كي يكون الرفض رشيقاً
+(تسجيل مقياس `duplicate`) لا انفجار `UniqueViolation`. القرار بشأن قيد وحدانية أكمل
+(غير جزئي) يبقى للمعماري.
+
+## 2. ما بُني (مقتطف)
+
+`repos_stock.py` (كل SQL المخزون) · `workers/stock.py` (المنسّق) ·
+`tools/join_waitlist.py` (الأداة الثالثة) · نيّة سابعة `stock_waitlist` · دالة
+سادسة `compose_stock_notice` · ستة قوالب · خيط المكنسة في `realtime.py` · خمسة
+مقاييس · ثلاثة تنبيهات · **S18 + S19** في البوابة. التخصيص الذري بقي كما هو في
+`0001` (`allocate_stock_holds` / `expire_stock_holds`) — لم يُلمَس ولم يُعاد بناؤه،
+وبلا أي قفل Redis.

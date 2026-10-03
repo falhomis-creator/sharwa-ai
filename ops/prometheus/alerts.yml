@@ -476,5 +476,36 @@ groups:
           summary: "console rate limiting is failing open"
           description: "rate_limit_fail_open_total increased - redis-cache is unavailable so console requests are passing uncapped; the console stays up (H59) but abuse protection is off."
 
+  # P2.3 (back-in-stock): three rules (PROMPT §7), built on rate/stall, not
+  # absence of data.
+  - name: sharwa_ai_p2_3
+    rules:
+      - alert: StockObservationStale
+        expr: rate(stock_observation_stale_total[10m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "the platform stock observation is stale"
+          description: "stock_observation_stale_total increased - the platform is late with stock observations, so waiters are neither allocated nor notified (H73: never guess availability)."
+
+      - alert: StockHoldsExpiringUnconverted
+        expr: rate(stock_holds_total{action=\"expired\"}[15m]) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "stock holds are expiring before conversion"
+          description: "stock_holds_total{action=\"expired\"} increased - either the notification is not reaching the customer or STOCK_HOLD_TTL_S is too short; both need a human look (H71)."
+
+      - alert: StockSweepStalled
+        expr: increase(stock_sweep_runs_total[10m]) == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "the back-in-stock sweep has stopped"
+          description: "stock_sweep_runs_total has not increased in 10 minutes - the sweep thread is stalled, so waiting customers will never be promoted."
+
 
 
