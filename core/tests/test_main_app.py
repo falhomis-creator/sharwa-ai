@@ -98,7 +98,7 @@ def real_tenant():
         dsn, platform_ref=platform_ref, name="Main App Test Tenant",
     )
     yield platform_ref, tenant_id
-    db_testsupport.delete_tenant_and_its_audit(dsn, tenant_id)
+    db_testsupport.delete_tenant_full(dsn, tenant_id)
 
 
 def _token(priv_pem: str, *, platform_ref: str, role: str = "merchant_admin") -> str:

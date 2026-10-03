@@ -139,6 +139,30 @@ def resolve_and_persist(
     return decision
 
 
+def resolve_only(
+    conn: Any,
+    *,
+    tenant_id: uuid.UUID,
+    query: str,
+    cfg: geo_resolve.ResolveConfig | None = None,
+    max_candidates: int = 3,
+) -> geo_resolve.AddressDecision:
+    """Read (gazetteer) -> decide (pure), with NO write. Used by the golden address
+    set so it can run the REAL resolver against a loaded gazetteer without
+    persisting a row per case."""
+    places = split_places(query)
+    synonyms = repos_geo.fetch_synonyms(conn)
+    rows: list[dict[str, Any]] = []
+    for term in {geo_normalize.normalize_name(p) for p in places}:
+        rows.extend(repos_geo.search_gazetteer(
+            conn, tenant_id=tenant_id, name_norm=term, limit=max_candidates,
+        ))
+    candidates = build_candidates(places, synonyms, rows)
+    return geo_resolve.resolve_address(
+        candidates, model_has_coords=geo_normalize.detect_model_coords(query), cfg=cfg,
+    )
+
+
 def _location_for(
     decision: geo_resolve.AddressDecision,
     rows: list[dict[str, Any]],

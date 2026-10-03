@@ -31,6 +31,7 @@ from app.channels.gateway_client import GatewayClient
 from app.commerce.adapter import SharwaCommerceAdapter
 from app.config import GatewayConfig
 from app.db import repos
+from app.db import repos_geo
 from app.db import repos_ingest
 from app.db import repos_inbox
 from app.db import repos_llm
@@ -193,7 +194,23 @@ class RealtimeWorker:
         self.summary_handle = summary.build_summary(self.settings)
         self.verify_rules = verify.build_rules(self.settings)
         metrics.tools_enabled.set(1 if self.settings.tools_enabled else 0)
+        self._refresh_gazetteer_gauge()
         metrics.core_worker_up.set(1)
+
+    def _refresh_gazetteer_gauge(self) -> None:
+        """H75: publish gazetteer_rows{level} at boot. A bare tenant-pool
+        connection (no SET LOCAL app.tenant_id) sees only the shared reference
+        rows (tenant_id IS NULL) under the gazetteer_read RLS policy."""
+        try:
+            from app.db import context as core_db_context
+            with core_db_context._tenant_pool.connection() as conn, conn.transaction():
+                for level, count in repos_geo.count_gazetteer_by_level(conn):
+                    metrics.gazetteer_rows.labels(level).set(count)
+        except Exception as exc:  # noqa: BLE001 - a gauge refresh must not block boot
+            obs_logging.log_event(
+                _log, event="gazetteer.gauge.error", component="realtime",
+                level=logging.WARNING, error=str(exc),
+            )
 
     def _teardown(self) -> None:
         metrics.core_worker_up.set(0)

@@ -52,7 +52,7 @@ def test_create_tenant_inserts_a_real_row(capsys):
     row = db_testsupport.fetch_tenant_row(_migration_dsn(), tenant_id)
     assert row == (platform_ref, "CLI Test Tenant", "SAR", "active")
 
-    db_testsupport.delete_tenant(_migration_dsn(), tenant_id)
+    db_testsupport.delete_tenant_full(_migration_dsn(), tenant_id)
 
 
 def test_issue_dev_token_mints_a_real_verifiable_rs256_jwt(rsa_keyfile, capsys):

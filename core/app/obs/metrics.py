@@ -699,4 +699,15 @@ stock_sweep_runs_total = Counter(
 )
 
 
+# --- P2.4 gazetteer reference-data metric (H75) -------------------------------
+# An empty gazetteer must be a scream (GazetteerEmpty alert), not a silence.
+
+gazetteer_rows = Gauge(
+    "gazetteer_rows",
+    "Shared gazetteer reference rows, by level (governorate|district|area|neighborhood|landmark).",
+    labelnames=["level"],
+    registry=registry,
+)
+
+
 

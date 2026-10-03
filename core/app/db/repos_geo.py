@@ -51,6 +51,16 @@ def search_gazetteer(
     ]
 
 
+def count_gazetteer_by_level(conn: psycopg.Connection) -> list[tuple[str, int]]:
+    """Shared reference rows (tenant_id IS NULL) grouped by level, for the
+    gazetteer_rows{level} gauge (H75: an empty gazetteer must be a visible
+    scream, never a silence)."""
+    rows = conn.execute(
+        "SELECT level, count(*) FROM geo_gazetteer WHERE tenant_id IS NULL GROUP BY level"
+    ).fetchall()
+    return [(r[0], int(r[1])) for r in rows]
+
+
 def point_governorate(conn: psycopg.Connection, *, lat: float, lng: float) -> int | None:
     """The governorate id whose geometry covers (lat, lng); None outside any
     governorate (pin_outside_coverage)."""

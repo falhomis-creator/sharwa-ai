@@ -1,0 +1,45 @@
+{"input":"صنعاء","expected_decision":"ask_for_pin","expected_level":"governorate","note":"محافظة وحدها - H66"}
+{"input":"تعز","expected_decision":"ask_for_pin","expected_level":"governorate","note":"محافظة وحدها"}
+{"input":"عدن","expected_decision":"ask_for_pin","expected_level":"governorate","note":"محافظة وحدها"}
+{"input":"الحديدة","expected_decision":"ask_for_pin","expected_level":"governorate","note":"محافظة وحدها"}
+{"input":"ذمار","expected_decision":"ask_for_pin","expected_level":"governorate","note":"محافظة وحدها"}
+{"input":"حضرموت","expected_decision":"ask_for_pin","expected_level":"governorate","note":"محافظة وحدها"}
+{"input":"أمانة العاصمة","expected_decision":"ask_for_pin","expected_level":"governorate","note":"محافظة وحدها"}
+{"input":"مأرب","expected_decision":"ask_for_pin","expected_level":"governorate","note":"محافظة وحدها"}
+{"input":"شعوب، صنعاء","expected_decision":"accepted","expected_level":"district","note":"مديرية واضحة + محافظة"}
+{"input":"شعوب","expected_decision":"accepted","expected_level":"district","note":"مديرية واضحة"}
+{"input":"معين","expected_decision":"accepted","expected_level":"district","note":"مديرية واضحة"}
+{"input":"معين، صنعاء","expected_decision":"accepted","expected_level":"district","note":"مديرية + محافظة"}
+{"input":"السبعين","expected_decision":"accepted","expected_level":"district","note":"مديرية واضحة"}
+{"input":"أزال","expected_decision":"accepted","expected_level":"district","note":"مديرية واضحة"}
+{"input":"بني الحارث","expected_decision":"accepted","expected_level":"district","note":"مديرية واضحة"}
+{"input":"الثورة","expected_decision":"accepted","expected_level":"district","note":"مديرية واضحة"}
+{"input":"الوحدة","expected_decision":"accepted","expected_level":"district","note":"مديرية واضحة"}
+{"input":"همدان","expected_decision":"accepted","expected_level":"district","note":"مديرية واضحة"}
+{"input":"الصافية","expected_decision":"accepted","expected_level":"district","note":"مديرية واضحة"}
+{"input":"دوار الرياض","expected_decision":"accepted","expected_level":"landmark","note":"معلم واضح"}
+{"input":"دوار كنتاكي","expected_decision":"accepted","expected_level":"landmark","note":"معلم واضح"}
+{"input":"دوار المصباحي","expected_decision":"accepted","expected_level":"landmark","note":"معلم واضح"}
+{"input":"مفرق شارع حدة","expected_decision":"accepted","expected_level":"landmark","note":"معلم بالمرادف الدارج مفرق"}
+{"input":"التحرير","expected_decision":"disambiguate","expected_level":"district","note":"اسم يتكرر في محافظتين"}
+{"input":"التحرير، صنعاء","expected_decision":"accepted","expected_level":"district","note":"الوالد المذكور يجب أن يفكّ التعادل - لا يفكّه حالياً"}
+{"input":"مطعم بيتزا في صنعاء","expected_decision":"ask_for_pin","expected_level":null,"note":"كلام ليس عنواناً"}
+{"input":"شارع غير موجود","expected_decision":"ask_for_pin","expected_level":null,"note":"بلا مطابقة"}
+{"input":"المكلا","expected_decision":"accepted","expected_level":"district","note":"مدينة كبرى بلا مديرية في البيانات - فجوة بيانات"}
+{"input":"اريد التوصيل إلى 15.3694, 44.1910","expected_decision":"rejected","expected_level":null,"note":"إحداثي من النموذج"}
+{"input":"احداثيات lat 15.3 lng 44.2","expected_decision":"rejected","expected_level":null,"note":"إحداثي من النموذج"}
+{"input":"شُعُوب","expected_decision":"accepted","expected_level":"district","note":"تشكيل - تطبيع حتمي"}
+{"input":"  شعوب ،، صنعاء ","expected_decision":"accepted","expected_level":"district","note":"فواصل ومسافات زائدة"}
+{"input":"صَنْعاء، شَعُوب","expected_decision":"accepted","expected_level":"district","note":"تشكيل على المحافظة والمديرية"}
+{"input":"صنعا","expected_decision":"ask_for_pin","expected_level":"governorate","note":"إسقاط الهمزة يطابق المحافظة كبادئة"}
+{"input":"الجولة كنتاكي","expected_decision":"accepted","expected_level":"landmark","note":"جوله + ال - المرادف كلمة كاملة فقط"}
+{"input":"جولة الرياض","expected_decision":"accepted","expected_level":"landmark","note":"جوله بدل دوار - المرادف لا يعمل على العبارة"}
+{"input":"سبعين","expected_decision":"accepted","expected_level":"district","note":"حذف ال التعريف"}
+{"input":"صنعاء - شعوب","expected_decision":"accepted","expected_level":"district","note":"فاصل شرطة غير معالج"}
+{"input":"تقاطع شارع حدة","expected_decision":"accepted","expected_level":"landmark","note":"تقاطع بدل مفرق - المرادف كلمة كاملة فقط"}
+{"input":"المهرة","expected_decision":"ask_for_pin","expected_level":"governorate","note":"محافظة وحدها"}
+{"input":"سقطرى","expected_decision":"ask_for_pin","expected_level":"governorate","note":"محافظة وحدها"}
+{"input":"إب","expected_decision":"ask_for_pin","expected_level":"governorate","note":"محافظة وحدها"}
+{"input":"عمران","expected_decision":"ask_for_pin","expected_level":"governorate","note":"محافظة وحدها"}
+{"input":"لحج","expected_decision":"ask_for_pin","expected_level":"governorate","note":"محافظة وحدها"}
+{"input":"صعدة","expected_decision":"ask_for_pin","expected_level":"governorate","note":"محافظة وحدها"}

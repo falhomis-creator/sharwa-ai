@@ -24,7 +24,8 @@ VARIANT = "VAR-L-BLACK"
 @pytest.fixture()
 def stock_tenants():
     dsn = os.environ["CORE_MIGRATION_DATABASE_URL"]
-    db_testsupport.reset_tenants_and_channels(dsn)
+    db_testsupport.delete_tenant_full(dsn, TENANT_A)
+    db_testsupport.delete_tenant_full(dsn, TENANT_B)
     db_testsupport.seed_two_tenants(dsn, TENANT_A, TENANT_B)
     yield
     db_testsupport.clean_stock(dsn, tenant_id=TENANT_A)

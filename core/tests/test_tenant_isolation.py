@@ -23,7 +23,8 @@ def _seed_two_tenants_with_matching_channels():
     # through sharwa_app or sharwa_system), so tests seed through the same
     # migration role a real `python -m app.cli create-tenant` would use.
     dsn = os.environ["CORE_MIGRATION_DATABASE_URL"]
-    db_testsupport.reset_tenants_and_channels(dsn)
+    db_testsupport.delete_tenant_full(dsn, TENANT_A)
+    db_testsupport.delete_tenant_full(dsn, TENANT_B)
     db_testsupport.seed_two_tenants(dsn, TENANT_A, TENANT_B)
     # Identical-shaped session_id naming on purpose (spec: "معرّفات متطابقة").
     # `type` rotates across the four valid values so this doesn't collide
@@ -39,6 +40,8 @@ def _seed_two_tenants_with_matching_channels():
             dsn, tenant_id=TENANT_B, type_=ch_type, session_id=f"shared-name-{i}-b",
         )
     yield
+    db_testsupport.delete_tenant_full(dsn, TENANT_A)
+    db_testsupport.delete_tenant_full(dsn, TENANT_B)
 
 
 def test_query_without_tenant_context_returns_zero_rows():

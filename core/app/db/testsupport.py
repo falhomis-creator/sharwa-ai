@@ -93,12 +93,6 @@ def insert_tenant_returning_id(dsn: str, *, platform_ref: str, name: str, curren
     return tenant_id
 
 
-def delete_tenant_and_its_audit(dsn: str, tenant_id: uuid.UUID) -> None:
-    with psycopg.connect(dsn, autocommit=True) as conn:
-        conn.execute("DELETE FROM audit_log WHERE tenant_id = %s", (tenant_id,))
-        conn.execute("DELETE FROM tenants WHERE id = %s", (tenant_id,))
-
-
 def fetch_tenant_row(dsn: str, tenant_id: uuid.UUID) -> tuple[str, str, str, str] | None:
     with psycopg.connect(dsn) as conn:
         row = conn.execute(
@@ -106,11 +100,6 @@ def fetch_tenant_row(dsn: str, tenant_id: uuid.UUID) -> tuple[str, str, str, str
             (tenant_id,),
         ).fetchone()
     return None if row is None else (row[0], row[1], row[2], row[3])
-
-
-def delete_tenant(dsn: str, tenant_id: uuid.UUID) -> None:
-    with psycopg.connect(dsn, autocommit=True) as conn:
-        conn.execute("DELETE FROM tenants WHERE id = %s", (tenant_id,))
 
 
 def delete_tenant_full(dsn: str, tenant_id: uuid.UUID) -> None:
@@ -133,6 +122,9 @@ def delete_tenant_full(dsn: str, tenant_id: uuid.UUID) -> None:
             "DELETE FROM campaign_recipients WHERE tenant_id = %s",
             "DELETE FROM consents WHERE tenant_id = %s",
             "DELETE FROM suppressions WHERE tenant_id = %s",
+            # stock_holds references waitlist_entries, so it MUST precede it
+            # (F-P2-06: a tenant with both rows would otherwise hit the FK).
+            "DELETE FROM stock_holds WHERE tenant_id = %s",
             "DELETE FROM waitlist_entries WHERE tenant_id = %s",
             "DELETE FROM order_lookup_attempts WHERE tenant_id = %s",
             "DELETE FROM address_resolutions WHERE tenant_id = %s",
@@ -150,7 +142,6 @@ def delete_tenant_full(dsn: str, tenant_id: uuid.UUID) -> None:
             "DELETE FROM size_chart_rows WHERE tenant_id = %s",
             "DELETE FROM size_charts WHERE tenant_id = %s",
             "DELETE FROM catalog_sync_cursor WHERE tenant_id = %s",
-            "DELETE FROM stock_holds WHERE tenant_id = %s",
             "DELETE FROM stock_levels WHERE tenant_id = %s",
             "DELETE FROM geo_gazetteer WHERE tenant_id = %s",
             "DELETE FROM scheduled_jobs WHERE tenant_id = %s",
@@ -164,12 +155,6 @@ def delete_tenant_full(dsn: str, tenant_id: uuid.UUID) -> None:
             "DELETE FROM tenants WHERE id = %s",
         ):
             conn.execute(sql, (tenant_id,))
-
-
-def reset_tenants_and_channels(dsn: str) -> None:
-    with psycopg.connect(dsn, autocommit=True) as conn:
-        conn.execute("DELETE FROM channel_accounts")
-        conn.execute("DELETE FROM tenants")
 
 
 def seed_two_tenants(dsn: str, tenant_a: uuid.UUID, tenant_b: uuid.UUID) -> None:
@@ -301,11 +286,17 @@ def count_advisory_lock_holders(dsn: str, *, classid: int, objid: int) -> int:
 
 
 def clean_geo(dsn: str) -> None:
-    """Reset the geo layer so each db test starts from a known state: every
-    address_resolutions row and every geo_gazetteer row (shared + tenant-scoped)."""
+    """Reset the TENANT-scoped geo rows + address_resolutions. SHARED reference
+    rows (tenant_id IS NULL) are left alone - they are the feature's data (H75)."""
     with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute("DELETE FROM address_resolutions")
-        conn.execute("DELETE FROM geo_gazetteer")
+        conn.execute("DELETE FROM geo_gazetteer WHERE tenant_id IS NOT NULL")
+
+
+def delete_gazetteer_row(dsn: str, gazetteer_id: int) -> None:
+    """Delete one geo_gazetteer row by id (cleans a test-seeded SHARED row)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("DELETE FROM geo_gazetteer WHERE id = %s", (gazetteer_id,))
 
 
 def seed_gazetteer_governorate(dsn: str, *, name_ar: str, name_norm: str, wkt: str) -> int:
@@ -461,6 +452,66 @@ def allocate_holds_race(
     return results
 
 
+def seed_tenant_with_rows(dsn: str, *, tenant_id: uuid.UUID) -> None:
+    """Seed one tenant with rows in every table the §1.1 cleanup test covers:
+    customers, waitlist_entries, stock_holds, address_resolutions,
+    order_lookup_attempts, verifier_blocks and a tenant-scoped geo_gazetteer row.
+    delete_tenant_full must then remove every one of them without raising."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        cust = conn.execute(
+            "INSERT INTO customers (tenant_id, wa_id) VALUES (%s, 'cleanup-wa') RETURNING id",
+            (tenant_id,),
+        ).fetchone()
+        assert cust is not None
+        wl = conn.execute(
+            "INSERT INTO waitlist_entries (tenant_id, customer_id, platform_variant_id) "
+            "VALUES (%s, %s, 'VAR-CLEANUP') RETURNING id",
+            (tenant_id, cust[0]),
+        ).fetchone()
+        assert wl is not None
+        conn.execute(
+            "INSERT INTO stock_holds (tenant_id, waitlist_entry_id, platform_variant_id, qty, status, expires_at) "
+            "VALUES (%s, %s, 'VAR-CLEANUP', 1, 'held', now() + interval '1 hour')",
+            (tenant_id, wl[0]),
+        )
+        conn.execute(
+            "INSERT INTO address_resolutions (tenant_id, input, candidates, decision, confidence, source) "
+            "VALUES (%s, '{}', '[]', 'ask_for_pin', 0.0, 'geocoder')",
+            (tenant_id,),
+        )
+        conn.execute(
+            "INSERT INTO order_lookup_attempts (tenant_id, customer_id, path, order_ref_hash, outcome) "
+            "VALUES (%s, %s, 'other_number', 'hash-cleanup', 'denied')",
+            (tenant_id, cust[0]),
+        )
+        conn.execute(
+            "INSERT INTO verifier_blocks (tenant_id, reason) VALUES (%s, 'cleanup-test')",
+            (tenant_id,),
+        )
+        conn.execute(
+            "INSERT INTO geo_gazetteer (tenant_id, level, name_ar, name_norm, geom) "
+            "VALUES (%s, 'landmark', 'مطعم', 'مطعم', ST_GeomFromText('POINT(44.2 15.3)', 4326))",
+            (tenant_id,),
+        )
+
+
+def count_rows_for_tenant(dsn: str, *, table: str, tenant_id: uuid.UUID) -> int:
+    """Count `tenant_id = %s` rows on one of the six cleanup-test tables (a
+    CLOSED allowlist - the same whitelist pattern as INBOX_EVENT_ALLOWED_KEYS)."""
+    allowed = frozenset({
+        "waitlist_entries", "stock_holds", "address_resolutions",
+        "order_lookup_attempts", "verifier_blocks", "geo_gazetteer",
+    })
+    if table not in allowed:
+        raise ValueError(f"table {table!r} not in the cleanup-test allowlist")
+    with psycopg.connect(dsn) as conn:
+        row = conn.execute(
+            f"SELECT count(*) FROM {table} WHERE tenant_id = %s", (tenant_id,)
+        ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
 __all__: Sequence[str] = (
     "allocate_holds_race",
     "channel_account_exists_by_session",
@@ -475,8 +526,6 @@ __all__: Sequence[str] = (
     "held_wa_ids",
     "insert_customer",
     "insert_test_waitlist_entry",
-    "delete_tenant",
-    "delete_tenant_and_its_audit",
     "delete_tenant_full",
     "exec_sql_autocommit",
     "fetch_audit_log_by_action",
@@ -489,10 +538,12 @@ __all__: Sequence[str] = (
     "insert_channel_account",
     "insert_idempotency_record",
     "insert_tenant_returning_id",
-    "reset_tenants_and_channels",
+    "count_rows_for_tenant",
+    "delete_gazetteer_row",
     "seed_gazetteer_governorate",
     "seed_kill_switch",
     "seed_tenant_gazetteer",
+    "seed_tenant_with_rows",
     "seed_two_tenants",
     "stock_held_count_and_qty",
     "waitlist_status_counts",

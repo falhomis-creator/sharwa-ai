@@ -507,5 +507,14 @@ groups:
           summary: "the back-in-stock sweep has stopped"
           description: "stock_sweep_runs_total has not increased in 10 minutes - the sweep thread is stalled, so waiting customers will never be promoted."
 
+      - alert: GazetteerEmpty
+        expr: gazetteer_rows{level="governorate"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "the gazetteer has no governorates"
+          description: "gazetteer_rows{level=\"governorate\"} is 0 for 5 minutes - the address resolver returns ask_for_pin for every address on an empty gazetteer (H75: a feature without its data is not a feature)."
+
 
 

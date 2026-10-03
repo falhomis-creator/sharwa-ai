@@ -28,10 +28,12 @@ _GOVERNORATE_WKT = "POLYGON((44.0 15.2,44.4 15.2,44.4 15.6,44.0 15.6,44.0 15.2))
 @pytest.fixture()
 def tenants():
     dsn = os.environ["CORE_MIGRATION_DATABASE_URL"]
-    db_testsupport.reset_tenants_and_channels(dsn)
+    db_testsupport.delete_tenant_full(dsn, TENANT_A)
+    db_testsupport.delete_tenant_full(dsn, TENANT_B)
     db_testsupport.seed_two_tenants(dsn, TENANT_A, TENANT_B)
     yield
-    db_testsupport.reset_tenants_and_channels(dsn)
+    db_testsupport.delete_tenant_full(dsn, TENANT_A)
+    db_testsupport.delete_tenant_full(dsn, TENANT_B)
 
 
 def test_point_governorate_returns_governorate_and_null(tenants):
@@ -39,14 +41,17 @@ def test_point_governorate_returns_governorate_and_null(tenants):
     inside its polygon, and NULL for a point outside every known governorate."""
     dsn = os.environ["CORE_MIGRATION_DATABASE_URL"]
     db_testsupport.clean_geo(dsn)
-    db_testsupport.seed_gazetteer_governorate(
-        dsn, name_ar="أمانة العاصمة", name_norm="امانه العاصمه", wkt=_GOVERNORATE_WKT,
+    gid = db_testsupport.seed_gazetteer_governorate(
+        dsn, name_ar="محافظة الاختبار", name_norm="محافظه الاختبار", wkt=_GOVERNORATE_WKT,
     )
-    with core_db.tenant_tx(TENANT_A) as conn:
-        inside = repos_geo.point_governorate(conn, lat=15.35, lng=44.20)
-        outside = repos_geo.point_governorate(conn, lat=15.35, lng=40.00)
-    assert inside is not None
-    assert outside is None
+    try:
+        with core_db.tenant_tx(TENANT_A) as conn:
+            inside = repos_geo.point_governorate(conn, lat=15.35, lng=44.20)
+            outside = repos_geo.point_governorate(conn, lat=15.35, lng=40.00)
+        assert inside is not None
+        assert outside is None
+    finally:
+        db_testsupport.delete_gazetteer_row(dsn, gid)
 
 
 def test_insert_address_resolution_accepted_without_location_rejected(tenants):
@@ -73,21 +78,30 @@ def test_insert_address_resolution_accepted_without_location_rejected(tenants):
 
 def test_gazetteer_read_exposes_shared_and_own_hides_other(tenants):
     """§1.2 item 3: the gazetteer_read RLS policy exposes shared (NULL) rows and
-    the current tenant's rows, and hides another tenant's rows."""
+    the current tenant's rows, and hides another tenant's rows. Name-targeted (not
+    a total count) so a loaded real gazetteer cannot skew the assertion."""
     dsn = os.environ["CORE_MIGRATION_DATABASE_URL"]
     db_testsupport.clean_geo(dsn)
-    db_testsupport.seed_gazetteer_governorate(
-        dsn, name_ar="أمانة العاصمة", name_norm="امانه العاصمه", wkt=_GOVERNORATE_WKT,
+    shared_gid = db_testsupport.seed_gazetteer_governorate(
+        dsn, name_ar="محافظة مشتركة", name_norm="محافظه مشتركه", wkt=_GOVERNORATE_WKT,
     )
-    db_testsupport.seed_tenant_gazetteer(
+    own_gid = db_testsupport.seed_tenant_gazetteer(
         dsn, tenant_id=TENANT_A, level="landmark", name_ar="مطعمي", name_norm="مطعمي",
         wkt="POINT(44.2 15.3)",
     )
-    db_testsupport.seed_tenant_gazetteer(
+    other_gid = db_testsupport.seed_tenant_gazetteer(
         dsn, tenant_id=TENANT_B, level="landmark", name_ar="مطعم الآخر", name_norm="مطعم الاخر",
         wkt="POINT(44.3 15.4)",
     )
-    with core_db.tenant_tx(TENANT_A) as conn:
-        visible = db_testsupport.count_gazetteer_rows_on_conn(conn)
-    # shared governorate + tenant A's own landmark = 2; tenant B's row is hidden.
-    assert visible == 2
+    try:
+        with core_db.tenant_tx(TENANT_A) as conn:
+            shared_rows = repos_geo.search_gazetteer(conn, tenant_id=TENANT_A, name_norm="محافظه مشتركه", limit=5)
+            own_rows = repos_geo.search_gazetteer(conn, tenant_id=TENANT_A, name_norm="مطعمي", limit=5)
+            other_rows = repos_geo.search_gazetteer(conn, tenant_id=TENANT_A, name_norm="مطعم الاخر", limit=5)
+        assert any(r["gazetteer_id"] == shared_gid for r in shared_rows)   # shared visible
+        assert any(r["gazetteer_id"] == own_gid for r in own_rows)         # own visible
+        assert all(r["gazetteer_id"] != other_gid for r in other_rows)     # other hidden
+    finally:
+        db_testsupport.delete_gazetteer_row(dsn, shared_gid)
+        db_testsupport.delete_gazetteer_row(dsn, own_gid)
+        db_testsupport.delete_gazetteer_row(dsn, other_gid)
