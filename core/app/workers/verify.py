@@ -27,7 +27,7 @@ from app.obs import metrics
 from app.text import redact
 from app.workers import templates
 from app.workers import verify_rules
-from app.workers.config import WorkerSettings
+from app.workers.config import PROACTIVE_TEMPLATES, WorkerSettings
 from app.workers.stream import TransientError
 
 _log = obs_logging.get_logger("verify")
@@ -70,6 +70,15 @@ def _self_check(settings: WorkerSettings, rules: verify_rules.BlocklistSet) -> N
     from app.workers import compose
     samples: list[tuple[str, str]] = [(tid, text) for tid, text in templates.TEMPLATES.items()]
     samples.append(("product_list", compose.PRODUCT_LIST_TEMPLATE.format(items="منتج متوفر")))
+    # P3.1 (H83): proactive templates are also self-checked at boot, rendered with
+    # a placeholder merge value - a polluted approved template explodes at boot.
+    for tid, (meta, text, keys) in PROACTIVE_TEMPLATES.items():
+        rendered = text
+        for key in keys:
+            rendered = rendered.replace(f"«{key}»", "X")
+        if meta.footer_required:
+            rendered = f"{rendered}\n{settings.marketing_footer_ar}"
+        samples.append((f"proactive:{tid}", rendered))
     for name, text in samples:
         verdict = verify_rules.check_text(
             text, rules=rules, max_chars=settings.verify_max_chars,

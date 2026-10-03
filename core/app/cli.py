@@ -37,6 +37,7 @@ import jwt as pyjwt
 
 from app.db import repos
 from app.db import repos_inbox
+from app.db import repos_policy
 from app.db.migrate import MigrationError, run_migrations
 
 
@@ -101,6 +102,34 @@ def cmd_create_staff(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_policy_status(args: argparse.Namespace) -> int:
+    """Print one channel's number_health row - no phone / no customer text (H48)."""
+    row = repos_policy.policy_status(_migration_dsn(), channel_id=uuid.UUID(args.channel))
+    if row is None:
+        _err(f"no number_health row for channel {args.channel}")
+        return 1
+    _out(f"state: {row['state']}")
+    _out(f"daily_cap: {row['daily_cap']}")
+    _out(f"sent_today: {row['sent_today']}")
+    _out(f"utility_daily_cap: {row['utility_daily_cap']}")
+    _out(f"utility_sent_today: {row['utility_sent_today']}")
+    _out(f"score: {row['score']}")
+    _out(f"state_reason: {row['state_reason'] or ''}")
+    return 0
+
+
+def cmd_policy_reinstate(args: argparse.Namespace) -> int:
+    """The ONLY exit from `paused` (H81): healthy + warm-up restart + audit."""
+    tenant_id = repos_policy.policy_reinstate(
+        _migration_dsn(), channel_id=uuid.UUID(args.channel), reason=args.reason,
+    )
+    if tenant_id is None:
+        _err(f"no number_health row for channel {args.channel}")
+        return 1
+    _out(f"reinstated channel {args.channel}")
+    return 0
+
+
 def cmd_migrate(args: argparse.Namespace) -> int:
     migrations_dir = Path(args.migrations_dir).resolve()
     if not migrations_dir.is_dir():
@@ -154,6 +183,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_token.add_argument("--kid", default=None)
     p_token.add_argument("--ttl-s", type=int, default=3600)
     p_token.set_defaults(func=cmd_issue_dev_token)
+
+    p_policy = sub.add_parser("policy", help="send-policy operator commands (status / reinstate)")
+    p_policy_sub = p_policy.add_subparsers(dest="policy_command", required=True)
+    p_status = p_policy_sub.add_parser("status", help="print one channel's number_health row")
+    p_status.add_argument("--channel", required=True)
+    p_status.set_defaults(func=cmd_policy_status)
+    p_reinstate = p_policy_sub.add_parser("reinstate", help="the ONLY exit from paused (H81)")
+    p_reinstate.add_argument("--channel", required=True)
+    p_reinstate.add_argument("--reason", required=True)
+    p_reinstate.set_defaults(func=cmd_policy_reinstate)
 
     p_migrate = sub.add_parser("migrate", help="apply core/migrations/*.sql (forward-only, idempotent)")
     p_migrate.add_argument("--migrations-dir", default="migrations")

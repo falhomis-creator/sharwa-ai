@@ -726,4 +726,49 @@ gazetteer_rows = Gauge(
 )
 
 
+# --- P3.1 send policy (H80/H81) ---------------------------------------------
+# Closed labels only (H20): no tenant / customer / channel / phone.
+
+policy_verdicts_total = Counter(
+    "policy_verdicts_total",
+    "Proactive gate verdicts, by class, action and reason (H84 closed set).",
+    labelnames=["class", "action", "reason"],
+    registry=registry,
+)
+
+policy_reserve_total = Counter(
+    "policy_reserve_total",
+    "reserve_send_slot outcomes, by class and verdict (reserved|spacing|cap_reached|paused|no_health_row).",
+    labelnames=["class", "verdict"],
+    registry=registry,
+)
+
+policy_errors_total = Counter(
+    "policy_errors_total",
+    "Send-policy failures that failed CLOSED (no send), by stage (H80).",
+    labelnames=["stage"],
+    registry=registry,
+)
+
+policy_state_transitions_total = Counter(
+    "policy_state_transitions_total",
+    "number_health state transitions applied by the sweeper/reinstate, by to-state.",
+    labelnames=["to"],
+    registry=registry,
+)
+
+number_health_state = Gauge(
+    "number_health_state",
+    "Number of channels currently in each number_health state (healthy|throttled|paused).",
+    labelnames=["state"],
+    registry=registry,
+)
+
+policy_sweeper_last_success_timestamp_seconds = Gauge(
+    "policy_sweeper_last_success_timestamp_seconds",
+    "Unix timestamp of the last successful send-policy sweep (PolicySweeperStale).",
+    registry=registry,
+)
+
+
 

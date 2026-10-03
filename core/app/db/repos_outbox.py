@@ -41,6 +41,7 @@ class OutboxRow:
     to_wa_id: str
     payload: dict[str, Any]
     attempts: int
+    created_at: Any = None
 
 
 def lock_conversation(
@@ -203,7 +204,7 @@ def claim_outbox(
     with conn.cursor(row_factory=dict_row) as cur:
         rows = cur.execute(
             "SELECT id, tenant_id, conversation_id, channel_account_id, idempotency_key, "
-            "origin, message_class, expected_epoch, to_wa_id, payload, attempts, status "
+            "origin, message_class, expected_epoch, to_wa_id, payload, attempts, status, created_at "
             "FROM app.claim_outbox(%s::integer, make_interval(secs => %s), %s::integer)",
             (limit, lease_s, marketing_limit),
         ).fetchall()
@@ -226,6 +227,7 @@ def _outbox_from_row(row: dict[str, Any]) -> OutboxRow:
         origin=row["origin"], message_class=row["message_class"],
         expected_epoch=row["expected_epoch"], to_wa_id=row["to_wa_id"],
         payload=row["payload"], attempts=int(row["attempts"]),
+        created_at=row["created_at"],
     )
 
 
@@ -327,7 +329,7 @@ def claim_sent_transition(
         "UPDATE outbox SET status = 'sent', sent_at = now(), provider_message_id = %s "
         "WHERE idempotency_key = %s AND status <> 'sent' "
         "RETURNING id, tenant_id, conversation_id, channel_account_id, idempotency_key, "
-        "          origin, message_class, expected_epoch, to_wa_id, payload, attempts",
+        "          origin, message_class, expected_epoch, to_wa_id, payload, attempts, created_at",
         (wa_message_id, idempotency_key),
     ).fetchone()
     if row is None:

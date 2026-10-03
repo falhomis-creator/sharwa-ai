@@ -537,6 +537,21 @@ def seed_conversation(
     return row[0]
 
 
+def seed_inbound_message(
+    dsn: str, *, tenant_id: uuid.UUID, conversation_id: uuid.UUID, body: str = "مرحبا",
+) -> uuid.UUID:
+    """Insert one inbound messages row (prior-interaction / active-chat signal)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "INSERT INTO messages (tenant_id, conversation_id, direction, sent_by, type, body, status) "
+            "VALUES (%s, %s, 'in', 'customer', 'text', %s, 'received') RETURNING id",
+            (tenant_id, conversation_id, body),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("INSERT ... RETURNING id produced no row")
+    return row[0]
+
+
 def seed_outbox_row(
     dsn: str, *, tenant_id: uuid.UUID, channel_id: uuid.UUID,
     conversation_id: uuid.UUID | None, origin: str, message_class: str, to_wa_id: str,
@@ -663,6 +678,7 @@ __all__: Sequence[str] = (
     "fetch_schema_migrations",
     "fetch_tenant_row",
     "seed_conversation",
+    "seed_inbound_message",
     "seed_outbox_row",
     "seed_suppression",
     "function_exists",

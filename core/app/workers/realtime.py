@@ -36,11 +36,12 @@ from app.db import repos_ingest
 from app.db import repos_inbox
 from app.db import repos_llm
 from app.db import repos_outbox
+from app.db import repos_policy
 from app.db.context import system_tx, tenant_tx
 from app.obs import http as obs_http
 from app.obs import logging as obs_logging
 from app.obs import metrics
-from app.workers import catalog, dispatch, embed, evt, optout, schema, stock, summary, turn, verify
+from app.workers import catalog, dispatch, embed, evt, optout, policy_sweep, proactive, schema, stock, summary, turn, verify
 from app.workers.config import WorkerSettings
 from app.workers.stream import (
     PermanentError,
@@ -398,6 +399,17 @@ class RealtimeWorker:
                 conn, tenant_id=resolution.tenant_id, customer_id=customer_id,
                 scopes=repos_ingest.OPTOUT_SCOPES, reason=repos_ingest.OPTOUT_REASON,
             )
+            # D4: STOP cancels the queue immediately - every pending automation row
+            # for a suppressed scope's templates is dropped (sending rows are caught
+            # by the send-time gate, H76). The scope->templates map is DERIVED from
+            # the catalog, never re-written here.
+            for scope in repos_ingest.OPTOUT_SCOPES:
+                template_ids = proactive.template_ids_for_scope(scope)
+                if template_ids:
+                    repos_policy.cancel_pending_proactive(
+                        conn, tenant_id=resolution.tenant_id, customer_id=customer_id,
+                        template_ids=template_ids,
+                    )
 
         return CommitResult(
             outcome="committed", session_id=entry.session_id,
@@ -821,6 +833,21 @@ class RealtimeWorker:
             elapsed = time.monotonic() - started
             self.stop_event.wait(max(1.0, self.settings.stock_sweep_interval_s - elapsed))
 
+    def _run_policy_sweep(self) -> None:
+        """P3.1 §3 F: the send-policy sweeper (number_health + warm-up + health),
+        beside the dispatcher. A background refresh, not a fail-fast path."""
+        while not self.stop_event.is_set():
+            started = time.monotonic()
+            try:
+                policy_sweep.sweep_once(self.settings)
+            except Exception as exc:  # noqa: BLE001 - background refresh, keep the thread alive
+                obs_logging.log_event(
+                    _log, event="policy.sweep.crash", component="policy_sweep",
+                    level=logging.ERROR, error=str(exc),
+                )
+            elapsed = time.monotonic() - started
+            self.stop_event.wait(max(1.0, self.settings.send_policy_sweep_interval_s - elapsed))
+
     def run(self) -> int:
         self._setup()
 
@@ -867,6 +894,9 @@ class RealtimeWorker:
         stock_thread = threading.Thread(target=self._run_stock_sweep, daemon=True)
         stock_thread.start()
         threads.append(stock_thread)
+        policy_thread = threading.Thread(target=self._run_policy_sweep, daemon=True)
+        policy_thread.start()
+        threads.append(policy_thread)
 
         obs_logging.log_event(_log, event="worker.started", component="realtime")
 

@@ -30,6 +30,8 @@ def test_join_waitlist_registers_once(monkeypatch):
         stock.repos_stock, "insert_waitlist_entry",
         lambda conn, **kw: (inserts.append(kw) or uuid.uuid4()),
     )
+    consents: list[dict] = []
+    monkeypatch.setattr(stock.repos_policy, "write_consent", lambda conn, **kw: consents.append(kw))
 
     d = stock.join_waitlist(
         None, _settings(), tenant_id=uuid.uuid4(),
@@ -38,6 +40,9 @@ def test_join_waitlist_registers_once(monkeypatch):
     assert d.kind == "joined"
     assert d.platform_variant_id == "VAR-X"
     assert len(inserts) == 1
+    # D3: joining the waitlist writes a back_in_stock consent in the same tx.
+    assert consents and consents[0]["scope"] == "back_in_stock"
+    assert consents[0]["granted"] is True
 
 
 def test_join_waitlist_duplicate_rejected(monkeypatch):
@@ -103,8 +108,8 @@ def test_sweep_allocates_and_notifies_in_one_transaction(monkeypatch):
         "to_wa_id": "967700000001", "epoch": 1,
     })
     monkeypatch.setattr(
-        stock.verify, "insert_verified_outbox",
-        lambda conn, **kw: (notifs.append(kw) or SimpleNamespace(ok=True)),
+        stock.proactive, "enqueue_proactive",
+        lambda conn, **kw: (notifs.append(kw) or uuid.uuid4()),
     )
 
     stock._expire_allocate_notify(
@@ -112,4 +117,4 @@ def test_sweep_allocates_and_notifies_in_one_transaction(monkeypatch):
     )
     assert len(notifs) == 1
     assert notifs[0]["template_id"] == "stock_available"
-    assert "قميص" in notifs[0]["text"]
+    assert notifs[0]["merge"]["title"] == "قميص"

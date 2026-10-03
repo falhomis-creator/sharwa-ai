@@ -19,11 +19,12 @@ from app import db as core_db
 from app.channels.commerce_client import CommerceClientError, CommerceUnavailableError
 from app.db import repos_catalog
 from app.db import repos_outbox
+from app.db import repos_policy
 from app.db import repos_stock
 from app.obs import metrics
 from app.tools import join_waitlist as join_waitlist_tool
 from app.tools.registry import ToolContext
-from app.workers import compose, templates, verify
+from app.workers import proactive
 from app.workers.config import WorkerSettings
 
 
@@ -80,9 +81,15 @@ def join_waitlist(
     ) >= settings.stock_max_waitlist_per_customer:
         metrics.waitlist_entries_total.labels("cap").inc()
         return join_waitlist_tool.JoinWaitlistDecision(kind="unavailable")
-    repos_stock.insert_waitlist_entry(
+    entry_id = repos_stock.insert_waitlist_entry(
         conn, tenant_id=tenant_id, customer_id=customer_id,
         conversation_id=conversation_id, platform_variant_id=variant,
+    )
+    # H50 / D3: the back_in_stock consent is written HERE (the coordinator), in
+    # the same join transaction - never in the pure join_waitlist tool.
+    repos_policy.write_consent(
+        conn, tenant_id=tenant_id, customer_id=customer_id,
+        scope="back_in_stock", granted=True, source="waitlist_join", evidence=str(entry_id),
     )
     metrics.waitlist_entries_total.labels("joined").inc()
     return decision
@@ -144,7 +151,7 @@ def _expire_allocate_notify(
             continue
         _insert_notice(
             conn, settings, rules, tenant_id=tenant_id, entry_id=entry_id, target=target,
-            template_id="stock_hold_expired", text=templates.template_text("stock_hold_expired"),
+            template_id="stock_hold_expired",
         )
         metrics.stock_holds_total.labels("expired").inc()
 
@@ -165,8 +172,7 @@ def _expire_allocate_notify(
             continue
         _insert_notice(
             conn, settings, rules, tenant_id=tenant_id, entry_id=hold["waitlist_entry_id"],
-            target=target, template_id="stock_available",
-            text=compose.compose_stock_notice("stock_available", title),
+            target=target, template_id="stock_available", merge={"title": title},
         )
         metrics.stock_holds_total.labels("held").inc()
 
@@ -174,15 +180,14 @@ def _expire_allocate_notify(
 def _insert_notice(
     conn: Any, settings: WorkerSettings, rules: Any, *,
     tenant_id: uuid.UUID, entry_id: uuid.UUID, target: dict[str, Any],
-    template_id: str, text: str,
+    template_id: str, merge: dict[str, str] | None = None,
 ) -> None:
-    """One outbox row via verify.insert_verified_outbox (H46: the text passes the
-    verifier). A single INSERT, no network - keeps the allocation transaction short."""
-    verify.insert_verified_outbox(
+    """F-P3-03: the back-in-stock notice is now a PROACTIVE (automation) send
+    through the gate, not a service row. One INSERT, no network - keeps the
+    allocation transaction short (H69 unchanged)."""
+    proactive.enqueue_proactive(
         conn, settings=settings, rules=rules,
         tenant_id=tenant_id, conversation_id=target["conversation_id"],
-        channel_account_id=target["channel_account_id"],
+        template_id=template_id, merge=merge,
         idempotency_key=f"stock:{entry_id}:{template_id}",
-        message_class="service", expected_epoch=target["epoch"],
-        to_wa_id=target["to_wa_id"], template_id=template_id, text=text,
     )

@@ -187,6 +187,8 @@ def _s9_embedding_provider_imports(tree: ast.Module) -> list[str]:
 
 # --- S10 (P1.6): H45/H46 - single outbox write point; deterministic verifier ---
 _S10_INSERT_OUTBOX_UNCONDITIONAL = frozenset({"app.db.repos_outbox", "app.workers.verify"})
+# P3.1 (H46 amended): proactive.py is the third writer, origin='automation' literally.
+_S10_INSERT_OUTBOX_AUTOMATION = frozenset({"app.workers.proactive"})
 _VERIFY_RULES_ALLOWED_IMPORTS = frozenset({
     "re", "dataclasses", "typing", "enum", "__future__", "app.text.arabic",
 })
@@ -208,6 +210,13 @@ def _insert_outbox_calls(tree: ast.Module) -> list[ast.Call]:
 def _call_origin_human(call: ast.Call) -> bool:
     for kw in call.keywords:
         if kw.arg == "origin" and isinstance(kw.value, ast.Constant) and kw.value.value == "human":
+            return True
+    return False
+
+
+def _call_origin_automation(call: ast.Call) -> bool:
+    for kw in call.keywords:
+        if kw.arg == "origin" and isinstance(kw.value, ast.Constant) and kw.value.value == "automation":
             return True
     return False
 
@@ -1139,7 +1148,8 @@ def main() -> int:
 
     # ---- S10 (P1.6): H45/H46 - single outbox write point; deterministic layer ---
     # a: insert_outbox may only be called by repos_outbox (definition), verify.py
-    #    (the enforcement point), or a module whose every call is origin="human".
+    #    (the enforcement point), a module whose every call is origin="human", or
+    #    proactive.py whose every call is origin="automation" (P3.1, H46 amended).
     for mod, path in mods.items():
         tree = ast.parse(path.read_text(encoding="utf-8"))
         calls = _insert_outbox_calls(tree)
@@ -1148,6 +1158,8 @@ def main() -> int:
         if mod in _S10_INSERT_OUTBOX_UNCONDITIONAL:
             continue
         if all(_call_origin_human(c) for c in calls):
+            continue
+        if mod in _S10_INSERT_OUTBOX_AUTOMATION and all(_call_origin_automation(c) for c in calls):
             continue
         _err("S10", str(path.relative_to(ROOT)), 0,
              f"'{mod}' calls insert_outbox without origin='human' literal "

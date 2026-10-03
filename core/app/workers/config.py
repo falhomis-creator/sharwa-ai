@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.config import ConfigError, DatabaseConfig
+from app.policy.types import TemplateMeta
 
 
 def _required(name: str) -> str:
@@ -124,6 +125,43 @@ DEFAULT_ADDRESS_W_LEVEL: dict[str, Any] = {
     "district": 0.85, "governorate": 0.50, "country": 0.30,
 }
 DEFAULT_ADDRESS_W_MATCH: dict[str, Any] = {"exact": 1.00, "synonym": 0.90, "prefix": 0.70}
+
+# P3.1 proactive template catalog (H77/H83): template_id -> (meta, text, merge_keys).
+# H83: no proactive text without an approved template; the message_class is DERIVED
+# here, never passed by the producer. There is NO marketing template in production
+# ("wired but dark"): any marketing row => unknown_template => drop, until P3.4.
+PROACTIVE_TEMPLATES: dict[str, tuple[TemplateMeta, str, tuple[str, ...]]] = {
+    "stock_available": (
+        TemplateMeta(
+            template_id="stock_available", message_class="utility",
+            consent_scope="back_in_stock", capability="back_in_stock",
+            quiet_hours=False, footer_required=False,
+        ),
+        "عاد «title» للتوفر! سارع بالطلب الآن. 🛍️",
+        ("title",),
+    ),
+    "stock_hold_expired": (
+        TemplateMeta(
+            template_id="stock_hold_expired", message_class="utility",
+            consent_scope="back_in_stock", capability="back_in_stock",
+            quiet_hours=False, footer_required=False,
+        ),
+        "انتهت مدة حجزك. ما زال بإمكانك الطلب من جديد متى شئت.",
+        (),
+    ),
+}
+
+
+def template_ids_for_scope(scope: str) -> tuple[str, ...]:
+    """Scope -> its template_ids, derived from the catalog (never re-written)."""
+    return tuple(
+        tid for tid, (meta, _text, _keys) in PROACTIVE_TEMPLATES.items()
+        if meta.consent_scope == scope
+    )
+
+
+def proactive_template(template_id: str) -> tuple[TemplateMeta, str, tuple[str, ...]] | None:
+    return PROACTIVE_TEMPLATES.get(template_id)
 
 
 def _float(name: str, default: float) -> float:
@@ -464,6 +502,11 @@ class WorkerSettings:
             raise ConfigError("marketing gap min must be >= 10 (Baileys conservative)")
         if min(sp_marketing_24h, sp_marketing_7d, sp_utility_24h) < 1:
             raise ConfigError("per-customer caps must be >= 1")
+        # D2 (H83): a registered marketing template must require a non-empty footer
+        # (wired-but-dark: there is no marketing template yet, so this is vacuous).
+        for _tid, (meta, _text, _keys) in PROACTIVE_TEMPLATES.items():
+            if meta.message_class == "marketing" and (not meta.footer_required or not _optional("MARKETING_FOOTER_AR", "")):
+                raise ConfigError("a marketing proactive template must require a non-empty opt-out footer")
         # N-4 / P3.1 §1.5: equal quiet start/end means "quiet forever" - refuse.
         quiet_start = _hhmm(_optional("SEND_POLICY_QUIET_START", "22:00"))
         quiet_end = _hhmm(_optional("SEND_POLICY_QUIET_END", "09:00"))

@@ -147,6 +147,20 @@ def write_consent(
 
 # --- gate snapshot reads (H76) ---------------------------------------------
 
+def read_channel_status(conn: psycopg.Connection, *, channel_id: uuid.UUID) -> str | None:
+    row = conn.execute(
+        "SELECT status FROM channel_accounts WHERE id = %s", (channel_id,),
+    ).fetchone()
+    return None if row is None else row[0]
+
+
+def read_tenant_timezone(conn: psycopg.Connection, *, tenant_id: uuid.UUID) -> str | None:
+    row = conn.execute(
+        "SELECT timezone FROM tenants WHERE id = %s", (tenant_id,),
+    ).fetchone()
+    return None if row is None else row[0]
+
+
 def has_prior_interaction(
     conn: psycopg.Connection, *, tenant_id: uuid.UUID, customer_id: uuid.UUID, window_d: int,
 ) -> bool:
@@ -199,6 +213,14 @@ def insert_proactive_ledger(
         "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (outbox_id) DO NOTHING",
         (tenant_id, channel_id, customer_id, outbox_id, message_class, template_id),
     )
+
+
+def read_ledger_status(conn: psycopg.Connection, *, outbox_id: uuid.UUID) -> str | None:
+    """The reservation status for one outbox row, or None (never reserved)."""
+    row = conn.execute(
+        "SELECT status FROM proactive_ledger WHERE outbox_id = %s", (outbox_id,),
+    ).fetchone()
+    return None if row is None else row[0]
 
 
 def mark_ledger_handed_off(conn: psycopg.Connection, *, outbox_id: uuid.UUID) -> None:
@@ -311,6 +333,22 @@ def optouts_after_marketing(
         (channel_id,),
     ).fetchone()
     return int(row[0] or 0)
+
+
+def complaint_bodies(conn: psycopg.Connection, *, channel_id: uuid.UUID) -> list[str]:
+    """Inbound message bodies written within 24h after a marketing hand-off, for
+    the sweeper's complaint-word equality match (H49). The text is returned for
+    an in-memory match and is NEVER logged (H48)."""
+    rows = conn.execute(
+        "SELECT m.body FROM messages m "
+        "JOIN conversations c ON c.id = m.conversation_id "
+        "JOIN proactive_ledger l ON l.customer_id = c.customer_id AND l.channel_account_id = %s "
+        "WHERE m.direction = 'in' AND l.message_class = 'marketing' AND l.status = 'handed_off' "
+        "AND m.created_at > l.reserved_at AND m.created_at < l.reserved_at + interval '24 hours' "
+        "AND m.created_at > now() - interval '24 hours'",
+        (channel_id,),
+    ).fetchall()
+    return [r[0] for r in rows if r[0] is not None]
 
 
 # --- operator CLI (DSN-based, migration role) -------------------------------

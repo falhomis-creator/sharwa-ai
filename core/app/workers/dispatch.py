@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import random
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from app.channels.gateway_client import GatewayClient, GatewayUnavailableError
@@ -21,7 +22,7 @@ from app.db import repos_outbox
 from app.db.context import system_tx, tenant_tx
 from app.obs import logging as obs_logging
 from app.obs import metrics
-from app.workers import templates
+from app.workers import policy_gate, templates
 from app.workers.config import WorkerSettings
 
 _log = obs_logging.get_logger("dispatch")
@@ -52,6 +53,11 @@ def dispatch_cycle(settings: WorkerSettings, client: GatewayClient) -> None:
         if row.attempts > settings.core_dispatch_max_attempts:
             _fail_and_escalate(settings, row)
             continue
+        if row.origin == "automation":
+            # H76/S23: every automation row goes through the policy gate at send
+            # time (the single proactive send path).
+            _dispatch_automation(settings, client, row)
+            continue
         try:
             session_id = _pre_send_checks(settings, row)
             if session_id is None:
@@ -67,6 +73,54 @@ def dispatch_cycle(settings: WorkerSettings, client: GatewayClient) -> None:
                 _log, event="dispatch.error", component="dispatch",
                 level=logging.ERROR, outbox_id=str(row.id), error=str(exc),
             )
+
+
+def _dispatch_automation(settings: WorkerSettings, client: GatewayClient, row: repos_outbox.OutboxRow) -> None:
+    """The send-time gate for one automation row: gate+reserve (tx 1), network
+    send, then record the result (tx 2). H80: gate failure fails closed."""
+    try:
+        decision = policy_gate.gate(
+            settings, row,
+            now=datetime.now(timezone.utc),
+            gap_s=policy_gate._gap_s(settings, row.message_class),
+        )
+    except Exception as exc:
+        policy_gate.fail_closed(settings, row, exc)
+        return
+    if not decision.send:
+        return
+    try:
+        started = time.monotonic()
+        resp = _send_automation(client, row, decision.session_id)
+        metrics.dispatch_duration_seconds.observe(time.monotonic() - started)
+    except GatewayUnavailableError:
+        metrics.dispatch_attempts_total.labels("retry").inc()
+        policy_gate.release_slot(settings, row)
+        return
+    except Exception as exc:
+        obs_logging.log_event(
+            _log, event="dispatch.error", component="dispatch",
+            level=logging.ERROR, outbox_id=str(row.id), error=str(exc),
+        )
+        policy_gate.release_slot(settings, row)
+        return
+    if resp.status_code == 202:
+        policy_gate.mark_sent(settings, row)
+        return
+    policy_gate.release_slot(settings, row)
+    _handle_response(settings, row, resp)
+
+
+def _send_automation(client: GatewayClient, row: repos_outbox.OutboxRow, session_id: str | None) -> Any:
+    """kind: marketing for marketing, bulk for automated utility (H82/§3 E.4)."""
+    if session_id is None:
+        raise GatewayUnavailableError("no session for automation row")
+    kind = "marketing" if row.message_class == "marketing" else "bulk"
+    text = str(row.payload.get("text", ""))
+    return client.send(
+        session_id=session_id, to=row.to_wa_id, text=text,
+        client_msg_id=row.idempotency_key, kind=kind,
+    )
 
 
 def _fail_and_escalate(settings: WorkerSettings, row: repos_outbox.OutboxRow) -> None:

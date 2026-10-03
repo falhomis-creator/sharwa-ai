@@ -516,5 +516,54 @@ groups:
           summary: "the gazetteer has no governorates"
           description: "gazetteer_rows{level=\"governorate\"} is 0 for 5 minutes - the address resolver returns ask_for_pin for every address on an empty gazetteer (H75: a feature without its data is not a feature)."
 
+  # P3.1 (send policy, H80/H81/H82): built on transitions/stalls, never absence of
+  # data alone. S4 verifies these reference metrics that exist in metrics.py.
+  - name: sharwa_ai_p3_1
+    rules:
+      - alert: NumberPaused
+        expr: increase(policy_state_transitions_total{to="paused"}[10m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "a number just transitioned to paused"
+          description: "a number_health row entered the paused state - no further marketing will be sent from it until an operator runs `policy reinstate` (H81)."
+
+      - alert: PolicySweeperStale
+        expr: time() - policy_sweeper_last_success_timestamp_seconds > 300
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "the send-policy sweeper has stopped"
+          description: "policy_sweeper_last_success_timestamp_seconds is more than 300s old - number_health rows are no longer being created/warm-up caps are frozen (N-3)."
+
+      - alert: ServiceOutboxStalled
+        expr: outbox_oldest_pending_seconds{class="service"} > 60
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "the service outbox is stalled (H82)"
+          description: "the oldest pending service row is over 60s old for 2 minutes - service replies must never be starved behind a marketing blast (H82)."
+
+      - alert: PolicyFailClosed
+        expr: rate(policy_errors_total[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "the send-policy gate is failing closed"
+          description: "policy_errors_total is rising - proactive rows are being deferred with no send (H80: fail closed); investigate the gate/reservation errors."
+
+      - alert: MarketingTTLDrops
+        expr: increase(policy_verdicts_total{reason="expired"}[10m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "proactive rows are expiring before send"
+          description: "policy_verdicts_total{reason=\"expired\"} is rising - rows are timing out (marketing 24h / utility 6h TTL); the gate is deferring more than it sends."
+
 
 
