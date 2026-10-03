@@ -131,6 +131,9 @@ def delete_tenant_full(dsn: str, tenant_id: uuid.UUID) -> None:
             "DELETE FROM checkout_sessions WHERE tenant_id = %s",
             "DELETE FROM verifier_blocks WHERE tenant_id = %s",
             "DELETE FROM llm_calls WHERE tenant_id = %s",
+            # proactive_ledger references outbox + customers + channel_accounts,
+            # so it MUST precede all three (the F-P2-06 lesson, applied forward).
+            "DELETE FROM proactive_ledger WHERE tenant_id = %s",
             "DELETE FROM outbox WHERE tenant_id = %s",
             "DELETE FROM conversations WHERE tenant_id = %s",
             "DELETE FROM campaigns WHERE tenant_id = %s",
@@ -463,6 +466,30 @@ def seed_tenant_with_rows(dsn: str, *, tenant_id: uuid.UUID) -> None:
             (tenant_id,),
         ).fetchone()
         assert cust is not None
+        ch = conn.execute(
+            "INSERT INTO channel_accounts (tenant_id, type, session_id, engine) "
+            "VALUES (%s, 'whatsapp_baileys', 'cleanup-sess', 'ai_core') RETURNING id",
+            (tenant_id,),
+        ).fetchone()
+        assert ch is not None
+        conv = conn.execute(
+            "INSERT INTO conversations (tenant_id, channel_account_id, customer_id) "
+            "VALUES (%s, %s, %s) RETURNING id",
+            (tenant_id, ch[0], cust[0]),
+        ).fetchone()
+        assert conv is not None
+        ob = conn.execute(
+            "INSERT INTO outbox (tenant_id, conversation_id, channel_account_id, idempotency_key, "
+            "origin, message_class, to_wa_id, payload, status) "
+            "VALUES (%s, %s, %s, 'cleanup-ob', 'automation', 'utility', 'cleanup-wa', %s, 'pending') RETURNING id",
+            (tenant_id, conv[0], ch[0], Jsonb({})),
+        ).fetchone()
+        assert ob is not None
+        conn.execute(
+            "INSERT INTO proactive_ledger (tenant_id, channel_account_id, customer_id, outbox_id, message_class, template_id, status) "
+            "VALUES (%s, %s, %s, %s, 'utility', 'stock_available', 'reserved')",
+            (tenant_id, ch[0], cust[0], ob[0]),
+        )
         wl = conn.execute(
             "INSERT INTO waitlist_entries (tenant_id, customer_id, platform_variant_id) "
             "VALUES (%s, %s, 'VAR-CLEANUP') RETURNING id",
@@ -559,7 +586,7 @@ def count_rows_for_tenant(dsn: str, *, table: str, tenant_id: uuid.UUID) -> int:
     CLOSED allowlist - the same whitelist pattern as INBOX_EVENT_ALLOWED_KEYS)."""
     allowed = frozenset({
         "waitlist_entries", "stock_holds", "address_resolutions",
-        "order_lookup_attempts", "verifier_blocks", "geo_gazetteer",
+        "order_lookup_attempts", "verifier_blocks", "geo_gazetteer", "proactive_ledger",
     })
     if table not in allowed:
         raise ValueError(f"table {table!r} not in the cleanup-test allowlist")

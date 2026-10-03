@@ -136,6 +136,36 @@ def _float(name: str, default: float) -> float:
         raise ConfigError(f"{name} must be a number, got {raw!r}") from exc
 
 
+def _gap_pair(src: str) -> tuple[int, int]:
+    parts = src.split(",")
+    if len(parts) != 2:
+        raise ConfigError(f"gap must be 'min,max', got {src!r}")
+    lo, hi = int(parts[0]), int(parts[1])
+    if lo > hi:
+        raise ConfigError(f"gap min ({lo}) must be <= max ({hi})")
+    return lo, hi
+
+
+def _ladder(src: str) -> dict[int, int]:
+    out: dict[int, int] = {}
+    for chunk in src.split(","):
+        chunk = chunk.strip()
+        if chunk:
+            d, c = chunk.split(":", 1)
+            out[int(d)] = int(c)
+    if not out:
+        raise ConfigError("warm-up ladder is empty")
+    return out
+
+
+def _hhmm(src: str) -> tuple[int, int]:
+    try:
+        h, m = src.split(":", 1)
+        return int(h), int(m)
+    except ValueError as exc:
+        raise ConfigError(f"bad HH:MM {src!r}") from exc
+
+
 def _json_table(name: str, default: dict[str, Any]) -> dict[str, Any]:
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -311,6 +341,30 @@ class WorkerSettings:
     stock_sweep_interval_s: int = 60
     stock_max_variants_per_cycle: int = 50
     stock_max_waitlist_per_customer: int = 10
+    # P3.1 send policy (PROMPT §4). Owner-approved drip numbers (OQ-P3-03). The
+    # warm-up ladder is a dict day_index -> cap; the cap column is SQL-enforced.
+    send_policy_warmup_ladder: dict[int, int] = field(default_factory=lambda: {0: 20, 3: 40, 7: 80, 14: 150, 30: 250})
+    send_policy_daily_ceiling: int = 250
+    send_policy_utility_daily_cap: int = 100
+    send_policy_marketing_gap: tuple[int, int] = (20, 60)
+    send_policy_utility_gap: tuple[int, int] = (8, 20)
+    send_policy_throttle_cap_factor: float = 0.5
+    send_policy_gap_factor: float = 2.0
+    send_policy_marketing_per_24h: int = 1
+    send_policy_marketing_per_7d: int = 2
+    send_policy_utility_per_24h: int = 3
+    send_policy_utility_min_gap_s: int = 60
+    send_policy_active_chat_cooldown_s: int = 1800
+    send_policy_quiet_start: str = "22:00"
+    send_policy_quiet_end: str = "09:00"
+    send_policy_marketing_ttl_h: int = 24
+    send_policy_utility_ttl_h: int = 6
+    send_policy_interaction_window_d: int = 180
+    send_policy_marketing_claim_per_cycle: int = 4
+    send_policy_sweep_interval_s: int = 60
+    send_policy_idle_reset_d: int = 14
+    send_policy_complaint_words: tuple[str, ...] = ("سبام", "ازعاج", "إزعاج", "بلاغ", "ابلاغ", "report", "spam")
+    marketing_footer_ar: str = "لإيقاف الرسائل الترويجية أرسل: إيقاف"
 
     @staticmethod
     def load() -> WorkerSettings:
@@ -391,6 +445,26 @@ class WorkerSettings:
 
         address_w_level = _json_table("ADDRESS_W_LEVEL", DEFAULT_ADDRESS_W_LEVEL)
         address_w_match = _json_table("ADDRESS_W_MATCH", DEFAULT_ADDRESS_W_MATCH)
+
+        # P3.1 send policy (§4). Fail-fast: ladder ascending with a top <= ceiling;
+        # marketing gap min >= 10; every cap >= 1 (OQ-P3-03 owner-approved).
+        sp_ladder = _ladder(_optional("SEND_POLICY_WARMUP_LADDER", "0:20,3:40,7:80,14:150,30:250"))
+        sp_ceiling = _int("SEND_POLICY_DAILY_CEILING", 250)
+        sp_marketing_gap = _gap_pair(_optional("SEND_POLICY_MARKETING_GAP_S", "20,60"))
+        sp_utility_gap = _gap_pair(_optional("SEND_POLICY_UTILITY_GAP_S", "8,20"))
+        sp_marketing_24h = _int("SEND_POLICY_MARKETING_PER_24H", 1)
+        sp_marketing_7d = _int("SEND_POLICY_MARKETING_PER_7D", 2)
+        sp_utility_24h = _int("SEND_POLICY_UTILITY_PER_24H", 3)
+        if max(sp_ladder.values()) > sp_ceiling:
+            raise ConfigError("warm-up ladder top must be <= SEND_POLICY_DAILY_CEILING")
+        if sorted(sp_ladder.values()) != sorted(set(sp_ladder.values())):
+            raise ConfigError("warm-up ladder caps must be strictly ascending")
+        if sp_marketing_gap[0] < 10:
+            raise ConfigError("marketing gap min must be >= 10 (Baileys conservative)")
+        if min(sp_marketing_24h, sp_marketing_7d, sp_utility_24h) < 1:
+            raise ConfigError("per-customer caps must be >= 1")
+        _hhmm(_optional("SEND_POLICY_QUIET_START", "22:00"))
+        _hhmm(_optional("SEND_POLICY_QUIET_END", "09:00"))
 
         return WorkerSettings(
             db=db,
@@ -502,4 +576,26 @@ class WorkerSettings:
             stock_sweep_interval_s=_int("STOCK_SWEEP_INTERVAL_S", 60),
             stock_max_variants_per_cycle=_int("STOCK_MAX_VARIANTS_PER_CYCLE", 50),
             stock_max_waitlist_per_customer=_int("STOCK_MAX_WAITLIST_PER_CUSTOMER", 10),
+            send_policy_warmup_ladder=sp_ladder,
+            send_policy_daily_ceiling=sp_ceiling,
+            send_policy_utility_daily_cap=_int("SEND_POLICY_UTILITY_DAILY_CAP", 100),
+            send_policy_marketing_gap=sp_marketing_gap,
+            send_policy_utility_gap=sp_utility_gap,
+            send_policy_throttle_cap_factor=_float("SEND_POLICY_THROTTLE_CAP_FACTOR", 0.5),
+            send_policy_gap_factor=_float("SEND_POLICY_GAP_FACTOR", 2.0),
+            send_policy_marketing_per_24h=sp_marketing_24h,
+            send_policy_marketing_per_7d=sp_marketing_7d,
+            send_policy_utility_per_24h=sp_utility_24h,
+            send_policy_utility_min_gap_s=_int("SEND_POLICY_UTILITY_MIN_GAP_S", 60),
+            send_policy_active_chat_cooldown_s=_int("SEND_POLICY_ACTIVE_CHAT_COOLDOWN_S", 1800),
+            send_policy_quiet_start=_optional("SEND_POLICY_QUIET_START", "22:00"),
+            send_policy_quiet_end=_optional("SEND_POLICY_QUIET_END", "09:00"),
+            send_policy_marketing_ttl_h=_int("SEND_POLICY_MARKETING_TTL_H", 24),
+            send_policy_utility_ttl_h=_int("SEND_POLICY_UTILITY_TTL_H", 6),
+            send_policy_interaction_window_d=_int("SEND_POLICY_INTERACTION_WINDOW_D", 180),
+            send_policy_marketing_claim_per_cycle=_int("SEND_POLICY_MARKETING_CLAIM_PER_CYCLE", 4),
+            send_policy_sweep_interval_s=_int("SEND_POLICY_SWEEP_INTERVAL_S", 60),
+            send_policy_idle_reset_d=_int("SEND_POLICY_IDLE_RESET_D", 14),
+            send_policy_complaint_words=_csv("SEND_POLICY_COMPLAINT_WORDS", "سبام,ازعاج,إزعاج,بلاغ,ابلاغ,report,spam"),
+            marketing_footer_ar=_optional("MARKETING_FOOTER_AR", "لإيقاف الرسائل الترويجية أرسل: إيقاف"),
         )

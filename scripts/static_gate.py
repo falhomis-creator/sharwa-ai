@@ -518,6 +518,37 @@ def _s20_violations(mods: dict[str, Path]) -> list[tuple[str, int, str]]:
     return bad
 
 
+_S21_ALLOWED_ROOTS = frozenset({"__future__", "dataclasses", "typing", "enum", "datetime", "zoneinfo"})
+_S21_FORBIDDEN_TOKENS = (
+    ".now()", ".utcnow()", ".today()", ".time()", "import time", "import random",
+    "app.db", "psycopg", "httpx", "redis", "app.llm", "open(", "os.environ",
+)
+
+
+def _s21_violations(mods: dict[str, Path]) -> list[tuple[str, int, str]]:
+    """S21 (H84): app/policy/** is pure and deterministic - a closed import set,
+    no clock reads, no IO, no DB, no network."""
+    bad: list[tuple[str, int, str]] = []
+    for name, path in mods.items():
+        if name != "app.policy" and not name.startswith("app.policy."):
+            continue
+        rel = str(path.relative_to(ROOT))
+        text = path.read_text(encoding="utf-8")
+        tree = ast.parse(text)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for a in node.names:
+                    if a.name.split(".")[0] not in _S21_ALLOWED_ROOTS and not a.name.startswith("app.policy"):
+                        bad.append((rel, node.lineno, f"imports {a.name!r} outside the closed set"))
+            elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                if node.module.split(".")[0] not in _S21_ALLOWED_ROOTS and not node.module.startswith("app.policy"):
+                    bad.append((rel, node.lineno, f"imports {node.module!r} outside the closed set"))
+        for token in _S21_FORBIDDEN_TOKENS:
+            if token in text:
+                bad.append((rel, 0, f"forbidden token {token!r} (H84: pure, deterministic)"))
+    return bad
+
+
 def _s19_tx_network_violations(tree: ast.Module) -> list[str]:
     """A commerce/port network call lexically inside a tenant_tx/system_tx block
     in app/workers/stock.py (H40 enforced structurally on the stock path)."""
@@ -1298,6 +1329,10 @@ def main() -> int:
     s20_mods = {**mods, **_test_module_files(), **_script_module_files()}
     for rel, lineno, detail in _s20_violations(s20_mods):
         _err("S20", rel, lineno, detail)
+
+    # ---- S21 (P3.1, H84): app/policy/** is pure and deterministic -------------
+    for rel, lineno, detail in _s21_violations(mods):
+        _err("S21", rel, lineno, detail)
 
     # ---- S14 (P2.1): a function must be able to return its promised type -----
     for mod, path in mods.items():
