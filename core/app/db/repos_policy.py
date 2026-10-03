@@ -162,39 +162,55 @@ def read_tenant_timezone(conn: psycopg.Connection, *, tenant_id: uuid.UUID) -> s
 
 
 def has_prior_interaction(
-    conn: psycopg.Connection, *, tenant_id: uuid.UUID, customer_id: uuid.UUID, window_d: int,
+    conn: psycopg.Connection, *, tenant_id: uuid.UUID, customer_id: uuid.UUID,
+    window_d: int, now: datetime,
 ) -> bool:
     row = conn.execute(
         "SELECT 1 FROM messages m JOIN conversations c ON c.id = m.conversation_id "
         "WHERE c.tenant_id = %s AND c.customer_id = %s AND m.direction = 'in' "
-        "AND m.created_at > now() - make_interval(days => %s) LIMIT 1",
-        (tenant_id, customer_id, window_d),
+        "AND m.created_at > %s - make_interval(days => %s) LIMIT 1",
+        (tenant_id, customer_id, now, window_d),
     ).fetchone()
     return row is not None
 
 
 def has_active_chat(
-    conn: psycopg.Connection, *, tenant_id: uuid.UUID, customer_id: uuid.UUID, cooldown_s: int,
+    conn: psycopg.Connection, *, tenant_id: uuid.UUID, customer_id: uuid.UUID,
+    cooldown_s: int, now: datetime,
 ) -> bool:
     row = conn.execute(
         "SELECT 1 FROM messages m JOIN conversations c ON c.id = m.conversation_id "
         "WHERE c.tenant_id = %s AND c.customer_id = %s AND m.direction = 'in' "
-        "AND m.created_at > now() - make_interval(secs => %s) LIMIT 1",
-        (tenant_id, customer_id, cooldown_s),
+        "AND m.created_at > %s - make_interval(secs => %s) LIMIT 1",
+        (tenant_id, customer_id, now, cooldown_s),
     ).fetchone()
     return row is not None
 
 
+def last_inbound_at(
+    conn: psycopg.Connection, *, tenant_id: uuid.UUID, customer_id: uuid.UUID,
+) -> datetime | None:
+    """The most recent inbound message from one customer (for active-chat defer)."""
+    row = conn.execute(
+        "SELECT max(m.created_at) FROM messages m JOIN conversations c ON c.id = m.conversation_id "
+        "WHERE c.tenant_id = %s AND c.customer_id = %s AND m.direction = 'in'",
+        (tenant_id, customer_id),
+    ).fetchone()
+    return row[0] if row is not None else None
+
+
 def count_class_handoffs(
     conn: psycopg.Connection, *, tenant_id: uuid.UUID, customer_id: uuid.UUID,
-    message_class: str, hours: int,
+    message_class: str, hours: int, now: datetime,
 ) -> int:
-    """Frequency caps (per customer): handed_off ledger rows in the window."""
+    """Frequency caps (per customer): reserved + handed_off ledger rows in the
+    window (N-6: reserved also counts - a reserved slot is a delivery in flight)."""
     row = conn.execute(
         "SELECT count(*) FROM proactive_ledger "
         "WHERE tenant_id = %s AND customer_id = %s AND message_class = %s "
-        "AND status = 'handed_off' AND reserved_at > now() - make_interval(hours => %s)",
-        (tenant_id, customer_id, message_class, hours),
+        "AND status IN ('reserved','handed_off') "
+        "AND reserved_at > %s - make_interval(hours => %s)",
+        (tenant_id, customer_id, message_class, now, hours),
     ).fetchone()
     return int(row[0]) if row is not None else 0
 
@@ -204,14 +220,17 @@ def count_class_handoffs(
 def insert_proactive_ledger(
     conn: psycopg.Connection, *, tenant_id: uuid.UUID, channel_id: uuid.UUID,
     customer_id: uuid.UUID, outbox_id: uuid.UUID, message_class: str, template_id: str,
+    reserved_at: datetime | None = None,
 ) -> None:
     """One reservation record per outbox row; UNIQUE(outbox_id) makes re-processing
-    idempotent (H85). ON CONFLICT DO NOTHING: a re-run takes no second slot."""
+    idempotent (H85). ON CONFLICT DO NOTHING: a re-run takes no second slot.
+    `reserved_at` defaults to now() but the gate passes its injected `now` so the
+    frequency windows are deterministic (H84)."""
     conn.execute(
         "INSERT INTO proactive_ledger "
-        "(tenant_id, channel_account_id, customer_id, outbox_id, message_class, template_id) "
-        "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (outbox_id) DO NOTHING",
-        (tenant_id, channel_id, customer_id, outbox_id, message_class, template_id),
+        "(tenant_id, channel_account_id, customer_id, outbox_id, message_class, template_id, reserved_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s, COALESCE(%s, now())) ON CONFLICT (outbox_id) DO NOTHING",
+        (tenant_id, channel_id, customer_id, outbox_id, message_class, template_id, reserved_at),
     )
 
 
@@ -249,12 +268,23 @@ def mark_policy_outcome(
 
 def defer_outbox(
     conn: psycopg.Connection, *, outbox_id: uuid.UUID, defer_until: datetime, reason: str,
+    rollback_attempt: bool = True,
 ) -> None:
-    """Defer a row: back to pending with a FUTURE next_attempt_at + policy_reason."""
-    conn.execute(
-        "UPDATE outbox SET status = 'pending', next_attempt_at = %s, policy_reason = %s WHERE id = %s",
-        (defer_until, reason, outbox_id),
-    )
+    """Defer a row: back to pending with a FUTURE next_attempt_at + policy_reason.
+    F-P3-16: a policy defer is NOT a send attempt - the claim's `attempts` increment
+    is rolled back (GREATEST(attempts - 1, 0)). `fail_closed` passes
+    rollback_attempt=False: a poisoned row SHOULD consume its attempt and fail."""
+    if rollback_attempt:
+        conn.execute(
+            "UPDATE outbox SET status = 'pending', next_attempt_at = %s, policy_reason = %s, "
+            "attempts = GREATEST(attempts - 1, 0) WHERE id = %s",
+            (defer_until, reason, outbox_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE outbox SET status = 'pending', next_attempt_at = %s, policy_reason = %s WHERE id = %s",
+            (defer_until, reason, outbox_id),
+        )
 
 
 def cancel_pending_proactive(
@@ -267,8 +297,9 @@ def cancel_pending_proactive(
     cur = conn.execute(
         "UPDATE outbox SET status = 'dropped_policy', policy_reason = 'suppressed' "
         "WHERE tenant_id = %s AND origin = 'automation' AND status = 'pending' "
-        "AND payload->>'template' = ANY(%s)",
-        (tenant_id, list(template_ids)),
+        "AND payload->>'template' = ANY(%s) "
+        "AND conversation_id IN (SELECT id FROM conversations WHERE tenant_id = %s AND customer_id = %s)",
+        (tenant_id, list(template_ids), tenant_id, customer_id),
     )
     return cur.rowcount
 

@@ -564,6 +564,66 @@ def _s21_violations(mods: dict[str, Path]) -> list[tuple[str, int, str]]:
     return bad
 
 
+def _s22_violations(mods: dict[str, Path]) -> list[tuple[str, int, str]]:
+    """S22 (P3.1, H46/S10-a amended): the automation writer is single and closed.
+    (a) insert_outbox(origin='automation') only from proactive.py; (b) proactive.py
+    never declares a `message_class` parameter (the class is derived from the
+    catalog); (c) is S10-a (already amended); (d) a `.send(` call only in dispatch.py
+    (the single network exit for GatewayClient.send)."""
+    bad: list[tuple[str, int, str]] = []
+    for mod, path in mods.items():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        # (a)
+        for call in _insert_outbox_calls(tree):
+            if _call_origin_automation(call) and mod != "app.workers.proactive":
+                bad.append((str(path.relative_to(ROOT)), getattr(call, "lineno", 0),
+                            "insert_outbox origin='automation' outside proactive.py (S22-a)"))
+        # (d)
+        if mod != "app.workers.dispatch" and mod != "app.channels.gateway_client":
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "send":
+                    bad.append((str(path.relative_to(ROOT)), getattr(node, "lineno", 0),
+                                "GatewayClient.send called outside dispatch.py (S22-d)"))
+    # (b)
+    p = mods.get("app.workers.proactive")
+    if p is not None:
+        tree = ast.parse(p.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for arg in node.args.args + node.args.kwonlyargs:
+                    if arg.arg == "message_class":
+                        bad.append((str(p.relative_to(ROOT)), node.lineno,
+                                    "proactive.py declares a message_class parameter (S22-b)"))
+    return bad
+
+
+def _s23_violations(mods: dict[str, Path]) -> list[tuple[str, int, str]]:
+    """S23 (P3.1): the dispatcher's automation branch must pass through policy_gate
+    before any automation send. Declared ceiling: lexical presence - dispatch.py
+    references policy_gate.gate, and _send_automation lives inside _dispatch_automation
+    which itself calls policy_gate.gate before _send_automation."""
+    bad: list[tuple[str, int, str]] = []
+    p = mods.get("app.workers.dispatch")
+    if p is None:
+        return bad
+    rel = str(p.relative_to(ROOT))
+    text = p.read_text(encoding="utf-8")
+    tree = ast.parse(text)
+    if "policy_gate.gate" not in text:
+        bad.append((rel, 0, "dispatch.py never references policy_gate.gate (S23)"))
+        return bad
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "_dispatch_automation":
+            seg = ast.get_source_segment(text, node) or ""
+            if "policy_gate.gate" not in seg:
+                bad.append((rel, node.lineno, "_dispatch_automation never calls policy_gate.gate (S23)"))
+            if "_send_automation" in seg and "policy_gate.gate" in seg \
+                    and seg.index("_send_automation") < seg.index("policy_gate.gate"):
+                bad.append((rel, node.lineno, "_send_automation runs before policy_gate.gate (S23)"))
+            break
+    return bad
+
+
 def _s19_tx_network_violations(tree: ast.Module) -> list[str]:
     """A commerce/port network call lexically inside a tenant_tx/system_tx block
     in app/workers/stock.py (H40 enforced structurally on the stock path)."""
@@ -1351,6 +1411,14 @@ def main() -> int:
     # ---- S21 (P3.1, H84): app/policy/** is pure and deterministic -------------
     for rel, lineno, detail in _s21_violations(mods):
         _err("S21", rel, lineno, detail)
+
+    # ---- S22 (P3.1, H46 amended): single automation writer --------------------
+    for rel, lineno, detail in _s22_violations(mods):
+        _err("S22", rel, lineno, detail)
+
+    # ---- S23 (P3.1): dispatcher <-> policy_gate integration -------------------
+    for rel, lineno, detail in _s23_violations(mods):
+        _err("S23", rel, lineno, detail)
 
     # ---- S14 (P2.1): a function must be able to return its promised type -----
     for mod, path in mods.items():

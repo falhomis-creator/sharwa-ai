@@ -7,18 +7,36 @@ from __future__ import annotations
 
 import os
 import uuid
+from dataclasses import MISSING, fields
 from types import SimpleNamespace
 
 import pytest
 
 from app.db import testsupport as db_testsupport
 from app.workers import dispatch
+from app.workers.config import WorkerSettings
 
 pytestmark = pytest.mark.db
 
 
+def _send_policy_defaults() -> dict:
+    """F-P3-19: the automation path runs through the policy gate, which reads every
+    `send_policy_*` field - derive the defaults from the REAL WorkerSettings, not a
+    thin hand-written stub that drifts."""
+    out: dict = {}
+    for f in fields(WorkerSettings):
+        if not f.name.startswith("send_policy_"):
+            continue
+        if f.default is not MISSING:
+            out[f.name] = f.default
+        elif f.default_factory is not MISSING:  # pragma: no cover - warm-up ladder
+            out[f.name] = f.default_factory()
+    return out
+
+
 def _settings(**kw) -> SimpleNamespace:
     d = dict(core_dispatch_batch=20, core_dispatch_lease_s=60, core_dispatch_max_attempts=8)
+    d.update(_send_policy_defaults())
     d.update(kw)
     return SimpleNamespace(**d)
 
@@ -125,11 +143,15 @@ def test_automation_failure_does_not_pause_conversation(tenant_ctx):
 def test_dispatch_sends_real_row_of_every_origin(tenant_ctx):
     # F-P1-12 acceptance (P3.1 §1.2-4): dispatch_cycle sends a REAL row of each
     # origin (bot / human / automation) - status='sent' for each. The gateway
-    # client is faked; the database is real.
+    # client is faked; the database is real. The automation row goes through the
+    # policy gate, so it needs a template + consent + prior interaction + health.
     dsn, tid, chid, cid = tenant_ctx
     conv = db_testsupport.seed_conversation(
         dsn, tenant_id=tid, channel_id=chid, customer_id=cid, bot_status="active", epoch=0,
     )
+    db_testsupport.seed_number_health(dsn, tenant_id=tid, channel_id=chid, daily_cap=50, sent_today=0)
+    db_testsupport.insert_consent(dsn, tenant_id=tid, customer_id=cid, scope="back_in_stock", granted=True)
+    db_testsupport.seed_inbound_message(dsn, tenant_id=tid, conversation_id=conv, body="مرحبا")
     rows = {
         "bot": db_testsupport.seed_outbox_row(
             dsn, tenant_id=tid, channel_id=chid, conversation_id=conv,
@@ -142,7 +164,8 @@ def test_dispatch_sends_real_row_of_every_origin(tenant_ctx):
         ),
         "automation": db_testsupport.seed_outbox_row(
             dsn, tenant_id=tid, channel_id=chid, conversation_id=conv,
-            origin="automation", message_class="utility", to_wa_id="967700000001", payload={"text": "notice"},
+            origin="automation", message_class="utility", to_wa_id="967700000001",
+            payload={"template": "stock_available", "text": "عاد «X» للتوفر!"},
         ),
     }
     dispatch.dispatch_cycle(_settings(), _FakeClient(202))

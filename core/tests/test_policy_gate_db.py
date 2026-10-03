@@ -91,7 +91,7 @@ def test_gate_reserves_eligible_stock_notice(gated_ctx):
     assert decision.send is True
     with core_db.tenant_tx(tid) as conn:
         health = repos_policy.read_number_health(conn, channel_id=chid)
-    assert health["sent_today"] == 1  # the slot was reserved (H79)
+    assert health["utility_sent_today"] == 1  # stock_available is utility (H79)
 
 
 def test_gate_drops_suppressed(gated_ctx):

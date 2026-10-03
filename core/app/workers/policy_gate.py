@@ -58,6 +58,26 @@ def _in_quiet(now: datetime, tz, settings: WorkerSettings) -> bool:
     )
 
 
+def _defer_until(reason, *, now, settings, conn, tenant_id, customer_id, tz_name):
+    """N-8: defer to the first allowed instant, not a 60s pulse. Quiet hours defer
+    to quiet_hours.next_allowed_at; active chat defers to last-inbound + cooldown."""
+    if reason == "quiet_hours" and tz_name:
+        try:
+            tz = ZoneInfo(tz_name)
+            return quiet_hours.next_allowed_at(
+                now, tz,
+                _parse_hhmm(settings.send_policy_quiet_start),
+                _parse_hhmm(settings.send_policy_quiet_end),
+            )
+        except Exception:
+            return now + timedelta(seconds=60)
+    if reason == "active_chat" and customer_id is not None:
+        last = repos_policy.last_inbound_at(conn, tenant_id=tenant_id, customer_id=customer_id)
+        if last is not None:
+            return last + timedelta(seconds=settings.send_policy_active_chat_cooldown_s)
+    return now + timedelta(seconds=60)
+
+
 def gate(settings: WorkerSettings, row: repos_outbox.OutboxRow, *, now: datetime, gap_s: int) -> GateDecision:
     """Transaction 1: pre-read + decide + apply (drop/defer/reserve). No network."""
     template_id = str(row.payload.get("template", ""))
@@ -98,17 +118,18 @@ def gate(settings: WorkerSettings, row: repos_outbox.OutboxRow, *, now: datetime
         )
         has_prior = customer_id is not None and repos_policy.has_prior_interaction(
             conn, tenant_id=row.tenant_id, customer_id=customer_id,
-            window_d=settings.send_policy_interaction_window_d,
+            window_d=settings.send_policy_interaction_window_d, now=now,
         )
         channel_status = repos_policy.read_channel_status(conn, channel_id=row.channel_account_id)
         health = repos_policy.read_number_health(conn, channel_id=row.channel_account_id)
         number_paused = health is not None and health["state"] == "paused"
         active_chat = customer_id is not None and repos_policy.has_active_chat(
             conn, tenant_id=row.tenant_id, customer_id=customer_id,
-            cooldown_s=settings.send_policy_active_chat_cooldown_s,
+            cooldown_s=settings.send_policy_active_chat_cooldown_s, now=now,
         )
 
         quiet = False
+        tz_name = None
         if meta.quiet_hours:
             tz_name = repos_policy.read_tenant_timezone(conn, tenant_id=row.tenant_id)
             if tz_name:
@@ -119,15 +140,15 @@ def gate(settings: WorkerSettings, row: repos_outbox.OutboxRow, *, now: datetime
 
         marketing_24h = repos_policy.count_class_handoffs(
             conn, tenant_id=row.tenant_id, customer_id=customer_id,
-            message_class="marketing", hours=24,
+            message_class="marketing", hours=24, now=now,
         ) if customer_id is not None else 0
         marketing_7d = repos_policy.count_class_handoffs(
             conn, tenant_id=row.tenant_id, customer_id=customer_id,
-            message_class="marketing", hours=7 * 24,
+            message_class="marketing", hours=7 * 24, now=now,
         ) if customer_id is not None else 0
         utility_24h = repos_policy.count_class_handoffs(
             conn, tenant_id=row.tenant_id, customer_id=customer_id,
-            message_class="utility", hours=24,
+            message_class="utility", hours=24, now=now,
         ) if customer_id is not None else 0
 
         inp = PolicyInput(
@@ -155,7 +176,10 @@ def gate(settings: WorkerSettings, row: repos_outbox.OutboxRow, *, now: datetime
             return GateDecision(False, None, meta.message_class)
 
         if verdict.action == DEFER:
-            defer_until = verdict.defer_until or (now + timedelta(seconds=60))
+            defer_until = verdict.defer_until or _defer_until(
+                verdict.reason, now=now, settings=settings, conn=conn,
+                tenant_id=row.tenant_id, customer_id=customer_id, tz_name=tz_name,
+            )
             repos_policy.defer_outbox(
                 conn, outbox_id=row.id, defer_until=defer_until, reason=verdict.reason,
             )
@@ -186,6 +210,7 @@ def gate(settings: WorkerSettings, row: repos_outbox.OutboxRow, *, now: datetime
                 conn, tenant_id=row.tenant_id, channel_id=row.channel_account_id,
                 customer_id=customer_id, outbox_id=row.id,
                 message_class=meta.message_class, template_id=template_id,
+                reserved_at=now,
             )
         session_id = repos_outbox.read_channel_session_id(conn, row.channel_account_id)
         metrics.policy_verdicts_total.labels(meta.message_class, "ok", "ok").inc()
@@ -193,12 +218,13 @@ def gate(settings: WorkerSettings, row: repos_outbox.OutboxRow, *, now: datetime
 
 
 def fail_closed(settings: WorkerSettings, row: repos_outbox.OutboxRow, exc: BaseException) -> None:
-    """H80: a gate/reserve exception defers the row and never sends."""
+    """H80: a gate/reserve exception defers the row and never sends. F-P3-16:
+    rollback_attempt=False - a poisoned row consumes its attempt so it fails."""
     with tenant_tx(row.tenant_id) as conn:
         repos_policy.defer_outbox(
             conn, outbox_id=row.id,
             defer_until=datetime.now().astimezone() + timedelta(seconds=60),
-            reason="policy_error",
+            reason="policy_error", rollback_attempt=False,
         )
     metrics.policy_errors_total.labels("gate").inc()
     obs_logging.log_event(

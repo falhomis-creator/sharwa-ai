@@ -20,6 +20,7 @@ test itself needs to control which connection/transaction they run on (e.g.
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import psycopg
@@ -539,13 +540,18 @@ def seed_conversation(
 
 def seed_inbound_message(
     dsn: str, *, tenant_id: uuid.UUID, conversation_id: uuid.UUID, body: str = "مرحبا",
+    age: timedelta | None = None,
 ) -> uuid.UUID:
-    """Insert one inbound messages row (prior-interaction / active-chat signal)."""
+    """Insert one inbound messages row (prior-interaction / active-chat signal).
+    F-P3-19: `age` defaults to 2 days so the customer is NOT "talking now";
+    pass age=timedelta(0) for an active-chat fixture."""
+    if age is None:
+        age = timedelta(days=2)
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
-            "INSERT INTO messages (tenant_id, conversation_id, direction, sent_by, type, body, status) "
-            "VALUES (%s, %s, 'in', 'customer', 'text', %s, 'received') RETURNING id",
-            (tenant_id, conversation_id, body),
+            "INSERT INTO messages (tenant_id, conversation_id, direction, sent_by, type, body, status, created_at) "
+            "VALUES (%s, %s, 'in', 'customer', 'text', %s, 'received', now() - %s) RETURNING id",
+            (tenant_id, conversation_id, body, age),
         ).fetchone()
     if row is None:
         raise RuntimeError("INSERT ... RETURNING id produced no row")
@@ -589,21 +595,32 @@ def seed_number_health(
     daily_cap: int = 50, sent_today: int = 0, state: str = "healthy",
     utility_daily_cap: int = 100, utility_sent_today: int = 0,
     day: str | None = None,
+    next_marketing_at: str | None = "1970-01-01T00:00:00Z",
+    next_utility_at: str | None = "1970-01-01T00:00:00Z",
+    warmup_started_at: str | None = None,
+    state_changed_at: str | None = None,
 ) -> None:
     """Insert/refresh a number_health row for the send-slot (P3.1) tests.
     `day` defaults to the DB's current_date; inject it to match an injected p_now
-    (otherwise the first reservation triggers a day-rollover reset)."""
+    (otherwise the first reservation triggers a day-rollover reset). F-P3-19: the
+    spacing windows default to 1970 (not now()) so an injected PAST p_now doesn't
+    make every reservation return `spacing`."""
     with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute(
             "INSERT INTO number_health "
             "(channel_account_id, tenant_id, daily_cap, sent_today, state, "
-            " utility_daily_cap, utility_sent_today, day) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, COALESCE(%s::date, current_date)) "
+            " utility_daily_cap, utility_sent_today, day, next_marketing_at, next_utility_at, "
+            " warmup_started_at, state_changed_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, COALESCE(%s::date, current_date), "
+            " %s::timestamptz, %s::timestamptz, %s::timestamptz, COALESCE(%s::timestamptz, now())) "
             "ON CONFLICT (channel_account_id) DO UPDATE SET "
             " daily_cap = EXCLUDED.daily_cap, sent_today = EXCLUDED.sent_today, "
             " state = EXCLUDED.state, utility_daily_cap = EXCLUDED.utility_daily_cap, "
-            " utility_sent_today = EXCLUDED.utility_sent_today, day = EXCLUDED.day",
-            (channel_id, tenant_id, daily_cap, sent_today, state, utility_daily_cap, utility_sent_today, day),
+            " utility_sent_today = EXCLUDED.utility_sent_today, day = EXCLUDED.day, "
+            " next_marketing_at = EXCLUDED.next_marketing_at, next_utility_at = EXCLUDED.next_utility_at, "
+            " warmup_started_at = EXCLUDED.warmup_started_at, state_changed_at = EXCLUDED.state_changed_at",
+            (channel_id, tenant_id, daily_cap, sent_today, state, utility_daily_cap, utility_sent_today, day,
+             next_marketing_at, next_utility_at, warmup_started_at, state_changed_at),
         )
 
 
@@ -632,6 +649,32 @@ def fetch_outbox_status(dsn: str, outbox_id: uuid.UUID) -> str | None:
     with psycopg.connect(dsn) as conn:
         row = conn.execute("SELECT status FROM outbox WHERE id = %s", (outbox_id,)).fetchone()
     return None if row is None else row[0]
+
+
+def fetch_outbox_policy_reason(dsn: str, outbox_id: uuid.UUID) -> str | None:
+    with psycopg.connect(dsn) as conn:
+        row = conn.execute("SELECT policy_reason FROM outbox WHERE id = %s", (outbox_id,)).fetchone()
+    return None if row is None else row[0]
+
+
+def fast_forward_outbox(dsn: str, *, tenant_id: uuid.UUID) -> None:
+    """F-P3-16 burst test: make every pending row due now (no sleep)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE outbox SET next_attempt_at = '1970-01-01'::timestamptz "
+            "WHERE tenant_id = %s AND status = 'pending'",
+            (tenant_id,),
+        )
+
+
+def fast_forward_number_health(dsn: str, *, channel_id: uuid.UUID) -> None:
+    """F-P3-16 burst test: open the spacing windows (no sleep)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE number_health SET next_utility_at = '1970-01-01'::timestamptz, "
+            " next_marketing_at = '1970-01-01'::timestamptz WHERE channel_account_id = %s",
+            (channel_id,),
+        )
 
 
 def count_rows_for_tenant(dsn: str, *, table: str, tenant_id: uuid.UUID) -> int:
@@ -674,6 +717,9 @@ __all__: Sequence[str] = (
     "fetch_audit_log_by_tenant",
     "fetch_conversation_bot_status",
     "fetch_outbox_status",
+    "fetch_outbox_policy_reason",
+    "fast_forward_outbox",
+    "fast_forward_number_health",
     "fetch_schema_migration_checksum",
     "fetch_schema_migrations",
     "fetch_tenant_row",
