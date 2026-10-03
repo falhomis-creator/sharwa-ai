@@ -44,28 +44,31 @@ def load_data(path: Path) -> dict:
         return json.load(fh)
 
 
-def _existing_norms(conn: psycopg.Connection) -> set[str]:
-    rows = conn.execute("SELECT name_norm FROM geo_gazetteer WHERE tenant_id IS NULL").fetchall()
-    return {r[0] for r in rows}
-
-
-def _parent_id(conn: psycopg.Connection, parent_norm: str | None) -> int | None:
-    if parent_norm is None:
-        return None
-    row = conn.execute(
-        "SELECT id FROM geo_gazetteer WHERE tenant_id IS NULL AND name_norm = %s LIMIT 1",
-        (parent_norm,),
-    ).fetchone()
-    return None if row is None else int(row[0])
-
-
-def verify(conn: psycopg.Connection, rows: list[dict], existing_norms: set[str]) -> list[str]:
-    """Fail-fast geometric verification. Returns the list of failure messages."""
+def verify(conn: psycopg.Connection, rows: list[dict]) -> list[str]:
+    """Fail-fast geometric verification (F-P2-07). Parents are referenced by the
+    FILE's stable `parent_key`, never by `name_norm` (a duplicate name - e.g.
+    «التحرير» in two governorates - must not let one row swallow the other).
+    Returns the list of failure messages."""
     errors: list[str] = []
-    by_norm: dict[str, dict] = {r["name_norm"]: r for r in rows}
+    by_key: dict[str, dict] = {}
+    seen_tuples: set[tuple[str, str, str | None]] = set()
 
     for r in rows:
         label = f"{r['level']} {r['name_ar']!r}"
+        key = r.get("key")
+        if not key:
+            errors.append(f"{label}: missing key")
+            continue
+        if key in by_key:
+            errors.append(f"{label}: duplicate key {key!r}")
+            continue
+        by_key[key] = r
+
+        tup = (r["level"], r["name_norm"], r.get("parent_key"))
+        if tup in seen_tuples:
+            errors.append(f"{label}: duplicate (level, name_norm, parent_key) {tup!r}")
+        seen_tuples.add(tup)
+
         if r["level"] not in LEVELS:
             errors.append(f"{label}: level {r['level']!r} outside {LEVELS}")
             continue
@@ -84,45 +87,55 @@ def verify(conn: psycopg.Connection, rows: list[dict], existing_norms: set[str])
         if not (GEO_BBOX["min_lat"] <= cy <= GEO_BBOX["max_lat"]):
             errors.append(f"{label}: centroid lat {cy} outside Yemen bbox")
 
-        parent = r.get("parent")
+    # Second pass: parent resolution + child-inside-parent (parents are always in
+    # the batch - the data file is self-contained).
+    for r in rows:
+        parent_key = r.get("parent_key")
+        if parent_key is None:
+            continue
+        label = f"{r['level']} {r['name_ar']!r}"
+        parent = by_key.get(parent_key)
         if parent is None:
+            errors.append(f"{label}: parent_key {parent_key!r} does not resolve to a row")
             continue
-        if parent not in by_norm and parent not in existing_norms:
-            errors.append(f"{label}: parent {parent!r} does not resolve to a row")
-            continue
-        pgeom = by_norm[parent]["geom"] if parent in by_norm else conn.execute(
-            "SELECT ST_AsText(geom) FROM geo_gazetteer WHERE tenant_id IS NULL AND name_norm = %s LIMIT 1",
-            (parent,),
-        ).fetchone()[0]
         covered = conn.execute(
             "SELECT ST_Covers(ST_GeomFromText(%s, 4326), ST_GeomFromText(%s, 4326)) "
             "OR ST_DWithin(ST_GeomFromText(%s, 4326)::geography, ST_GeomFromText(%s, 4326)::geography, %s)",
-            (pgeom, r["geom"], pgeom, r["geom"], GEO_MAX_PARENT_DISTANCE_M),
+            (parent["geom"], r["geom"], parent["geom"], r["geom"], GEO_MAX_PARENT_DISTANCE_M),
         ).fetchone()[0]
         if not covered:
-            errors.append(f"{label}: centre not inside parent {parent!r} (ST_Covers/ST_DWithin)")
+            errors.append(f"{label}: centre not inside parent {parent['name_ar']!r} (ST_Covers/ST_DWithin)")
 
     return errors
 
 
 def upsert(dsn: str, rows: list[dict], synonyms: dict) -> tuple[int, int]:
-    """Idempotent: check-before-insert. Returns (rows_written, synonyms_written)."""
+    """Idempotent: parents-first (key-depth order) with a key -> db_id map, so the
+    parent FK is resolved by KEY (F-P2-07) never by a possibly-duplicate name.
+    Returns (rows_written, synonyms_written)."""
     written = 0
+    ordered = sorted(rows, key=lambda r: r["key"].count("/"))
     with psycopg.connect(dsn, autocommit=True) as conn:
-        for r in rows:
-            pid = _parent_id(conn, r.get("parent"))
-            exists = conn.execute(
-                "SELECT 1 FROM geo_gazetteer WHERE tenant_id IS NULL "
+        id_by_key: dict[str, int] = {}
+        for r in ordered:
+            parent_key = r.get("parent_key")
+            pid = id_by_key.get(parent_key) if parent_key else None
+            row = conn.execute(
+                "SELECT id FROM geo_gazetteer WHERE tenant_id IS NULL "
                 "AND level = %s AND name_norm = %s AND parent_id IS NOT DISTINCT FROM %s LIMIT 1",
                 (r["level"], r["name_norm"], pid),
             ).fetchone()
-            if exists is None:
-                conn.execute(
+            if row is None:
+                ins = conn.execute(
                     "INSERT INTO geo_gazetteer (tenant_id, level, name_ar, name_norm, parent_id, geom) "
-                    "VALUES (NULL, %s, %s, %s, %s, ST_GeomFromText(%s, 4326))",
+                    "VALUES (NULL, %s, %s, %s, %s, ST_GeomFromText(%s, 4326)) RETURNING id",
                     (r["level"], r["name_ar"], r["name_norm"], pid, r["geom"]),
-                )
+                ).fetchone()
+                assert ins is not None
+                id_by_key[r["key"]] = int(ins[0])
                 written += 1
+            else:
+                id_by_key[r["key"]] = int(row[0])
 
         syn_written = 0
         for term_norm, canonical in synonyms.items():
@@ -156,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
     synonyms: dict = data.get("synonyms", {})
 
     with psycopg.connect(dsn) as conn:
-        errors = verify(conn, rows, _existing_norms(conn))
+        errors = verify(conn, rows)
 
     if errors:
         print(f"SEED ABORTED - {len(errors)} geometric verification failure(s):", file=sys.stderr)

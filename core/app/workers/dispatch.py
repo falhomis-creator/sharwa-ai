@@ -33,8 +33,15 @@ def _backoff_s(attempts: int) -> float:
 
 def dispatch_cycle(settings: WorkerSettings, client: GatewayClient) -> None:
     with system_tx() as conn:
-        depth, oldest = repos_outbox.outbox_stats(conn)
-    metrics.dispatch_queue_depth.set(depth)
+        stats = repos_outbox.outbox_stats(conn)
+    total = 0
+    oldest = 0.0
+    for message_class, depth, oldest_pending in stats:
+        metrics.outbox_depth.labels(message_class).set(depth)
+        metrics.outbox_oldest_pending_seconds.labels(message_class).set(oldest_pending)
+        total += depth
+        oldest = max(oldest, oldest_pending)
+    metrics.dispatch_queue_depth.set(total)
     metrics.dispatch_oldest_pending_seconds.set(oldest)
 
     with system_tx() as conn:
@@ -63,10 +70,14 @@ def dispatch_cycle(settings: WorkerSettings, client: GatewayClient) -> None:
 
 
 def _fail_and_escalate(settings: WorkerSettings, row: repos_outbox.OutboxRow) -> None:
-    """D2: past the attempts cap, mark failed + log loudly + hand off to a human."""
+    """D2: past the attempts cap, mark failed + log loudly + hand off to a human.
+
+    F-P3-07: only a BOT reply failure pauses the customer's conversation (send_failed).
+    An `automation` failure must NOT stop a customer who is chatting right now -
+    it is failed + counted + logged, with no set_bot_status call."""
     with tenant_tx(row.tenant_id) as conn:
         repos_outbox.mark_outbox_status(conn, outbox_id=row.id, status="failed")
-        if row.conversation_id is not None:
+        if row.origin == "bot" and row.conversation_id is not None:
             cur = repos_outbox.read_conversation_epoch_status(conn, row.conversation_id)
             version = repos_outbox.read_conversation_version(conn, row.conversation_id)
             if cur is not None and version is not None and cur[1] == "active":

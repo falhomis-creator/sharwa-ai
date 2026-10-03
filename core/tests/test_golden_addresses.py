@@ -31,6 +31,18 @@ import seed_gazetteer  # noqa: E402
 
 GOLDEN = Path(__file__).resolve().parent / "golden" / "addresses.jsonl"
 
+# §1.3 (F-P2-08): the SEVEN known mismatches, pinned by their input string. A NEW
+# mismatch => fail; a known mismatch that DISAPPEARS (an improvement) => warn only.
+KNOWN_MISMATCHES = frozenset({
+    "التحرير، صنعاء",
+    "المكلا",
+    "الجولة كنتاكي",
+    "جولة الرياض",
+    "سبعين",
+    "صنعاء - شعوب",
+    "تقاطع شارع حدة",
+})
+
 
 @pytest.fixture(scope="module")
 def loaded_gazetteer():
@@ -77,6 +89,12 @@ def test_golden_address_set(loaded_gazetteer, golden_tenant):
     for inp, exp, got in table:
         print(f"  MISMATCH input={inp!r} expected={exp} got={got}")
 
+    mismatched_inputs = {inp for inp, _, _ in table}
+    new_mismatches = mismatched_inputs - KNOWN_MISMATCHES
+    improved = KNOWN_MISMATCHES - mismatched_inputs
+    if improved:
+        print(f"  IMPROVEMENT: {len(improved)} known mismatches now pass: {sorted(improved)}")
+
     assert total == len(_cases())
-    assert mismatches >= 1, "the golden set passed 100% - it was written to please the code"
+    assert not new_mismatches, f"new golden mismatches (not in the known list): {sorted(new_mismatches)}"
     assert matches >= 30, f"only {matches} matched - the resolver is too weak to close P2"

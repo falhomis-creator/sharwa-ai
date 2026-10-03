@@ -496,12 +496,15 @@ def _imports_module(tree: ast.Module, name: str) -> bool:
 
 
 def _s20_violations(mods: dict[str, Path]) -> list[tuple[str, int, str]]:
-    """S20 (H74): `DELETE FROM tenants` in tests or testsupport must live inside
-    the single cleanup authority (delete_tenant_full). A partial cleaner is a bug
-    that surfaces the moment a new tenant table is added."""
+    """S20 (H74): `DELETE FROM tenants` in tests, testsupport or scripts must live
+    inside the single cleanup authority (delete_tenant_full). F-P2-10: the match
+    is case/whitespace-insensitive and the scope includes scripts/*.py."""
+    _s20_re = re.compile(r"(?i)delete\s+from\s+tenants")
     bad: list[tuple[str, int, str]] = []
     for name, path in mods.items():
-        if name != "app.db.testsupport" and not name.startswith("tests."):
+        rel = str(path.relative_to(ROOT))
+        is_target = name == "app.db.testsupport" or rel.startswith("core/tests/") or rel.startswith("scripts/")
+        if not is_target:
             continue
         text = path.read_text(encoding="utf-8")
         tree = ast.parse(text)
@@ -510,9 +513,8 @@ def _s20_violations(mods: dict[str, Path]) -> list[tuple[str, int, str]]:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "delete_tenant_full":
                 allowed.append((node.lineno, node.end_lineno or node.lineno))
         for i, line in enumerate(text.splitlines(), start=1):
-            if "DELETE FROM tenants" in line and not any(lo <= i <= hi for lo, hi in allowed):
-                bad.append((str(path.relative_to(ROOT)), i,
-                            "'DELETE FROM tenants' outside delete_tenant_full (H74)"))
+            if _s20_re.search(line) and not any(lo <= i <= hi for lo, hi in allowed):
+                bad.append((rel, i, "'DELETE FROM tenants' outside delete_tenant_full (H74)"))
     return bad
 
 
@@ -1293,7 +1295,7 @@ def main() -> int:
                 _err("S19", str(path.relative_to(ROOT)), 0, detail)
 
     # ---- S20 (P2.4, H74): single tenant-cleanup authority --------------------
-    s20_mods = {**mods, **_test_module_files()}
+    s20_mods = {**mods, **_test_module_files(), **_script_module_files()}
     for rel, lineno, detail in _s20_violations(s20_mods):
         _err("S20", rel, lineno, detail)
 

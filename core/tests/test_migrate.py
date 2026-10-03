@@ -31,6 +31,12 @@ _MIGTEST_DSN = f"postgresql://p07_migration:p07_migration_pw@127.0.0.1:5432/{_MI
 _REAL_MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 
 
+def _migration_names(migrations_dir: Path) -> list[str]:
+    """F-P2-09: the expected applied list is DERIVED from the migrations/ folder
+    (sorted), never hardcoded - so it stays correct as 0012, 0013, ... are added."""
+    return sorted(p.name[:-4] for p in migrations_dir.glob("*.sql"))
+
+
 def _psql_superuser(*args: str) -> None:
     subprocess.run(["sudo", "-u", "postgres", "psql", *args], check=True, capture_output=True)
 
@@ -67,11 +73,12 @@ def _applied_versions() -> list[tuple[str, str]]:
 
 
 def test_first_run_applies_both_migrations_in_order(clean_migtest_db, migrations_dir):
+    expected = _migration_names(migrations_dir)
     applied = run_migrations(_MIGTEST_DSN, migrations_dir)
-    assert applied == ["0001_baseline", "0002_p0_api"]
+    assert applied == expected
 
     recorded = _applied_versions()
-    assert [v for v, _ in recorded] == ["0001_baseline", "0002_p0_api"]
+    assert [v for v, _ in recorded] == expected
 
     # Real, independent proof the schema actually landed - not just that
     # schema_migrations says so: query a table 0001 creates and a function
@@ -90,11 +97,12 @@ def test_adopt_existing_schema_records_without_rerunning_sql(clean_migtest_db, m
     # "applied by hand", outside any migration runner
     db_testsupport.exec_sql_autocommit(_MIGTEST_DSN, baseline_sql)
 
+    expected_rest = _migration_names(migrations_dir)[1:]  # 0001 adopted, the rest applied
     applied = run_migrations(_MIGTEST_DSN, migrations_dir, adopt_existing_schema_version="0001_baseline")
-    assert applied == ["0002_p0_api"], "0001 must be ADOPTED (recorded, not re-run), only 0002 actually runs"
+    assert applied == expected_rest, "0001 must be ADOPTED (recorded, not re-run)"
 
     recorded = dict(_applied_versions())
-    assert set(recorded) == {"0001_baseline", "0002_p0_api"}
+    assert set(recorded) == set(_migration_names(migrations_dir))
     real_checksum = _sha256_of(migrations_dir / "0001_baseline.sql")
     assert recorded["0001_baseline"] == real_checksum, (
         "the adopted row must carry 0001's REAL checksum, so a later edit to "
@@ -126,15 +134,16 @@ def _sha256_of(path: Path) -> str:
 
 
 def test_second_run_is_a_noop(clean_migtest_db, migrations_dir):
+    expected = _migration_names(migrations_dir)
     first = run_migrations(_MIGTEST_DSN, migrations_dir)
-    assert first == ["0001_baseline", "0002_p0_api"]
+    assert first == expected
 
     second = run_migrations(_MIGTEST_DSN, migrations_dir)
     assert second == [], "re-running against an up-to-date database must be a real no-op"
 
-    # Still exactly two recorded rows - nothing re-applied, nothing duplicated.
+    # Still exactly the derived number of rows - nothing re-applied, nothing duplicated.
     recorded = _applied_versions()
-    assert len(recorded) == 2
+    assert len(recorded) == len(expected)
 
 
 def test_tampering_with_an_applied_migration_is_rejected(clean_migtest_db, migrations_dir):
@@ -208,7 +217,8 @@ def test_cli_migrate_subcommand_adopt_existing_schema(clean_migtest_db, migratio
     assert rc == 0
     out = capsys.readouterr()
     assert "adopting" in out.err
-    assert out.out.strip() == "applied: 0002_p0_api", "only 0002 should show as actually applied this run"
+    expected_rest = " ".join(_migration_names(migrations_dir)[1:])
+    assert out.out.strip() == f"applied: {expected_rest}", "only the non-adopted migrations should show"
 
     recorded = dict(_applied_versions())
-    assert set(recorded) == {"0001_baseline", "0002_p0_api"}
+    assert set(recorded) == set(_migration_names(migrations_dir))

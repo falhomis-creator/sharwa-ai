@@ -190,6 +190,22 @@ dispatch_oldest_pending_seconds = Gauge(
     registry=registry,
 )
 
+# P3.1 (F-P1-12): per-message_class depth/age, fed by app.outbox_stats() - the
+# service outbox is watched separately from marketing (H82).
+outbox_depth = Gauge(
+    "outbox_depth",
+    "Outbox depth (pending + sending), by message_class.",
+    labelnames=["class"],
+    registry=registry,
+)
+
+outbox_oldest_pending_seconds = Gauge(
+    "outbox_oldest_pending_seconds",
+    "Age in seconds of the oldest pending outbox row, by message_class.",
+    labelnames=["class"],
+    registry=registry,
+)
+
 evt_processed_total = Counter(
     "evt_processed_total",
     "evt:{shard} events processed, by type and outcome.",

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import psycopg
+from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 
@@ -192,9 +193,18 @@ def mark_turn_processed(
     )
 
 
-def claim_outbox(conn: psycopg.Connection, *, limit: int, lease_s: int) -> list[OutboxRow]:
-    """app.claim_outbox (SECURITY DEFINER, sharwa_system)."""
-    rows = conn.execute("SELECT * FROM app.claim_outbox(%s, %s)", (limit, lease_s)).fetchall()
+def claim_outbox(
+    conn: psycopg.Connection, *, limit: int, lease_s: int, marketing_limit: int = 4,
+) -> list[OutboxRow]:
+    """app.claim_outbox (SECURITY DEFINER, sharwa_system). F-P1-12: typed params
+    (integer/interval) and by-NAME columns - never SELECT * by position."""
+    rows = conn.execute(
+        "SELECT id, tenant_id, conversation_id, channel_account_id, idempotency_key, "
+        "origin, message_class, expected_epoch, to_wa_id, payload, attempts, status "
+        "FROM app.claim_outbox(%s::integer, make_interval(secs => %s), %s::integer)",
+        (limit, lease_s, marketing_limit),
+        row_factory=dict_row,
+    ).fetchall()
     return [_outbox_from_row(r) for r in rows]
 
 
@@ -205,11 +215,15 @@ def claim_due_turns(conn: psycopg.Connection, *, limit: int) -> list[tuple[uuid.
     return [(r[0], r[1]) for r in rows]
 
 
-def _outbox_from_row(row: tuple[Any, ...]) -> OutboxRow:
+def _outbox_from_row(row: dict[str, Any]) -> OutboxRow:
+    # F-P1-12: columns are read BY NAME (dict_row), never by position - a future
+    # ALTER TABLE that adds a column can no longer silently shift `attempts`.
     return OutboxRow(
-        id=row[0], tenant_id=row[1], conversation_id=row[2], channel_account_id=row[3],
-        idempotency_key=row[4], origin=row[5], message_class=row[6],
-        expected_epoch=row[7], to_wa_id=row[8], payload=row[9], attempts=row[10],
+        id=row["id"], tenant_id=row["tenant_id"], conversation_id=row["conversation_id"],
+        channel_account_id=row["channel_account_id"], idempotency_key=row["idempotency_key"],
+        origin=row["origin"], message_class=row["message_class"],
+        expected_epoch=row["expected_epoch"], to_wa_id=row["to_wa_id"],
+        payload=row["payload"], attempts=int(row["attempts"]),
     )
 
 
@@ -365,14 +379,11 @@ def requeue_with_backoff(
     )
 
 
-def outbox_stats(conn: psycopg.Connection) -> tuple[int, float]:
-    """(depth, oldest_pending_seconds) of the outbox (pending + sending)."""
-    row = conn.execute(
-        "SELECT count(*), COALESCE(EXTRACT(EPOCH FROM (now() - min(next_attempt_at))), 0) "
-        "FROM outbox WHERE status IN ('pending', 'sending')",
-    ).fetchone()
-    assert row is not None
-    return int(row[0]), float(row[1])
+def outbox_stats(conn: psycopg.Connection) -> list[tuple[str, int, float]]:
+    """Per-message_class (depth, oldest_pending_seconds) via app.outbox_stats()
+    (SECURITY DEFINER - the system role has no direct SELECT on outbox). F-P1-12."""
+    rows = conn.execute("SELECT * FROM app.outbox_stats()").fetchall()
+    return [(r[0], int(r[1]), float(r[2])) for r in rows]
 
 
 def insert_outbound_message(

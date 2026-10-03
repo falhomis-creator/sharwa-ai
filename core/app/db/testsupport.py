@@ -495,6 +495,65 @@ def seed_tenant_with_rows(dsn: str, *, tenant_id: uuid.UUID) -> None:
         )
 
 
+def seed_conversation(
+    dsn: str, *, tenant_id: uuid.UUID, channel_id: uuid.UUID, customer_id: uuid.UUID,
+    bot_status: str = "active", epoch: int = 0,
+) -> uuid.UUID:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "INSERT INTO conversations (tenant_id, channel_account_id, customer_id, bot_status, epoch) "
+            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+            (tenant_id, channel_id, customer_id, bot_status, epoch),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("INSERT ... RETURNING id produced no row")
+    return row[0]
+
+
+def seed_outbox_row(
+    dsn: str, *, tenant_id: uuid.UUID, channel_id: uuid.UUID,
+    conversation_id: uuid.UUID | None, origin: str, message_class: str, to_wa_id: str,
+    expected_epoch: int | None = None, status: str = "pending", payload: dict | None = None,
+) -> uuid.UUID:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "INSERT INTO outbox (tenant_id, conversation_id, channel_account_id, "
+            "idempotency_key, origin, message_class, expected_epoch, to_wa_id, payload, status) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            (
+                tenant_id, conversation_id, channel_id, f"dispatch-{uuid.uuid4()}",
+                origin, message_class, expected_epoch, to_wa_id, Jsonb(payload or {}), status,
+            ),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("INSERT ... RETURNING id produced no row")
+    return row[0]
+
+
+def seed_suppression(
+    dsn: str, *, tenant_id: uuid.UUID, customer_id: uuid.UUID, scope: str,
+) -> None:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO suppressions (tenant_id, customer_id, scope) VALUES (%s, %s, %s)",
+            (tenant_id, customer_id, scope),
+        )
+
+
+def fetch_conversation_bot_status(dsn: str, conversation_id: uuid.UUID) -> str | None:
+    with psycopg.connect(dsn) as conn:
+        row = conn.execute(
+            "SELECT bot_status FROM conversations WHERE id = %s", (conversation_id,)
+        ).fetchone()
+    return None if row is None else row[0]
+
+
+def fetch_outbox_status(dsn: str, outbox_id: uuid.UUID) -> str | None:
+    with psycopg.connect(dsn) as conn:
+        row = conn.execute("SELECT status FROM outbox WHERE id = %s", (outbox_id,)).fetchone()
+    return None if row is None else row[0]
+
+
 def count_rows_for_tenant(dsn: str, *, table: str, tenant_id: uuid.UUID) -> int:
     """Count `tenant_id = %s` rows on one of the six cleanup-test tables (a
     CLOSED allowlist - the same whitelist pattern as INBOX_EVENT_ALLOWED_KEYS)."""
@@ -531,9 +590,14 @@ __all__: Sequence[str] = (
     "fetch_audit_log_by_action",
     "fetch_channel_account_row",
     "fetch_audit_log_by_tenant",
+    "fetch_conversation_bot_status",
+    "fetch_outbox_status",
     "fetch_schema_migration_checksum",
     "fetch_schema_migrations",
     "fetch_tenant_row",
+    "seed_conversation",
+    "seed_outbox_row",
+    "seed_suppression",
     "function_exists",
     "insert_channel_account",
     "insert_idempotency_record",
