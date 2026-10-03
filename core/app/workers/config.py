@@ -350,6 +350,7 @@ class WorkerSettings:
     send_policy_utility_gap: tuple[int, int] = (8, 20)
     send_policy_throttle_cap_factor: float = 0.5
     send_policy_gap_factor: float = 2.0
+    send_policy_throttle_cooldown_h: int = 24
     send_policy_marketing_per_24h: int = 1
     send_policy_marketing_per_7d: int = 2
     send_policy_utility_per_24h: int = 3
@@ -463,8 +464,14 @@ class WorkerSettings:
             raise ConfigError("marketing gap min must be >= 10 (Baileys conservative)")
         if min(sp_marketing_24h, sp_marketing_7d, sp_utility_24h) < 1:
             raise ConfigError("per-customer caps must be >= 1")
-        _hhmm(_optional("SEND_POLICY_QUIET_START", "22:00"))
-        _hhmm(_optional("SEND_POLICY_QUIET_END", "09:00"))
+        # N-4 / P3.1 §1.5: equal quiet start/end means "quiet forever" - refuse.
+        quiet_start = _hhmm(_optional("SEND_POLICY_QUIET_START", "22:00"))
+        quiet_end = _hhmm(_optional("SEND_POLICY_QUIET_END", "09:00"))
+        if quiet_start == quiet_end:
+            raise ConfigError(
+                "SEND_POLICY_QUIET_START must differ from SEND_POLICY_QUIET_END "
+                "(equal means a permanent quiet window)"
+            )
 
         return WorkerSettings(
             db=db,
@@ -583,6 +590,7 @@ class WorkerSettings:
             send_policy_utility_gap=sp_utility_gap,
             send_policy_throttle_cap_factor=_float("SEND_POLICY_THROTTLE_CAP_FACTOR", 0.5),
             send_policy_gap_factor=_float("SEND_POLICY_GAP_FACTOR", 2.0),
+            send_policy_throttle_cooldown_h=_int("SEND_POLICY_THROTTLE_COOLDOWN_H", 24),
             send_policy_marketing_per_24h=sp_marketing_24h,
             send_policy_marketing_per_7d=sp_marketing_7d,
             send_policy_utility_per_24h=sp_utility_24h,

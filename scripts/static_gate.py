@@ -502,7 +502,13 @@ def _s20_violations(mods: dict[str, Path]) -> list[tuple[str, int, str]]:
     _s20_re = re.compile(r"(?i)delete\s+from\s+tenants")
     bad: list[tuple[str, int, str]] = []
     for name, path in mods.items():
-        rel = str(path.relative_to(ROOT))
+        # F-P3-14: as_posix() so the path prefix match is OS-independent
+        # (Windows' `\\` separator must not silently change the gate's scope).
+        rel = path.relative_to(ROOT).as_posix()
+        # F-P3-14: this file documents + defines the S20 regex itself, so it must
+        # never be scanned (it was reporting its own docstring as a violation).
+        if rel == "scripts/static_gate.py":
+            continue
         is_target = name == "app.db.testsupport" or rel.startswith("core/tests/") or rel.startswith("scripts/")
         if not is_target:
             continue

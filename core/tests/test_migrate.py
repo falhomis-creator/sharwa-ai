@@ -217,7 +217,9 @@ def test_cli_migrate_subcommand_adopt_existing_schema(clean_migtest_db, migratio
     assert rc == 0
     out = capsys.readouterr()
     assert "adopting" in out.err
-    expected_rest = " ".join(_migration_names(migrations_dir)[1:])
+    # F-P3-15: the CLI prints `applied: a, b, c` (", ".join), not a space-separated
+    # list. Derive the expectation from the same join the CLI uses.
+    expected_rest = ", ".join(_migration_names(migrations_dir)[1:])
     assert out.out.strip() == f"applied: {expected_rest}", "only the non-adopted migrations should show"
 
     recorded = dict(_applied_versions())

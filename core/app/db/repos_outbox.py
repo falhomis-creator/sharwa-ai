@@ -198,13 +198,15 @@ def claim_outbox(
 ) -> list[OutboxRow]:
     """app.claim_outbox (SECURITY DEFINER, sharwa_system). F-P1-12: typed params
     (integer/interval) and by-NAME columns - never SELECT * by position."""
-    rows = conn.execute(
-        "SELECT id, tenant_id, conversation_id, channel_account_id, idempotency_key, "
-        "origin, message_class, expected_epoch, to_wa_id, payload, attempts, status "
-        "FROM app.claim_outbox(%s::integer, make_interval(secs => %s), %s::integer)",
-        (limit, lease_s, marketing_limit),
-        row_factory=dict_row,
-    ).fetchall()
+    # F-P3-11: psycopg 3 Connection.execute has no row_factory kwarg - a dict
+    # row factory must be attached to a cursor.
+    with conn.cursor(row_factory=dict_row) as cur:
+        rows = cur.execute(
+            "SELECT id, tenant_id, conversation_id, channel_account_id, idempotency_key, "
+            "origin, message_class, expected_epoch, to_wa_id, payload, attempts, status "
+            "FROM app.claim_outbox(%s::integer, make_interval(secs => %s), %s::integer)",
+            (limit, lease_s, marketing_limit),
+        ).fetchall()
     return [_outbox_from_row(r) for r in rows]
 
 

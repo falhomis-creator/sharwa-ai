@@ -23,6 +23,13 @@ CORE = ROOT / "core"
 
 _REQUIRED = ("CORE_DATABASE_URL", "CORE_SYSTEM_DATABASE_URL", "CORE_MIGRATION_DATABASE_URL")
 
+# N-5: the db-marked suite includes Redis-dependent tests. It needs a Redis
+# instance on 127.0.0.1:6390 with password `test-redis-pw` (the test container's
+# docker-compose.test.yml). Without it a chunk of the suite fails, not the code.
+_REDIS_NOTE = (
+    "the db suite also needs Redis on 127.0.0.1:6390 with password 'test-redis-pw'"
+)
+
 
 def _last_line(out: str) -> str:
     lines = [l for l in out.splitlines() if l.strip()]
@@ -33,6 +40,7 @@ def main() -> int:
     for name in _REQUIRED:
         if not os.environ.get(name):
             print(f"DB SUITE: NOT RUN (missing {name})", file=sys.stderr)
+            print(_REDIS_NOTE, file=sys.stderr)
             return 2
 
     try:
@@ -40,6 +48,7 @@ def main() -> int:
             conn.execute("SELECT 1")
     except Exception as exc:  # noqa: BLE001 - the reason is printed, never a fake number
         print(f"DB SUITE: NOT RUN (database unreachable: {exc})", file=sys.stderr)
+        print(_REDIS_NOTE, file=sys.stderr)
         return 2
 
     results: list[tuple[int, str]] = []

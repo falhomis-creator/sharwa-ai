@@ -560,10 +560,48 @@ def seed_outbox_row(
 def seed_suppression(
     dsn: str, *, tenant_id: uuid.UUID, customer_id: uuid.UUID, scope: str,
 ) -> None:
+    # F-P3-13: `reason` is NOT NULL on suppressions - the seed must supply it.
     with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute(
-            "INSERT INTO suppressions (tenant_id, customer_id, scope) VALUES (%s, %s, %s)",
+            "INSERT INTO suppressions (tenant_id, customer_id, scope, reason) "
+            "VALUES (%s, %s, %s, 'test')",
             (tenant_id, customer_id, scope),
+        )
+
+
+def seed_number_health(
+    dsn: str, *, tenant_id: uuid.UUID, channel_id: uuid.UUID,
+    daily_cap: int = 50, sent_today: int = 0, state: str = "healthy",
+    utility_daily_cap: int = 100, utility_sent_today: int = 0,
+    day: str | None = None,
+) -> None:
+    """Insert/refresh a number_health row for the send-slot (P3.1) tests.
+    `day` defaults to the DB's current_date; inject it to match an injected p_now
+    (otherwise the first reservation triggers a day-rollover reset)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO number_health "
+            "(channel_account_id, tenant_id, daily_cap, sent_today, state, "
+            " utility_daily_cap, utility_sent_today, day) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, COALESCE(%s::date, current_date)) "
+            "ON CONFLICT (channel_account_id) DO UPDATE SET "
+            " daily_cap = EXCLUDED.daily_cap, sent_today = EXCLUDED.sent_today, "
+            " state = EXCLUDED.state, utility_daily_cap = EXCLUDED.utility_daily_cap, "
+            " utility_sent_today = EXCLUDED.utility_sent_today, day = EXCLUDED.day",
+            (channel_id, tenant_id, daily_cap, sent_today, state, utility_daily_cap, utility_sent_today, day),
+        )
+
+
+def insert_consent(
+    dsn: str, *, tenant_id: uuid.UUID, customer_id: uuid.UUID, scope: str,
+    granted: bool = True, source: str = "test",
+) -> None:
+    """Insert a consents row (latest-wins read: the seed inserts a fresh row)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO consents (tenant_id, customer_id, scope, granted, source) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (tenant_id, customer_id, scope, granted, source),
         )
 
 
@@ -611,7 +649,9 @@ __all__: Sequence[str] = (
     "force_expire_held_holds",
     "held_wa_ids",
     "insert_customer",
+    "insert_consent",
     "insert_test_waitlist_entry",
+    "seed_number_health",
     "delete_tenant_full",
     "exec_sql_autocommit",
     "fetch_audit_log_by_action",

@@ -120,3 +120,31 @@ def test_automation_failure_does_not_pause_conversation(tenant_ctx):
     assert db_testsupport.fetch_outbox_status(dsn, oid) == "failed"
     # The conversation must still be active (not paused by an automation failure).
     assert db_testsupport.fetch_conversation_bot_status(dsn, conv) == "active"
+
+
+def test_dispatch_sends_real_row_of_every_origin(tenant_ctx):
+    # F-P1-12 acceptance (P3.1 §1.2-4): dispatch_cycle sends a REAL row of each
+    # origin (bot / human / automation) - status='sent' for each. The gateway
+    # client is faked; the database is real.
+    dsn, tid, chid, cid = tenant_ctx
+    conv = db_testsupport.seed_conversation(
+        dsn, tenant_id=tid, channel_id=chid, customer_id=cid, bot_status="active", epoch=0,
+    )
+    rows = {
+        "bot": db_testsupport.seed_outbox_row(
+            dsn, tenant_id=tid, channel_id=chid, conversation_id=conv,
+            origin="bot", message_class="service", to_wa_id="967700000001",
+            expected_epoch=0, payload={"text": "bot reply"},
+        ),
+        "human": db_testsupport.seed_outbox_row(
+            dsn, tenant_id=tid, channel_id=chid, conversation_id=conv,
+            origin="human", message_class="service", to_wa_id="967700000001", payload={"text": "staff reply"},
+        ),
+        "automation": db_testsupport.seed_outbox_row(
+            dsn, tenant_id=tid, channel_id=chid, conversation_id=conv,
+            origin="automation", message_class="utility", to_wa_id="967700000001", payload={"text": "notice"},
+        ),
+    }
+    dispatch.dispatch_cycle(_settings(), _FakeClient(202))
+    for origin, oid in rows.items():
+        assert db_testsupport.fetch_outbox_status(dsn, oid) == "sent", f"{origin} row not sent"
