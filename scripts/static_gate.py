@@ -430,6 +430,54 @@ def _console_routes(mods: dict[str, Path]) -> set[tuple[str, str, str]]:
     return routes
 
 
+def _defines_router(path: Path) -> bool:
+    """True when a module has a top-level `router = ...` assignment."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name) and t.id == "router":
+                    return True
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == "router":
+            return True
+    return False
+
+
+def _served_console_paths() -> set[tuple[str, str]] | None:
+    """(method, path) actually served by the BUILT app (S13 fix). Builds
+    create_app() and reads app.openapi()["paths"], so a router that is declared
+    in app/api/** but never mounted disappears from this set - the exact defect
+    S13 used to miss. Returns None (skip) when the app cannot be built for want
+    of env vars; the skip is recorded explicitly, never a silent pass."""
+    try:
+        import os as _os
+        # create_app() only loads Settings and assembles routers; it never
+        # connects. Dummy env values satisfy Settings.load()'s required vars.
+        for k, v in {
+            "ENV": "test",
+            "CORE_DATABASE_URL": "postgresql://gate",
+            "CORE_SYSTEM_DATABASE_URL": "postgresql://gate",
+            "JWT_ISSUER": "gate", "JWT_AUDIENCE": "gate", "JWT_PUBLIC_KEY_PEM": "gate",
+            "REDIS_CACHE_HOST": "gate", "REDIS_CACHE_PORT": "6379", "REDIS_CACHE_PASSWORD": "gate",
+            "GATEWAY_BASE_URL": "http://gate", "GATEWAY_API_KEY": "gate",
+            "METRICS_TOKEN": "gate", "SSO_LOGIN_URL": "http://gate",
+            "PLATFORM_WEBHOOK_SECRET": "gate",
+        }.items():
+            _os.environ.setdefault(k, v)
+        sys.path.insert(0, str(ROOT / "core"))
+        from app.main import create_app  # noqa: PLC0415 - deferred: needs env + core on path
+        app = create_app()
+        served: set[tuple[str, str]] = set()
+        for path, methods in (app.openapi().get("paths") or {}).items():
+            for m in methods:
+                if m.lower() in ("get", "post", "put", "delete", "patch"):
+                    served.add((m.upper(), path))
+        return served
+    except Exception as exc:  # noqa: BLE001 - the skip is recorded below
+        _note(f"S13 skipped: could not build app to read OpenAPI ({type(exc).__name__}: {exc})")
+        return None
+
+
 _violations: list[str] = []
 _notes: list[str] = []  # informational (S1-c re-exports) - never cause a failure
 
@@ -744,17 +792,23 @@ def _s17c_violations(tree: ast.Module) -> list[str]:
             fname = node.func.id
         elif isinstance(node.func, ast.Attribute):
             fname = node.func.attr
-        if fname != "insert_address_resolution":
+        if fname not in ("insert_address_resolution", "persist_decision"):
             continue
         kwargs = {kw.arg: kw.value for kw in node.keywords if kw.arg is not None}
         decision = kwargs.get("decision")
+        loc = kwargs.get("location")
+        loc_is_none = isinstance(loc, ast.Constant) and loc.value is None
         if isinstance(decision, ast.Constant) and isinstance(decision.value, str):
             if decision.value not in _S17_DECISIONS:
                 bad.append(f"decision={decision.value!r} outside the closed 5-set")
             if decision.value == "accepted":
-                loc = kwargs.get("location")
-                if loc is None or (isinstance(loc, ast.Constant) and loc.value is None):
+                if loc is None or loc_is_none:
                     bad.append("decision='accepted' passed location=None (H64)")
+        else:
+            # computed decision: a literal None location is never allowed on this
+            # write path (an accepted row must always carry a point - F-P2-04).
+            if loc_is_none:
+                bad.append("location=None passed literally (H64 - accepted must carry a point)")
     return bad
 
 
@@ -1110,6 +1164,9 @@ def main() -> int:
                  f"WS event key '{key}' is not a REST field nor an envelope key (H58: one truth per field)")
 
     # ---- S13 (P1.8, H56): the frozen contract is a rule, not an intention -----
+    # P2.3 fix: compare the lock against the OpenAPI doc of the BUILT app
+    # (create_app().openapi()["paths"]) instead of the @router decorators in
+    # source - so an unmounted router becomes a violation of the same tool.
     lock_path = ROOT / "docs" / "console_api.lock.json"
     if not lock_path.exists():
         _err("S13", "docs/console_api.lock.json", 0,
@@ -1120,13 +1177,35 @@ def main() -> int:
             (r["method"], r["path"], r["permission"])
             for r in _json.loads(lock_path.read_text(encoding="utf-8"))["routes"]
         }
-        actual_routes = _console_routes(mods)
-        for method, path, perm in sorted(locked_routes - actual_routes):
-            _err("S13", "docs/console_api.lock.json", 0,
-                 f"{method} {path} ({perm}) is in the contract but not in app/api/**")
-        for method, path, perm in sorted(actual_routes - locked_routes):
-            _err("S13", "docs/console_api.lock.json", 0,
-                 f"{method} {path} ({perm}) is in app/api/** but not frozen in the contract - update the contract")
+        served = _served_console_paths()
+        if served is not None:
+            for method, path, perm in sorted(locked_routes):
+                if (method, path) not in served:
+                    _err("S13", "docs/console_api.lock.json", 0,
+                         f"{method} {path} ({perm}) is in the contract but not served by the built app")
+            for method, path, perm in sorted(_console_routes(mods)):
+                if (method, path) in served and (method, path, perm) not in locked_routes:
+                    _err("S13", "docs/console_api.lock.json", 0,
+                         f"{method} {path} ({perm}) is served but not frozen in the contract - update the contract")
+
+    # ---- S18 (P2.3): every app/api/** router must be mounted in app.main ------
+    # F-P2-03 guard: a module that defines `router` but is never imported AND
+    # passed to include_router in main.py is an unmounted router (=> 404s).
+    main_path = mods.get("app.main")
+    if main_path is not None:
+        main_tree = ast.parse(main_path.read_text(encoding="utf-8"))
+        aliases = _import_aliases(main_tree)
+        mounted = set()
+        for node in ast.walk(main_tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "include_router":
+                for arg in node.args:
+                    if isinstance(arg, ast.Name):
+                        mounted.add(arg.id)
+        for mod in sorted(m for m in mods if m.startswith("app.api.") and m != "app.api" and _defines_router(mods[m])):
+            target = f"{mod}.router"
+            if not any(a in mounted for a, t in aliases.items() if t == target):
+                _err("S18", str(mods[mod].relative_to(ROOT)), 0,
+                     f"'{mod}' defines `router` but it is not mounted in app.main (F-P2-03)")
 
     # ---- S14 (P2.1): a function must be able to return its promised type -----
     for mod, path in mods.items():
@@ -1177,7 +1256,11 @@ def main() -> int:
             _err("S17", str(path.relative_to(ROOT)), 0,
                  f"'{mod}' writes address_resolutions with {detail}")
     # d: geo_gazetteer writes (tenant_id NULL shared rows) belong in seed only.
+    # app.db.testsupport is the test-only sibling (not a runtime path) and seeds
+    # test fixtures; it is exempt from the "runtime never writes shared rows" rule.
     for mod, path in mods.items():
+        if mod == "app.db.testsupport":
+            continue
         if "INSERT INTO geo_gazetteer" in path.read_text(encoding="utf-8"):
             _err("S17", str(path.relative_to(ROOT)), 0,
                  f"'{mod}' writes geo_gazetteer (H68: shared rows are seeded by scripts/seed_gazetteer.py only)")

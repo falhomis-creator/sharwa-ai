@@ -297,11 +297,62 @@ def count_advisory_lock_holders(dsn: str, *, classid: int, objid: int) -> int:
     return count
 
 
+# --- geo_gazetteer / address_resolutions (P2.2 §1.2 db tests) ----------------
+
+
+def clean_geo(dsn: str) -> None:
+    """Reset the geo layer so each db test starts from a known state: every
+    address_resolutions row and every geo_gazetteer row (shared + tenant-scoped)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("DELETE FROM address_resolutions")
+        conn.execute("DELETE FROM geo_gazetteer")
+
+
+def seed_gazetteer_governorate(dsn: str, *, name_ar: str, name_norm: str, wkt: str) -> int:
+    """Insert one SHARED (tenant_id NULL) governorate row with a polygon and
+    return its id. The ONLY sanctioned way a test seeds shared reference data
+    (mirrors scripts/seed_gazetteer.py's role for production)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "INSERT INTO geo_gazetteer (tenant_id, level, name_ar, name_norm, geom) "
+            "VALUES (NULL, 'governorate', %s, %s, ST_GeomFromText(%s, 4326)) RETURNING id",
+            (name_ar, name_norm, wkt),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("INSERT ... RETURNING id produced no row")
+    return int(row[0])
+
+
+def seed_tenant_gazetteer(
+    dsn: str, *, tenant_id: uuid.UUID, level: str, name_ar: str, name_norm: str, wkt: str,
+) -> int:
+    """Insert one tenant-scoped gazetteer row (a tenant-learned landmark)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "INSERT INTO geo_gazetteer (tenant_id, level, name_ar, name_norm, geom) "
+            "VALUES (%s, %s, %s, %s, ST_GeomFromText(%s, 4326)) RETURNING id",
+            (tenant_id, level, name_ar, name_norm, wkt),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("INSERT ... RETURNING id produced no row")
+    return int(row[0])
+
+
+def count_gazetteer_rows_on_conn(conn: psycopg.Connection) -> int:
+    """Number of geo_gazetteer rows VISIBLE on this connection, under the RLS
+    policy it currently has set (shared + the current tenant's own rows)."""
+    row = conn.execute("SELECT count(*) FROM geo_gazetteer").fetchone()
+    assert row is not None
+    return int(row[0])
+
+
 __all__: Sequence[str] = (
     "channel_account_exists_by_session",
+    "clean_geo",
     "clean_kill_switches_and_audit",
     "count_advisory_lock_holders",
     "count_channel_accounts_on_conn",
+    "count_gazetteer_rows_on_conn",
     "count_tenants",
     "delete_tenant",
     "delete_tenant_and_its_audit",
@@ -318,6 +369,8 @@ __all__: Sequence[str] = (
     "insert_idempotency_record",
     "insert_tenant_returning_id",
     "reset_tenants_and_channels",
+    "seed_gazetteer_governorate",
     "seed_kill_switch",
+    "seed_tenant_gazetteer",
     "seed_two_tenants",
 )

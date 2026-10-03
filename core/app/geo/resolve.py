@@ -30,6 +30,11 @@ REASON_CODES = (
 # district or finer is "deliverable"; governorate alone is too coarse (H66).
 DELIVERABLE_LEVELS = frozenset({"district", "area", "neighborhood", "landmark"})
 
+# N2 (P2.2 audit): a gazetteer centroid is never as certain as a real pin - the
+# shape centre can be hundreds of metres from the door. Cap gazetteer-derived
+# confidence strictly below 1.0 so the difference stays visible in the data.
+GAZETTEER_MAX_CONFIDENCE = 0.99
+
 # Written defaults (overridable via ADDRESS_CONF_* in settings).
 DEFAULT_W_LEVEL = {
     "landmark": 1.00, "neighborhood": 0.95, "area": 0.90,
@@ -49,6 +54,10 @@ class AddressCandidate:
     parent_id: int | None
     match_kind: str                  # exact | synonym | prefix (no fuzzy this batch)
     tenant_scoped: bool
+    # F-P2-04: the gazetteer shape centroid, carried so a `gazetteer_centroid`
+    # acceptance has a real point to write (never `location=None`).
+    lat: float | None = None
+    lng: float | None = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +68,17 @@ class AddressDecision:
     gazetteer_id: int | None
     reason_code: str                 # closed list REASON_CODES
     candidates: tuple[str, ...] = () # gazetteer names verbatim, for disambiguate
+
+    def __post_init__(self) -> None:
+        # N2 (P2.2 audit): the closed lists are enforced by the dataclass itself,
+        # so a `reason_code` used as a metric label can never grow an unbounded
+        # cardinality by accident.
+        if self.decision not in DECISIONS:
+            raise ValueError(f"decision={self.decision!r} outside closed set {DECISIONS}")
+        if self.reason_code not in REASON_CODES:
+            raise ValueError(f"reason_code={self.reason_code!r} outside closed set {REASON_CODES}")
+        if self.source is not None and self.source not in SOURCES:
+            raise ValueError(f"source={self.source!r} outside closed set {SOURCES}")
 
 
 @dataclass(frozen=True)
@@ -126,7 +146,12 @@ def resolve_address(
     if n == 1:
         conf, c = scored[0]
         if conf >= cfg.accept_threshold:
-            return AddressDecision("accepted", conf, "gazetteer_centroid", c.gazetteer_id, "gazetteer_match")
+            # N2: cap gazetteer-derived confidence below 1.0 (a centroid is never
+            # as certain as a real pin; keep the difference visible in the data).
+            return AddressDecision(
+                "accepted", min(conf, GAZETTEER_MAX_CONFIDENCE),
+                "gazetteer_centroid", c.gazetteer_id, "gazetteer_match",
+            )
         return AddressDecision("confirm_with_customer", conf, None, c.gazetteer_id, "insufficient_confidence", (c.name_norm,))
 
     top = [c for _, c in scored[: cfg.max_candidates]]

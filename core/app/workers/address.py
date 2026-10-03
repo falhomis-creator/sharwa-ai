@@ -44,6 +44,7 @@ def build_candidates(
                 gazetteer_id=gid, level=row["level"], name_norm=row["name_norm"],
                 parent_id=row["parent_id"], match_kind=match_kind,
                 tenant_scoped=bool(row["tenant_scoped"]),
+                lat=row.get("lat"), lng=row.get("lng"),
             ))
     return candidates
 
@@ -129,9 +130,32 @@ def resolve_and_persist(
         settings, candidates=candidates, pin=pin, pin_in_coverage=pin_in_coverage,
         model_has_coords=geo_normalize.detect_model_coords(query),
     )
+    location = _location_for(decision, rows, pin)
     persist_decision(
         conn, tenant_id=tenant_id, conversation_id=conversation_id,
         input={"query": query}, candidates=rows, decision=decision,
-        location=pin if decision.source == "pin" else None,
+        location=location,
     )
     return decision
+
+
+def _location_for(
+    decision: geo_resolve.AddressDecision,
+    rows: list[dict[str, Any]],
+    pin: tuple[float, float] | None,
+) -> tuple[float, float] | None:
+    """The (lat, lng) to write for an accepted decision (F-P2-04). A pin is the
+    customer's own point; a `gazetteer_centroid` acceptance carries the matched
+    row's computed centroid - never None, so the `accepted ⇒ location IS NOT
+    NULL` CHECK is satisfied from either source."""
+    if decision.decision != "accepted":
+        return None
+    if decision.source == "pin":
+        return pin
+    gid = decision.gazetteer_id
+    if gid is None:
+        return None
+    for row in rows:
+        if int(row.get("gazetteer_id")) == gid and row.get("lat") is not None and row.get("lng") is not None:
+            return (float(row["lat"]), float(row["lng"]))
+    return None

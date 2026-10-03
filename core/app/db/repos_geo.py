@@ -19,13 +19,25 @@ def search_gazetteer(
 ) -> list[dict[str, Any]]:
     """Exact then prefix lookup over shared (tenant_id IS NULL) + tenant-scoped
     rows; the gazetteer_read RLS policy exposes exactly those two sets. Returns
-    rows with a `tenant_scoped` flag the decision layer never uses for ranking."""
+    rows with a `tenant_scoped` flag the decision layer never uses for ranking,
+    plus the shape centroid as a real (lat, lng) point (F-P2-04: a gazetteer
+    match must be able to carry a validated point, never `location=None`).
+
+    N1 (P2.2 audit): the `ORDER BY sort_key, id` makes the candidate list
+    deterministic - exact matches before prefix matches, then by id - so two
+    equal-confidence candidates yield the same `disambiguate` list every run."""
     rows = conn.execute(
-        "SELECT id, level, name_norm, parent_id, (tenant_id IS NOT NULL) "
-        "FROM geo_gazetteer WHERE name_norm = %s "
-        "UNION ALL "
-        "SELECT id, level, name_norm, parent_id, (tenant_id IS NOT NULL) "
-        "FROM geo_gazetteer WHERE name_norm LIKE %s AND name_norm <> %s "
+        "SELECT id, level, name_norm, parent_id, tenant_scoped, lat, lng "
+        "FROM ("
+        "  SELECT id, level, name_norm, parent_id, (tenant_id IS NOT NULL) AS tenant_scoped, "
+        "         ST_Y(ST_Centroid(geom)) AS lat, ST_X(ST_Centroid(geom)) AS lng, 0 AS sort_key "
+        "  FROM geo_gazetteer WHERE name_norm = %s "
+        "  UNION ALL "
+        "  SELECT id, level, name_norm, parent_id, (tenant_id IS NOT NULL), "
+        "         ST_Y(ST_Centroid(geom)), ST_X(ST_Centroid(geom)), 1 "
+        "  FROM geo_gazetteer WHERE name_norm LIKE %s AND name_norm <> %s"
+        ") q "
+        "ORDER BY q.sort_key, q.id "
         "LIMIT %s",
         (name_norm, name_norm + "%", name_norm, limit),
     ).fetchall()
@@ -33,6 +45,7 @@ def search_gazetteer(
         {
             "gazetteer_id": int(r[0]), "level": r[1], "name_norm": r[2],
             "parent_id": r[3], "tenant_scoped": bool(r[4]),
+            "lat": float(r[5]), "lng": float(r[6]),
         }
         for r in rows
     ]
@@ -67,7 +80,10 @@ def insert_address_resolution(
     geom = None
     if location is not None:
         lat, lng = location
-        geom = f"SRID=4326;POINT({lng} {lat})"
+        # F-P2-05: plain OGC WKT (no SRID= prefix) - ST_GeomFromText expects OGC
+        # WKT and would otherwise emit `WARNING: OGC WKT expected` for the EWKT
+        # `SRID=4326;POINT(...)` form. The SRID is supplied explicitly (4326).
+        geom = f"POINT({lng} {lat})"
     row = conn.execute(
         "INSERT INTO address_resolutions "
         "(tenant_id, conversation_id, input, candidates, decision, confidence, source, location, structured) "
