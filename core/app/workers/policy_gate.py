@@ -138,17 +138,21 @@ def gate(settings: WorkerSettings, row: repos_outbox.OutboxRow, *, now: datetime
                 except Exception:
                     quiet = False  # H80: the reservation itself fails closed on a bad tz
 
+        # F-P3-20: the row being gated never counts its OWN ledger reservation
+        # (a re-processed reserved row must not trip its own frequency cap).
+        # decide() still runs before the H85 ledger check so drop/defer reasons
+        # are re-evaluated on every re-process, by design.
         marketing_24h = repos_policy.count_class_handoffs(
             conn, tenant_id=row.tenant_id, customer_id=customer_id,
-            message_class="marketing", hours=24, now=now,
+            message_class="marketing", hours=24, now=now, exclude_outbox_id=row.id,
         ) if customer_id is not None else 0
         marketing_7d = repos_policy.count_class_handoffs(
             conn, tenant_id=row.tenant_id, customer_id=customer_id,
-            message_class="marketing", hours=7 * 24, now=now,
+            message_class="marketing", hours=7 * 24, now=now, exclude_outbox_id=row.id,
         ) if customer_id is not None else 0
         utility_24h = repos_policy.count_class_handoffs(
             conn, tenant_id=row.tenant_id, customer_id=customer_id,
-            message_class="utility", hours=24, now=now,
+            message_class="utility", hours=24, now=now, exclude_outbox_id=row.id,
         ) if customer_id is not None else 0
 
         inp = PolicyInput(

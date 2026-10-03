@@ -202,16 +202,26 @@ def last_inbound_at(
 def count_class_handoffs(
     conn: psycopg.Connection, *, tenant_id: uuid.UUID, customer_id: uuid.UUID,
     message_class: str, hours: int, now: datetime,
+    exclude_outbox_id: uuid.UUID | None = None,
 ) -> int:
     """Frequency caps (per customer): reserved + handed_off ledger rows in the
-    window (N-6: reserved also counts - a reserved slot is a delivery in flight)."""
-    row = conn.execute(
+    window (N-6: reserved also counts - a reserved slot is a delivery in flight).
+    F-P3-20: `exclude_outbox_id` removes the ROW BEING GATED from the count -
+    its own reservation is the delivery in question, not a prior one. Without
+    it a re-processed reserved row counts itself into the cap and is dropped
+    (marketing: frequency_cap_skip) or deferred (utility at cap-1) while its
+    ledger row stays 'reserved' forever."""
+    sql = (
         "SELECT count(*) FROM proactive_ledger "
         "WHERE tenant_id = %s AND customer_id = %s AND message_class = %s "
         "AND status IN ('reserved','handed_off') "
-        "AND reserved_at > %s - make_interval(hours => %s)",
-        (tenant_id, customer_id, message_class, now, hours),
-    ).fetchone()
+        "AND reserved_at > %s - make_interval(hours => %s)"
+    )
+    params: list[Any] = [tenant_id, customer_id, message_class, now, hours]
+    if exclude_outbox_id is not None:
+        sql += " AND outbox_id <> %s"
+        params.append(exclude_outbox_id)
+    row = conn.execute(sql, params).fetchone()
     return int(row[0]) if row is not None else 0
 
 

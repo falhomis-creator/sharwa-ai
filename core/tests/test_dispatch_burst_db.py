@@ -1,6 +1,10 @@
 """core/tests/test_dispatch_burst_db.py - F-P3-16: a policy defer must NOT consume
 a send attempt. Probed through the FULL dispatch_cycle (not gate() alone), with a
 faked gateway and time fast-forwarded between cycles (no sleep).
+
+F-P3-21: fast_forward_outbox parks every pending row on the SAME
+next_attempt_at, so claim order between tied rows is NOT deterministic - never
+assert an order here. Sends are compared as a SET (count + uniqueness).
 """
 from __future__ import annotations
 
@@ -62,9 +66,10 @@ def _seed_burst(dsn, tid, chid, n, utility_cap):
     return oids
 
 
-def _drain(dsn, tid, chid, oids, client):
+def _drain(dsn, tid, chid, oids, client, settings=None):
+    settings = _settings() if settings is None else settings
     for _ in range(len(oids) + 10):
-        dispatch.dispatch_cycle(_settings(), client)
+        dispatch.dispatch_cycle(settings, client)
         db_testsupport.fast_forward_outbox(dsn, tenant_id=tid)
         db_testsupport.fast_forward_number_health(dsn, channel_id=chid)
     return [db_testsupport.fetch_outbox_status(dsn, o) for o in oids]
@@ -96,8 +101,24 @@ def test_burst_no_failures_below_cap(burst_ctx, n):
     client = _FakeClient()
     statuses = _drain(dsn, tid, chid, oids, client)
     _assert_all_sent_and_none_failed(statuses)
-    # sent in claim order (oldest next_attempt_at first).
-    assert client.sent == [f"9677{i:07d}" for i in range(n)]
+    # F-P3-21: tied next_attempt_at => claim order is NOT deterministic. Compare
+    # as a SET: exactly n sends, no duplicates, the right recipients.
+    assert len(client.sent) == n, client.sent
+    assert len(set(client.sent)) == n, client.sent
+    assert set(client.sent) == {f"9677{i:07d}" for i in range(n)}
+
+
+def test_burst_production_batch20_all_sent(burst_ctx):
+    """F-P3-21: N=30 with the PRODUCTION batch (core_dispatch_batch=20) - every
+    row still ends 'sent' with failed=0 (the leftover 10 go on the next cycle)."""
+    dsn, tid, chid = burst_ctx
+    oids = _seed_burst(dsn, tid, chid, 30, utility_cap=100)
+    client = _FakeClient()
+    statuses = _drain(dsn, tid, chid, oids, client, settings=_settings(core_dispatch_batch=20))
+    _assert_all_sent_and_none_failed(statuses)
+    assert len(client.sent) == 30, client.sent
+    assert len(set(client.sent)) == 30, client.sent
+    assert set(client.sent) == {f"9677{i:07d}" for i in range(30)}
 
 
 def test_burst_above_cap_defers_never_fails(burst_ctx):
