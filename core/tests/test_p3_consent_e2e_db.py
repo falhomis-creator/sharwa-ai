@@ -54,6 +54,7 @@ def e2e(monkeypatch):
     tid = db_testsupport.insert_tenant_returning_id(
         dsn, platform_ref=platform_ref, name="P3.3 E2E Tenant",
     )
+    db_testsupport.enable_marketing(dsn, tenant_id=tid)  # P3.4: this TEST tenant is opted in (H100)
     chid = db_testsupport.insert_channel_account(
         dsn, tenant_id=tid, type_="whatsapp_baileys",
         session_id=f"sess-{uuid.uuid4()}", status="connected", engine="ai_core",
@@ -85,7 +86,7 @@ def _eligible_world(dsn, tid, chid, cid, conv):
     db_testsupport.seed_inbound_message(dsn, tenant_id=tid, conversation_id=conv, body="مرحبا")
 
 
-def _gate(dsn, tid, chid, conv, wa):
+def _gate(dsn, tid, chid, conv, wa, *, now=PNOW):
     oid = db_testsupport.seed_outbox_row(
         dsn, tenant_id=tid, channel_id=chid, conversation_id=conv,
         origin="automation", message_class="marketing", to_wa_id=wa,
@@ -98,7 +99,7 @@ def _gate(dsn, tid, chid, conv, wa):
         payload={"template": TID_TEST_MARKETING, "text": INJECTED_TEXT},
         attempts=0, created_at=PNOW,
     )
-    decision = policy_gate.gate(_gate_settings(), row, now=PNOW, gap_s=20)
+    decision = policy_gate.gate(_gate_settings(), row, now=now, gap_s=20)
     return decision, oid
 
 
@@ -213,8 +214,17 @@ def test_matrix_explicit_optin_sends_then_stop_suppresses_then_reoptin_sends(e2e
     db_testsupport.age_proactive_ledger(
         dsn, tenant_id=tid, reserved_at=PNOW - timedelta(hours=25),
     )
-    decision4, oid4 = _gate(dsn, tid, chid, conv, wa)
-    assert decision4.send is True
+    # The STOP above went through the REAL ingest, stamping an inbound message at
+    # the DB's now() - under the gate's injected older `now` that reads as "the
+    # customer is talking right now" (active_chat). Age it: the customer has been
+    # quiet for days, which is the scenario this step means to prove.
+    db_testsupport.age_inbound_messages(dsn, conversation_id=conv)
+    # The first reservation also set the number's spacing window (next_marketing_at
+    # = PNOW + gap); a gate at the SAME instant would defer `spacing` (H79). The
+    # injected clock simply moves forward 5 minutes - well inside the row's TTL
+    # and still > 24h after the aged ledger.
+    decision4, oid4 = _gate(dsn, tid, chid, conv, wa, now=PNOW + timedelta(minutes=5))
+    assert decision4.send is True, db_testsupport.fetch_outbox_policy_reason(dsn, oid4)
     with core_db.tenant_tx(tid) as conn:
         ledger4 = repos_policy.read_ledger_status(conn, outbox_id=oid4)
     assert ledger4 == "reserved"  # H85
@@ -229,6 +239,7 @@ def test_matrix_rls_same_wa_id_other_tenant_unaffected(e2e):
     other = db_testsupport.insert_tenant_returning_id(
         dsn, platform_ref=f"p33d-b-{uuid.uuid4()}", name="P3.3 E2E Tenant B",
     )
+    db_testsupport.enable_marketing(dsn, tenant_id=other)  # P3.4: B is opted in too (H100)
     try:
         chid_b = db_testsupport.insert_channel_account(
             dsn, tenant_id=other, type_="whatsapp_baileys",

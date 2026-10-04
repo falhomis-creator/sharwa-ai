@@ -103,6 +103,11 @@ def fetch_tenant_row(dsn: str, tenant_id: uuid.UUID) -> tuple[str, str, str, str
     return None if row is None else (row[0], row[1], row[2], row[3])
 
 
+def fetch_tenant_timezone(dsn: str, tenant_id: uuid.UUID) -> str:
+    with psycopg.connect(dsn) as conn:
+        return str(conn.execute("SELECT timezone FROM tenants WHERE id = %s", (tenant_id,)).fetchone()[0])
+
+
 def delete_tenant_full(dsn: str, tenant_id: uuid.UUID) -> None:
     """Full tenant cleanup in foreign-key order (children before parents).
 
@@ -123,6 +128,9 @@ def delete_tenant_full(dsn: str, tenant_id: uuid.UUID) -> None:
             "DELETE FROM campaign_recipients WHERE tenant_id = %s",
             "DELETE FROM consents WHERE tenant_id = %s",
             "DELETE FROM suppressions WHERE tenant_id = %s",
+            # P3.4 marketing activation + its append-only log (children of tenants).
+            "DELETE FROM marketing_activation_log WHERE tenant_id = %s",
+            "DELETE FROM marketing_activation WHERE tenant_id = %s",
             # stock_holds references waitlist_entries, so it MUST precede it
             # (F-P2-06: a tenant with both rows would otherwise hit the FK).
             "DELETE FROM stock_holds WHERE tenant_id = %s",
@@ -803,6 +811,100 @@ def age_proactive_ledger(dsn: str, *, tenant_id: uuid.UUID, reserved_at: datetim
         )
 
 
+def enable_marketing(dsn: str, *, tenant_id: uuid.UUID, cap: int = 5) -> None:
+    """P3.4 TEST SEEDING (S29-a exempts testsupport): enable a TEST tenant's
+    marketing by raw SQL, so db fixtures can reach the gate's marketing branch.
+    This is the ONLY non-CLI enable and it exists in test code alone (H100)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO marketing_activation "
+            "(tenant_id, enabled, canary_cap_per_day, enabled_by, enabled_at) "
+            "VALUES (%s, true, %s, 'test', clock_timestamp()) "
+            "ON CONFLICT (tenant_id) DO UPDATE SET enabled = true, "
+            "canary_cap_per_day = EXCLUDED.canary_cap_per_day",
+            (tenant_id, cap),
+        )
+
+
+def age_inbound_messages(dsn: str, *, conversation_id: uuid.UUID, age: timedelta | None = None) -> None:
+    """Move a conversation's inbound messages `age` (default 2 days) into the
+    past (clock_timestamp-based, no sleep). A test that ingests a REAL message
+    (e.g. STOP through RealtimeWorker._commit) stamps it at the DB's now(); the
+    gate under an INJECTED older `now` would then see 'the customer is talking
+    right now' (active_chat). Aging the message restores 'not talking now'."""
+    if age is None:
+        age = timedelta(days=2)
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE messages SET created_at = clock_timestamp() - %s "
+            "WHERE conversation_id = %s AND direction = 'in'",
+            (age, conversation_id),
+        )
+
+
+def clear_marketing_activation(dsn: str, *, tenant_id: uuid.UUID) -> None:
+    """TEST SEEDING (S29-a exempt): back to 'no activation row' = the production
+    default state (H100), for the default-off tests whose fixture opted in."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("DELETE FROM marketing_activation WHERE tenant_id = %s", (tenant_id,))
+
+
+def fetch_marketing_activation(dsn: str, tenant_id: uuid.UUID) -> dict | None:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT enabled, canary_cap_per_day FROM marketing_activation WHERE tenant_id = %s",
+            (tenant_id,),
+        ).fetchone()
+    return None if row is None else {"enabled": bool(row[0]), "canary_cap_per_day": int(row[1])}
+
+
+def count_marketing_log(dsn: str, tenant_id: uuid.UUID) -> int:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        return int(conn.execute(
+            "SELECT count(*) FROM marketing_activation_log WHERE tenant_id = %s", (tenant_id,),
+        ).fetchone()[0])
+
+
+def fetch_ledger_rows(dsn: str, tenant_id: uuid.UUID) -> list[tuple[uuid.UUID, str]]:
+    """[(outbox_id, status)] of the tenant's proactive ledger."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        return [(r[0], r[1]) for r in conn.execute(
+            "SELECT outbox_id, status FROM proactive_ledger WHERE tenant_id = %s", (tenant_id,),
+        ).fetchall()]
+
+
+def fetch_number_health_marketing_counters(dsn: str, channel_id: uuid.UUID) -> int:
+    """number_health.sent_today (the marketing daily counter) - the H85 slot count."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        return int(conn.execute(
+            "SELECT sent_today FROM number_health WHERE channel_account_id = %s", (channel_id,),
+        ).fetchone()[0])
+
+
+def probe_marketing_log_update(dsn: str, tenant_id: uuid.UUID) -> None:
+    """P3.4 H100 negative probe (S29-a exempts testsupport, like S24-a): run
+    the forbidden UPDATE against the append-only activation log. Called with
+    the sharwa_app DSN (CORE_DATABASE_URL) by the db test, which then asserts
+    psycopg InsufficientPrivilege - the privilege check fires before RLS, so
+    no tenant context is needed."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE marketing_activation_log SET actor = 'tampered' WHERE tenant_id = %s",
+            (tenant_id,),
+        )
+
+
+def probe_marketing_log_delete(dsn: str, tenant_id: uuid.UUID) -> None:
+    """P3.4 H100 negative probe (S29-a exempts testsupport): the forbidden
+    DELETE against the append-only activation log, as sharwa_app
+    (CORE_DATABASE_URL) - the db test asserts InsufficientPrivilege."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "DELETE FROM marketing_activation_log WHERE tenant_id = %s",
+            (tenant_id,),
+        )
+
+
 def expire_job_lease(dsn: str, job_id: uuid.UUID) -> None:
     """Simulate a dead worker: the job is 'processing' but its lease is past."""
     with psycopg.connect(dsn, autocommit=True) as conn:
@@ -934,6 +1036,16 @@ __all__: Sequence[str] = (
     "fetch_scheduled_job_by_key",
     "fast_forward_jobs",
     "age_proactive_ledger",
+    "enable_marketing",
+    "clear_marketing_activation",
+    "age_inbound_messages",
+    "fetch_tenant_timezone",
+    "fetch_marketing_activation",
+    "count_marketing_log",
+    "fetch_ledger_rows",
+    "fetch_number_health_marketing_counters",
+    "probe_marketing_log_update",
+    "probe_marketing_log_delete",
     "expire_job_lease",
     "reset_job_to_pending",
     "count_outbox_by_idempotency_key",
