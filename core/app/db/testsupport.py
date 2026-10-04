@@ -815,6 +815,18 @@ def count_outbox_by_idempotency_key(dsn: str, tenant_id: uuid.UUID, idempotency_
     return int(row[0])
 
 
+def set_cart_last_activity(
+    dsn: str, *, tenant_id: uuid.UUID, platform_cart_id: str, last_activity_at: datetime,
+) -> None:
+    """Engine tests: age/refresh a cart's activity clock (no sleep)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE carts SET last_activity_at = %s "
+            "WHERE tenant_id = %s AND platform_cart_id = %s",
+            (last_activity_at, tenant_id, platform_cart_id),
+        )
+
+
 def count_rows_for_tenant(dsn: str, *, table: str, tenant_id: uuid.UUID) -> int:
     """Count `tenant_id = %s` rows on one of the six cleanup-test tables (a
     CLOSED allowlist - the same whitelist pattern as INBOX_EVENT_ALLOWED_KEYS)."""
@@ -869,6 +881,7 @@ __all__: Sequence[str] = (
     "expire_job_lease",
     "reset_job_to_pending",
     "count_outbox_by_idempotency_key",
+    "set_cart_last_activity",
     "fetch_schema_migration_checksum",
     "fetch_schema_migrations",
     "fetch_tenant_row",

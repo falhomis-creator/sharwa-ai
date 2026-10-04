@@ -41,7 +41,7 @@ from app.db.context import system_tx, tenant_tx
 from app.obs import http as obs_http
 from app.obs import logging as obs_logging
 from app.obs import metrics
-from app.workers import catalog, dispatch, embed, evt, optout, policy_sweep, proactive, schema, stock, summary, turn, verify
+from app.workers import catalog, dispatch, embed, evt, optout, policy_sweep, proactive, scheduler, schema, stock, summary, turn, verify
 from app.workers.config import WorkerSettings
 from app.workers.stream import (
     PermanentError,
@@ -848,6 +848,34 @@ class RealtimeWorker:
             elapsed = time.monotonic() - started
             self.stop_event.wait(max(1.0, self.settings.send_policy_sweep_interval_s - elapsed))
 
+    def _run_scheduler(self) -> None:
+        """P3.2 (H87-H93): the scheduled-job engine, beside the sweeper. Every
+        SCHEDULER_POLL_INTERVAL_S it runs one cycle and updates
+        scheduler_last_success_timestamp_seconds (a stopped engine is visible
+        ONLY through that metric - SchedulerStalled). Roughly hourly it also
+        purges final carts older than CARTS_RETENTION_D (the sanctioned
+        cross-tenant delete, sharwa_system). An exception logs and the thread
+        keeps cycling - it never dies silently."""
+        last_purge = 0.0
+        while not self.stop_event.is_set():
+            started = time.monotonic()
+            try:
+                scheduler.run_due(self.settings)
+                if started - last_purge >= 3600.0:
+                    last_purge = started
+                    with system_tx() as conn:
+                        conn.execute(
+                            "SELECT app.purge_old_carts(make_interval(days => %s))",
+                            (self.settings.carts_retention_d,),
+                        )
+            except Exception as exc:  # noqa: BLE001 - background loop, keep the thread alive
+                obs_logging.log_event(
+                    _log, event="scheduler.cycle_crash", component="scheduler",
+                    level=logging.ERROR, error=str(exc),
+                )
+            elapsed = time.monotonic() - started
+            self.stop_event.wait(max(1.0, self.settings.scheduler_poll_interval_s - elapsed))
+
     def run(self) -> int:
         self._setup()
 
@@ -897,6 +925,9 @@ class RealtimeWorker:
         policy_thread = threading.Thread(target=self._run_policy_sweep, daemon=True)
         policy_thread.start()
         threads.append(policy_thread)
+        scheduler_thread = threading.Thread(target=self._run_scheduler, daemon=True)
+        scheduler_thread.start()
+        threads.append(scheduler_thread)
 
         obs_logging.log_event(_log, event="worker.started", component="realtime")
 

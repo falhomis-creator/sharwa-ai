@@ -771,4 +771,56 @@ policy_sweeper_last_success_timestamp_seconds = Gauge(
 )
 
 
+# --- P3.2 scheduler engine + cart events (H87-H93) ---------------------------
+# Closed labels only (H20): no tenant / customer / cart id / phone / payload.
+
+scheduler_claimed_total = Counter(
+    "scheduler_claimed_total",
+    "Scheduled jobs claimed by the engine, by kind.",
+    labelnames=["kind"],
+    registry=registry,
+)
+
+scheduler_outcomes_total = Counter(
+    "scheduler_outcomes_total",
+    "Scheduled job outcomes (done|defer|cancel_*|retry|failed), by kind.",
+    labelnames=["kind", "outcome"],
+    registry=registry,
+)
+
+scheduler_handler_errors_total = Counter(
+    "scheduler_handler_errors_total",
+    "Handler exceptions isolated by the engine (H93), by kind.",
+    labelnames=["kind"],
+    registry=registry,
+)
+
+scheduler_oldest_due_seconds = Gauge(
+    "scheduler_oldest_due_seconds",
+    "Age in seconds of the oldest overdue pending job, by kind (SchedulerLagHigh).",
+    labelnames=["kind"],
+    registry=registry,
+)
+
+scheduler_jobs = Gauge(
+    "scheduler_jobs",
+    "Scheduled jobs by kind and status.",
+    labelnames=["kind", "status"],
+    registry=registry,
+)
+
+scheduler_last_success_timestamp_seconds = Gauge(
+    "scheduler_last_success_timestamp_seconds",
+    "Unix timestamp of the last successful engine cycle (SchedulerStalled).",
+    registry=registry,
+)
+
+cart_events_total = Counter(
+    "cart_events_total",
+    "Platform cart events applied, by type and outcome (closed label sets).",
+    labelnames=["type", "outcome"],
+    registry=registry,
+)
+
+
 

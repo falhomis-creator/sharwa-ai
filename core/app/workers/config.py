@@ -404,6 +404,19 @@ class WorkerSettings:
     send_policy_idle_reset_d: int = 14
     send_policy_complaint_words: tuple[str, ...] = ("سبام", "ازعاج", "إزعاج", "بلاغ", "ابلاغ", "report", "spam")
     marketing_footer_ar: str = "لإيقاف الرسائل الترويجية أرسل: إيقاف"
+    # P3.2 scheduler + cart events (PROMPT §4). Architect PROPOSALS pending the
+    # owner's OQ-P3-06 approval - env-overridable settings, never hardcoded at
+    # the call sites (directive rule 8).
+    scheduler_poll_interval_s: int = 15
+    scheduler_batch: int = 50
+    scheduler_lease_s: int = 120
+    scheduler_max_attempts: int = 5
+    scheduler_backoff_base_s: int = 60
+    scheduler_backoff_cap_s: int = 3600
+    cart_reminder_delay_h: int = 24
+    cart_reminder_max_late_h: int = 12
+    carts_retention_d: int = 14
+    cart_item_title_max: int = 60
 
     @staticmethod
     def load() -> WorkerSettings:
@@ -515,6 +528,34 @@ class WorkerSettings:
                 "SEND_POLICY_QUIET_START must differ from SEND_POLICY_QUIET_END "
                 "(equal means a permanent quiet window)"
             )
+
+        # P3.2 (§4): scheduler + cart knobs. Fail-fast: every number positive;
+        # the lease must outlive the poll cycle; the backoff cap must cover its
+        # base (OQ-P3-06 proposals, all env-tunable).
+        sched_poll = _int("SCHEDULER_POLL_INTERVAL_S", 15)
+        sched_batch = _int("SCHEDULER_BATCH", 50)
+        sched_lease = _int("SCHEDULER_LEASE_S", 120)
+        sched_max_attempts = _int("SCHEDULER_MAX_ATTEMPTS", 5)
+        sched_backoff_base = _int("SCHEDULER_BACKOFF_BASE_S", 60)
+        sched_backoff_cap = _int("SCHEDULER_BACKOFF_CAP_S", 3600)
+        cart_delay_h = _int("CART_REMINDER_DELAY_H", 24)
+        cart_max_late_h = _int("CART_REMINDER_MAX_LATE_H", 12)
+        carts_retention_d = _int("CARTS_RETENTION_D", 14)
+        cart_title_max = _int("CART_ITEM_TITLE_MAX", 60)
+        for _key, _val in (
+            ("SCHEDULER_POLL_INTERVAL_S", sched_poll), ("SCHEDULER_BATCH", sched_batch),
+            ("SCHEDULER_LEASE_S", sched_lease), ("SCHEDULER_MAX_ATTEMPTS", sched_max_attempts),
+            ("SCHEDULER_BACKOFF_BASE_S", sched_backoff_base),
+            ("SCHEDULER_BACKOFF_CAP_S", sched_backoff_cap),
+            ("CART_REMINDER_DELAY_H", cart_delay_h), ("CART_REMINDER_MAX_LATE_H", cart_max_late_h),
+            ("CARTS_RETENTION_D", carts_retention_d), ("CART_ITEM_TITLE_MAX", cart_title_max),
+        ):
+            if _val <= 0:
+                raise ConfigError(f"{_key} must be >= 1")
+        if sched_lease <= sched_poll:
+            raise ConfigError("SCHEDULER_LEASE_S must be > SCHEDULER_POLL_INTERVAL_S")
+        if sched_backoff_cap < sched_backoff_base:
+            raise ConfigError("SCHEDULER_BACKOFF_CAP_S must be >= SCHEDULER_BACKOFF_BASE_S")
 
         return WorkerSettings(
             db=db,
@@ -649,4 +690,14 @@ class WorkerSettings:
             send_policy_idle_reset_d=_int("SEND_POLICY_IDLE_RESET_D", 14),
             send_policy_complaint_words=_csv("SEND_POLICY_COMPLAINT_WORDS", "سبام,ازعاج,إزعاج,بلاغ,ابلاغ,report,spam"),
             marketing_footer_ar=_optional("MARKETING_FOOTER_AR", "لإيقاف الرسائل الترويجية أرسل: إيقاف"),
+            scheduler_poll_interval_s=sched_poll,
+            scheduler_batch=sched_batch,
+            scheduler_lease_s=sched_lease,
+            scheduler_max_attempts=sched_max_attempts,
+            scheduler_backoff_base_s=sched_backoff_base,
+            scheduler_backoff_cap_s=sched_backoff_cap,
+            cart_reminder_delay_h=cart_delay_h,
+            cart_reminder_max_late_h=cart_max_late_h,
+            carts_retention_d=carts_retention_d,
+            cart_item_title_max=cart_title_max,
         )
