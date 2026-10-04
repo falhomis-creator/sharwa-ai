@@ -26,6 +26,17 @@ exit 1 = violations as `file:line: [phase] detail`.
         (return/raise/continue/break) in the same block.
   S15 - P2.1 (H60): every _required("X") key is provided by docker-compose.yml,
         and any key compose reads from .env via ${X:?...} is in .env.example.
+  S24 - P3.2 (H87): (a) raw scheduled_jobs write SQL exists ONLY in
+        app/db/repos_scheduler.py (app/db/testsupport.py is the declared
+        test-seeding exception, like its other raw test SQL); (b) the scheduler
+        WRITER functions are called only from the engine, its handler modules,
+        the cart-event worker (the webhook's same-tx cancel, H92) - and tests.
+  S25 - P3.2 (H90): the JOB_KINDS registry is a key<->handler bijection, every
+        handler resolves to a real def under app/workers/, and a scheduler
+        handler module never imports GatewayClient nor calls
+        repos_outbox.insert_outbox (proactive.py only).
+  S26 - P3.2 (H91): in routes_carts, verify_platform_signature runs BEFORE any
+        json.loads, and no logging call passes payload/events/items.
 
 """
 from __future__ import annotations
@@ -621,6 +632,182 @@ def _s23_violations(mods: dict[str, Path]) -> list[tuple[str, int, str]]:
                     and seg.index("_send_automation") < seg.index("policy_gate.gate"):
                 bad.append((rel, node.lineno, "_send_automation runs before policy_gate.gate (S23)"))
             break
+    return bad
+
+
+# --- S24/S25/S26 (P3.2): scheduler writer, JOB_KINDS registry, cart webhook ---
+
+_SCHEDULER_WRITERS = frozenset({
+    "schedule", "reschedule", "cancel", "cancel_by_id", "complete",
+    "fail_attempt", "defer", "finish_failed",
+})
+# H87: the ONLY non-test modules that may CALL the scheduled_jobs writers: the
+# engine itself, the handler modules it registers, and the cart-event worker
+# (the webhook's same-transaction cancel, H92).
+_S24_WRITER_CALLER_ALLOWLIST = frozenset({
+    "app.workers.scheduler", "app.workers.cart_reminder", "app.workers.carts",
+})
+_S24_WRITE_SQL_RE = re.compile(r"(?i)(insert\s+into|update|delete\s+from)\s+scheduled_jobs")
+
+
+def _s24_violations(mods: dict[str, Path], test_mods: dict[str, Path]) -> list[tuple[str, int, str]]:
+    """S24 (H87): one SQL writer, one caller surface."""
+    bad: list[tuple[str, int, str]] = []
+    everywhere = dict(mods)
+    for k, v in test_mods.items():
+        everywhere.setdefault(k, v)
+    for mod, path in everywhere.items():
+        text = path.read_text(encoding="utf-8")
+        # (a) raw write SQL only in the single writer module. app.db.testsupport
+        # is the DECLARED test-seeding exception (its whole charter is raw test
+        # SQL - fast-forwarding/forcing job state - never reachable from
+        # production code), exactly like its existing outbox/number_health SQL.
+        if (_S24_WRITE_SQL_RE.search(text)
+                and mod != "app.db.repos_scheduler"
+                and mod != "app.db.testsupport"):
+            bad.append((str(path.relative_to(ROOT)), 0,
+                        "raw scheduled_jobs write SQL outside app/db/repos_scheduler.py (S24-a/H87)"))
+        # (b) writer calls only from the engine / handlers / cart worker (+ tests).
+        tree = ast.parse(text)
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in _SCHEDULER_WRITERS
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "repos_scheduler"):
+                allowed = (mod in _S24_WRITER_CALLER_ALLOWLIST
+                           or mod == "app.db.repos_scheduler"
+                           or mod.startswith("tests."))
+                if not allowed:
+                    bad.append((str(path.relative_to(ROOT)), getattr(node, "lineno", 0),
+                                f"repos_scheduler.{node.func.attr} called outside the engine surface (S24-b/H87)"))
+    return bad
+
+
+def _s25_violations(mods: dict[str, Path]) -> list[tuple[str, int, str]]:
+    """S25 (H90): JOB_KINDS key<->handler bijection over REAL defs under
+    app/workers/, and handler modules never touch the gateway or the outbox
+    writer directly (proactive.py is the only enqueue path)."""
+    bad: list[tuple[str, int, str]] = []
+    p = mods.get("app.workers.scheduler")
+    if p is None:
+        return bad
+    rel = str(p.relative_to(ROOT))
+    text = p.read_text(encoding="utf-8")
+    tree = ast.parse(text)
+    aliases = _import_aliases(tree)
+
+    keys: list[str] = []
+    handlers: list[str] = []
+    jobkinds_node = None
+    for node in tree.body:
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, ast.AnnAssign) and node.target is not None:
+            targets = [node.target]  # JOB_KINDS: dict[str, JobKind] = {...}
+        if any(isinstance(t, ast.Name) and t.id == "JOB_KINDS" for t in targets):
+            jobkinds_node = node
+            break
+    value = getattr(jobkinds_node, "value", None) if jobkinds_node is not None else None
+    if value is None or not isinstance(value, ast.Dict):
+        bad.append((rel, 0, "scheduler.py must define the closed JOB_KINDS dict (H90)"))
+        return bad
+    for k, v in zip(value.keys, value.values):
+        if not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
+            bad.append((rel, getattr(k, "lineno", 0), "JOB_KINDS keys must be string literals (H90)"))
+            continue
+        keys.append(k.value)
+        handler_expr = None
+        if isinstance(v, ast.Call):
+            for kw in v.keywords:
+                if kw.arg == "handler":
+                    handler_expr = ast.unparse(kw.value)
+        elif isinstance(v, ast.Name):
+            handler_expr = v.id
+        if handler_expr is None:
+            bad.append((rel, getattr(v, "lineno", 0),
+                        f"JOB_KINDS[{k.value!r}] has no handler= entry (S25-a/H90)"))
+            continue
+        handlers.append(handler_expr)
+
+    # (a) bijection: every key maps to exactly one handler, none shared/missing.
+    if len(set(handlers)) != len(handlers) or len(keys) != len(handlers):
+        bad.append((rel, jobkinds_node.lineno,
+                    "JOB_KINDS is not a key<->handler bijection (S25-a/H90)"))
+
+    # (b) every handler resolves to a real def under app/workers/, and handler
+    # modules never import GatewayClient nor call insert_outbox.
+    for handler_expr in sorted(set(handlers)):
+        head = handler_expr.split(".")[0]
+        if head not in aliases or not aliases[head].startswith("app.workers."):
+            bad.append((rel, jobkinds_node.lineno,
+                        f"handler {handler_expr!r} does not resolve to an app/workers/ module (S25-b/H90)"))
+            continue
+        module = aliases[head]
+        fn_name = handler_expr.split(".")[-1]
+        hpath = mods.get(module)
+        if hpath is None:
+            bad.append((rel, jobkinds_node.lineno, f"handler module {module!r} not found (S25-b)"))
+            continue
+        htree = ast.parse(hpath.read_text(encoding="utf-8"))
+        defined = {n.name for n in htree.body
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        if fn_name not in defined:
+            bad.append((str(hpath.relative_to(ROOT)), 0,
+                        f"{module} does not define {fn_name} (S25-b/H90)"))
+        htext = hpath.read_text(encoding="utf-8")
+        if "GatewayClient" in htext:
+            bad.append((str(hpath.relative_to(ROOT)), 0,
+                        f"{module} references GatewayClient (S25-b: handlers never send directly)"))
+        for n in ast.walk(htree):
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and n.func.attr == "insert_outbox"):
+                bad.append((str(hpath.relative_to(ROOT)), getattr(n, "lineno", 0),
+                            f"{module} calls insert_outbox directly (S25-b: proactive.py only)"))
+    return bad
+
+
+_S26_FORBIDDEN_LOG_KWARGS = frozenset({"payload", "events", "items"})
+
+
+def _s26_violations(mods: dict[str, Path]) -> list[tuple[str, int, str]]:
+    """S26 (H91): signature BEFORE parsing in the cart webhook, and no payload
+    ever reaches a log call."""
+    bad: list[tuple[str, int, str]] = []
+    p = mods.get("app.api.routes_carts")
+    if p is None:
+        return bad
+    rel = str(p.relative_to(ROOT))
+    tree = ast.parse(p.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if not (isinstance(node, ast.AsyncFunctionDef) and node.name == "platform_cart_webhook"):
+            continue
+        sig_line: int | None = None
+        loads_line: int | None = None
+        for n in ast.walk(node):
+            if not isinstance(n, ast.Call):
+                continue
+            fn = ast.unparse(n.func)
+            if fn.endswith("verify_platform_signature") and sig_line is None:
+                sig_line = n.lineno
+            if fn == "json.loads" and loads_line is None:
+                loads_line = n.lineno
+        if sig_line is None:
+            bad.append((rel, node.lineno,
+                        "platform_cart_webhook never calls verify_platform_signature (S26-a)"))
+        elif loads_line is not None and loads_line < sig_line:
+            bad.append((rel, node.lineno,
+                        "json.loads runs BEFORE verify_platform_signature (S26-a/H91)"))
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call):
+            continue
+        fn = ast.unparse(n.func)
+        short = fn.split(".")[-1]
+        if fn.endswith("log_event") or short in ("info", "warning", "error", "debug", "exception"):
+            for kw in n.keywords:
+                if kw.arg in _S26_FORBIDDEN_LOG_KWARGS:
+                    bad.append((rel, getattr(n, "lineno", 0),
+                                f"logging call passes {kw.arg!r} (S26-b/H91: no payloads in logs)"))
     return bad
 
 
@@ -1419,6 +1606,18 @@ def main() -> int:
     # ---- S23 (P3.1): dispatcher <-> policy_gate integration -------------------
     for rel, lineno, detail in _s23_violations(mods):
         _err("S23", rel, lineno, detail)
+
+    # ---- S24 (P3.2, H87): single scheduled_jobs writer + closed caller surface -
+    for rel, lineno, detail in _s24_violations(mods, _test_module_files()):
+        _err("S24", rel, lineno, detail)
+
+    # ---- S25 (P3.2, H90): JOB_KINDS bijection + clean handler modules ---------
+    for rel, lineno, detail in _s25_violations(mods):
+        _err("S25", rel, lineno, detail)
+
+    # ---- S26 (P3.2, H91): signature-before-parse + no payloads in logs --------
+    for rel, lineno, detail in _s26_violations(mods):
+        _err("S26", rel, lineno, detail)
 
     # ---- S14 (P2.1): a function must be able to return its promised type -----
     for mod, path in mods.items():
