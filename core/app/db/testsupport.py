@@ -827,6 +827,45 @@ def set_cart_last_activity(
         )
 
 
+def set_cart_status(
+    dsn: str, *, tenant_id: uuid.UUID, platform_cart_id: str, status: str,
+) -> None:
+    """Simulate a finalizing event landing between claim and execution (H92)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE carts SET status = %s, updated_at = now() "
+            "WHERE tenant_id = %s AND platform_cart_id = %s",
+            (status, tenant_id, platform_cart_id),
+        )
+
+
+def count_outbox_rows(dsn: str, *, tenant_id: uuid.UUID) -> int:
+    """The dark-test assertion: how many outbox rows exist for one tenant."""
+    with psycopg.connect(dsn) as conn:
+        row = conn.execute(
+            "SELECT count(*) FROM outbox WHERE tenant_id = %s", (tenant_id,),
+        ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def fetch_outbox_row_by_idempotency(
+    dsn: str, tenant_id: uuid.UUID, idempotency_key: str,
+) -> dict | None:
+    """The handler-path assertion: the one outbox row a reminder produced."""
+    with psycopg.connect(dsn) as conn:
+        row = conn.execute(
+            "SELECT id, conversation_id, origin, message_class, to_wa_id, payload, status "
+            "FROM outbox WHERE tenant_id = %s AND idempotency_key = %s",
+            (tenant_id, idempotency_key),
+        ).fetchone()
+    if row is None:
+        return None
+    return {"id": row[0], "conversation_id": row[1], "origin": row[2],
+            "message_class": row[3], "to_wa_id": row[4], "payload": row[5],
+            "status": row[6]}
+
+
 def count_rows_for_tenant(dsn: str, *, table: str, tenant_id: uuid.UUID) -> int:
     """Count `tenant_id = %s` rows on one of the six cleanup-test tables (a
     CLOSED allowlist - the same whitelist pattern as INBOX_EVENT_ALLOWED_KEYS)."""
@@ -882,6 +921,9 @@ __all__: Sequence[str] = (
     "reset_job_to_pending",
     "count_outbox_by_idempotency_key",
     "set_cart_last_activity",
+    "set_cart_status",
+    "count_outbox_rows",
+    "fetch_outbox_row_by_idempotency",
     "fetch_schema_migration_checksum",
     "fetch_schema_migrations",
     "fetch_tenant_row",
