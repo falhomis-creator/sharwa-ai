@@ -31,6 +31,10 @@ REVIVABLE_CANCEL_REASONS = (
     "too_late",
     "template_not_registered",
     "no_conversation",
+    # P3.4: the tenant's marketing was disabled (or not yet enabled) - the
+    # pipeline is FROZEN, not burned: fresh cart activity after re-enabling
+    # revives the job (same philosophy as F-P3-22).
+    "marketing_disabled",
 )
 
 
@@ -83,6 +87,21 @@ def cancel(
         (reason, tenant_id, dedupe_key),
     )
     return cur.rowcount > 0
+
+
+def cancel_pending_kind(
+    conn: psycopg.Connection, *, tenant_id: uuid.UUID, kind: str, reason: str,
+) -> int:
+    """P3.4 rollback (H101 level 2): terminally cancel the tenant's PENDING jobs
+    of one kind (the marketing disable cancels its cart reminders). Pending only:
+    a job a worker holds as 'processing' finishes through its own handler, which
+    re-checks the activation (cart_reminder)."""
+    cur = conn.execute(
+        "UPDATE scheduled_jobs SET status = 'cancelled', cancel_reason = %s, finished_at = now() "
+        "WHERE tenant_id = %s AND kind = %s AND status = 'pending'",
+        (reason, tenant_id, kind),
+    )
+    return cur.rowcount
 
 
 def cancel_by_id(conn: psycopg.Connection, *, job_id: uuid.UUID, reason: str) -> bool:

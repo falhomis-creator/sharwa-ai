@@ -48,7 +48,11 @@ exit 1 = violations as `file:line: [phase] detail`.
          only from app/workers/realtime.py, app/workers/stock.py - and tests;
          (c) CONSENT_SOURCES in code == the 0016 CHECK list verbatim.
 
-
+  S29 - P3.4 (H100): (a) raw marketing_activation(_log) write SQL exists ONLY
+         in app/db/repos_marketing.py (testsupport.py the declared seed
+         exception); (b) the activation writers are called only from
+         app/cli.py + app/workers/marketing.py (rollback) + tests, and
+         set_enabled(enabled=True) ONLY from app/cli.py + tests.
 """
 from __future__ import annotations
 
@@ -846,6 +850,73 @@ def _s27_violations(mods: dict[str, Path], test_mods: dict[str, Path]) -> list[t
     elif code_sources != sql_sources:
         bad.append(("core/app/db/repos_consent.py", 0,
                     f"CONSENT_SOURCES != the 0016 constraint list (code={code_sources}, sql={sql_sources}) (S27-c/H95)"))
+    return bad
+
+
+# --- S29 (P3.4, H100): single marketing_activation writer ----------------------
+
+_S29_WRITE_SQL_RE = re.compile(
+    r"(?i)(insert\s+into|update|delete\s+from)\s+marketing_activation(_log)?\b"
+)
+# H100: the only non-test callers of the activation writers. set_enabled(True)
+# is even narrower - app/cli.py ONLY (the deliberate human act); disable and
+# set_cap are also called by the rollback coordinator app/workers/marketing.py
+# (H101 level 2: the same-transaction queue cancel).
+_S29_WRITER_FUNCS = frozenset({"set_enabled", "set_cap"})
+_S29_ANY_CALLER_ALLOWLIST = frozenset({
+    "app.cli",
+    "app.workers.marketing",
+})
+_S29_ENABLE_TRUE_ALLOWLIST = frozenset({"app.cli"})
+
+
+def _s29_enabled_literal_true(node: ast.Call) -> bool:
+    """True when the call passes `enabled=True` (keyword) or a positional
+    literal True in the `enabled` slot (3rd positional: conn, tenant_id,
+    enabled - keyword-only in real code, both covered)."""
+    for kw in node.keywords:
+        if kw.arg == "enabled":
+            return isinstance(kw.value, ast.Constant) and kw.value.value is True
+    if len(node.args) >= 3:
+        third = node.args[2]
+        return isinstance(third, ast.Constant) and third.value is True
+    return False
+
+
+def _s29_violations(mods: dict[str, Path], test_mods: dict[str, Path]) -> list[tuple[str, int, str]]:
+    """S29 (H100): one marketing_activation writer, and enabling is a CLI-only
+    human act. (a) raw write SQL on marketing_activation(_log) only in
+    app/db/repos_marketing.py (testsupport.py the declared seed exception);
+    (b) set_enabled(..., enabled=True, ...) called only from app/cli.py and
+    tests - never from a worker, a route, or a migration-facing module."""
+    bad: list[tuple[str, int, str]] = []
+    everywhere = dict(mods)
+    everywhere.update(test_mods)
+    for mod, path in everywhere.items():
+        if mod in ("app.db.repos_marketing", "app.db.testsupport"):
+            continue
+        text = path.read_text(encoding="utf-8")
+        if _S29_WRITE_SQL_RE.search(text):
+            bad.append((str(path.relative_to(ROOT)), 0,
+                        "raw marketing_activation(_log) write outside app/db/repos_marketing.py (S29-a/H100)"))
+        tree = ast.parse(text)
+        aliases = _import_aliases(tree)
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in _S29_WRITER_FUNCS
+                    and isinstance(node.func.value, ast.Name)
+                    and (node.func.value.id == "repos_marketing"
+                         or aliases.get(node.func.value.id) == "app.db.repos_marketing")):
+                continue
+            if mod.startswith("tests.") or mod == "app.db.repos_marketing":
+                continue
+            if mod in _S29_ANY_CALLER_ALLOWLIST:
+                if _s29_enabled_literal_true(node) and mod not in _S29_ENABLE_TRUE_ALLOWLIST:
+                    bad.append((str(path.relative_to(ROOT)), getattr(node, "lineno", 0),
+                                "repos_marketing.set_enabled(enabled=True) outside app/cli.py - enabling is a CLI-only human act (S29-b/H100)"))
+                continue
+            bad.append((str(path.relative_to(ROOT)), getattr(node, "lineno", 0),
+                        f"repos_marketing.{node.func.attr} called outside the activation surface (cli/marketing worker + tests) (S29-b/H100)"))
     return bad
 
 
@@ -1788,6 +1859,10 @@ def main() -> int:
     # ---- S27 (P3.3, H95): single consent/suppression writer -------------------
     for rel, lineno, detail in _s27_violations(mods, _test_module_files()):
         _err("S27", rel, lineno, detail)
+
+    # ---- S29 (P3.4, H100): single marketing_activation writer -----------------
+    for rel, lineno, detail in _s29_violations(mods, _test_module_files()):
+        _err("S29", rel, lineno, detail)
 
     # ---- S28 (P3.3, F-P3-25/H86): sequence SQL params must be list(...) -------
     for rel, lineno, detail in _s28_violations(mods):

@@ -309,6 +309,36 @@ def cancel_pending_proactive(
     return cur.rowcount
 
 
+def cancel_pending_marketing(
+    conn: psycopg.Connection, *, tenant_id: uuid.UUID, reason: str,
+) -> list[tuple[uuid.UUID, uuid.UUID]]:
+    """P3.4 rollback (H101 level 2): every PENDING marketing automation row of the
+    tenant is dropped with `reason`. Returns [(outbox_id, channel_account_id)].
+    utility/service rows are never touched (class filter). Rows already
+    'sending' are caught by the send-time gate (marketing_not_enabled, H76)."""
+    rows = conn.execute(
+        "UPDATE outbox SET status = 'dropped_policy', policy_reason = %s "
+        "WHERE tenant_id = %s AND origin = 'automation' AND message_class = 'marketing' "
+        "AND status = 'pending' RETURNING id, channel_account_id",
+        (reason, tenant_id),
+    ).fetchall()
+    return [(r[0], r[1]) for r in rows]
+
+
+def release_reserved_ledger(
+    conn: psycopg.Connection, *, outbox_ids: list[uuid.UUID],
+) -> list[uuid.UUID]:
+    """H85: free the ledger reservations of the given outbox rows (reserved ->
+    released). Returns the channel ids, ONE PER released row, so the caller gives
+    each slot back via release_send_slot."""
+    rows = conn.execute(
+        "UPDATE proactive_ledger SET status = 'released' "
+        "WHERE outbox_id = ANY(%s) AND status = 'reserved' RETURNING channel_account_id",
+        (list(outbox_ids),),
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
 # --- CLI (status / reinstate) ----------------------------------------------
 
 def read_policy_status(conn: psycopg.Connection, *, channel_id: uuid.UUID) -> dict[str, Any] | None:
