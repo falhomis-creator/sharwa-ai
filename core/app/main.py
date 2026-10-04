@@ -15,13 +15,16 @@ request_id and audit_log's request_id column both come from.
 """
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from prometheus_client import CollectorRegistry
 from redis import asyncio as redis_asyncio
 
@@ -34,12 +37,14 @@ from app.api.routes_channels import router as channels_router
 from app.api.routes_health import router as health_router
 from app.api.routes_inbox import router as inbox_router
 from app.api.routes_killswitches import router as killswitches_router
+from app.api.routes_marketing_admin import router as marketing_admin_router
 from app.api.ws import WsHub
 from app.api.ws import router as ws_router
 from app.channels.gateway_client import GatewayClient
 from app.config import Settings
 from app.killswitch.redis_sync import RedisSync
 from app.obs import metrics
+from app.workers import marketing as marketing_worker
 
 
 @asynccontextmanager
@@ -52,6 +57,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     ws_publish.configure(redis_sync._client)
 
     app.state.settings = settings
+    app.state.marketing_env = marketing_worker.build_env()
     app.state.redis_sync = redis_sync
     app.state.gateway_client = gateway_client
     app.state.metrics_registry = CollectorRegistry()
@@ -88,6 +94,7 @@ def create_app() -> FastAPI:
     settings = Settings.load()
     app = FastAPI(title="sharwa_ai core", lifespan=lifespan)
     app.state.settings = settings
+    app.state.marketing_env = marketing_worker.build_env()
 
     # CORS (P1.8, H56): the console is a browser on a different origin. Origins are
     # an explicit env allowlist (CONSOLE_ALLOWED_ORIGINS); an empty list => the
@@ -130,6 +137,25 @@ def create_app() -> FastAPI:
         metrics.inbox_api_request_seconds.labels(route).observe(time.monotonic() - started)
         return response
 
+    @app.middleware("http")
+    async def console_security_headers(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        # P3.5: the dashboard is static files served same-origin. A strict CSP (no
+        # inline script/style, no external host) + no-store so a stale or tampered
+        # bundle is never cached, and no framing (clickjacking on the enable button).
+        response = await call_next(request)
+        if request.url.path.startswith("/console"):
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+                "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+            )
+            response.headers["X-Frame-Options"] = "DENY"
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            response.headers["Referrer-Policy"] = "no-referrer"
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
     app.add_exception_handler(ApiError, api_error_handler)
     app.add_exception_handler(Exception, unhandled_exception_handler)
 
@@ -139,7 +165,14 @@ def create_app() -> FastAPI:
     app.include_router(catalog_router)
     app.include_router(carts_router)
     app.include_router(channels_router)
+    app.include_router(marketing_admin_router)
     app.include_router(ws_router)
+
+    # P3.5: the dashboard (frontend/), same-origin, only when CONSOLE_STATIC_DIR
+    # points at a real directory - absent by default, so nothing is served unasked.
+    static_dir = os.environ.get("CONSOLE_STATIC_DIR", "").strip()
+    if static_dir and Path(static_dir).is_dir():
+        app.mount("/console", StaticFiles(directory=static_dir, html=True), name="console")
 
     return app
 

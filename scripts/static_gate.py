@@ -51,8 +51,9 @@ exit 1 = violations as `file:line: [phase] detail`.
   S29 - P3.4 (H100): (a) raw marketing_activation(_log) write SQL exists ONLY
          in app/db/repos_marketing.py (testsupport.py the declared seed
          exception); (b) the activation writers are called only from
-         app/cli.py + app/workers/marketing.py (rollback) + tests, and
-         set_enabled(enabled=True) ONLY from app/cli.py + tests.
+         app/cli.py + app/marketing_ops.py (rollback) + the dashboard route + tests, and
+         set_enabled(enabled=True) ONLY from app/cli.py + the platform_admin dashboard
+         route app/api/routes_marketing_admin.py (H104) + tests.
 """
 from __future__ import annotations
 
@@ -865,9 +866,13 @@ _S29_WRITE_SQL_RE = re.compile(
 _S29_WRITER_FUNCS = frozenset({"set_enabled", "set_cap"})
 _S29_ANY_CALLER_ALLOWLIST = frozenset({
     "app.cli",
-    "app.workers.marketing",
+    "app.marketing_ops",  # H101 rollback coordinator (neutral module, P3.5)
+    "app.api.routes_marketing_admin",
 })
-_S29_ENABLE_TRUE_ALLOWLIST = frozenset({"app.cli"})
+# H104 (owner decision, P3.5): enabling is a HUMAN act with exactly two surfaces -
+# the operator CLI and the platform_admin dashboard route (same confirm phrase +
+# preflight + audit). Nothing automated may ever enable.
+_S29_ENABLE_TRUE_ALLOWLIST = frozenset({"app.cli", "app.api.routes_marketing_admin"})
 
 
 def _s29_enabled_literal_true(node: ast.Call) -> bool:

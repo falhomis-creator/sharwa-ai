@@ -20,6 +20,9 @@ ERROR_CODES = (
     "TICKET_ISSUE_FAILED",
     # P1.4 catalog webhook (PROMPT §7).
     "PLATFORM_SIGNATURE_INVALID", "PLATFORM_TIMESTAMP_SKEW", "PLATFORM_PAYLOAD_TOO_LARGE",
+    # P3.5 admin dashboard (H104): a precondition the operator can fix (the machine
+    # list of failed preflight checks travels in error.details.failed).
+    "PRECONDITION_FAILED",
 )
 
 _STATUS_BY_CODE: dict[str, int] = {
@@ -47,22 +50,34 @@ _STATUS_BY_CODE: dict[str, int] = {
     "PLATFORM_SIGNATURE_INVALID": 401,
     "PLATFORM_TIMESTAMP_SKEW": 401,
     "PLATFORM_PAYLOAD_TOO_LARGE": 413,
+    "PRECONDITION_FAILED": 412,
 }
 
 
 class ApiError(Exception):
-    def __init__(self, code: str, *, retry_after_s: int | None = None):
+    def __init__(
+        self, code: str, *, retry_after_s: int | None = None,
+        details: dict[str, Any] | None = None,
+    ):
         if code not in ERROR_CODES:
             raise ValueError(f"unknown error code {code!r} - add it to ERROR_CODES first")
         self.code = code
         self.retry_after_s = retry_after_s
+        # Machine-only closed-vocabulary data (e.g. {"failed": ["warmup_too_young"]}) -
+        # never free text, never an exception message.
+        self.details = details
         super().__init__(code)
 
 
-def error_body(code: str, request_id: str, *, retry_after_s: int | None = None) -> dict[str, Any]:
+def error_body(
+    code: str, request_id: str, *, retry_after_s: int | None = None,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     body: dict[str, Any] = {"error": {"code": code, "request_id": request_id}}
     if retry_after_s is not None:
         body["error"]["retry_after_s"] = retry_after_s
+    if details is not None:
+        body["error"]["details"] = details
     return body
 
 
@@ -77,7 +92,7 @@ async def api_error_handler(request: Request, exc: Exception) -> JSONResponse:
     request_id = getattr(request.state, "request_id", "unknown")
     return JSONResponse(
         status_code=_STATUS_BY_CODE[exc.code],
-        content=error_body(exc.code, request_id, retry_after_s=exc.retry_after_s),
+        content=error_body(exc.code, request_id, retry_after_s=exc.retry_after_s, details=exc.details),
     )
 
 

@@ -51,7 +51,7 @@
 {"error":{"code":"...","request_id":"...","retry_after_s":123}}
 ```
 
-`retry_after_s` حاضرٌ فقط حيث يكون له معنى (مثال `RATE_LIMITED`). جدول الرموز
+`retry_after_s` حاضرٌ فقط حيث يكون له معنى (مثال `RATE_LIMITED`). `details` (P3.5) حاضر فقط مع `PRECONDITION_FAILED` ويحمل `{"failed":[<رموز مغلقة>]}` — بيانات آلية لا نصّاً حرّاً. مسارات لوحة الإدارة `/v1/admin/marketing/**` و`/v1/marketing/**` موثّقة في `docs/ADMIN_DASHBOARD_API.md` (بوّابتها `require_role` لا صلاحيات الموظفين، فهي خارج جدول القفل أعلاه). جدول الرموز
 منقول حرفياً من `ERROR_CODES`/`_STATUS_BY_CODE` في `app/api/errors.py`:
 
 | Code | HTTP |
@@ -80,6 +80,7 @@
 | `PLATFORM_SIGNATURE_INVALID` | 401 |
 | `PLATFORM_TIMESTAMP_SKEW` | 401 |
 | `PLATFORM_PAYLOAD_TOO_LARGE` | 413 |
+| `PRECONDITION_FAILED` | 412 |
 
 ---
 

@@ -17,93 +17,63 @@ may enable (S29-b): the enable is a human act, the rollback is not.
 """
 from __future__ import annotations
 
+import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
-from app.db import repos_marketing, repos_outbox, repos_policy, repos_scheduler
-from app.policy import warmup
+from app import marketing_ops
+from app.db import repos_marketing
 from app.workers import cart_reminder, config, proactive
 from app.workers.config import WorkerSettings
 
 TEMPLATE_ID = cart_reminder.TEMPLATE_ID
 
-# Closed vocabulary of preflight failures (printed by the CLI, never free text).
-PREFLIGHT_FAILURES = (
-    "template_not_registered", "footer_not_explicit", "no_connected_channel",
-    "number_not_healthy", "warmup_not_started", "warmup_too_young",
-    "global_switch_off", "no_eligible_subscribers",
-)
-
-
-def confirm_phrase(platform_ref: str) -> str:
-    """The literal confirmation `enable` demands (H100) - typing it is the act."""
-    return f"ENABLE-MARKETING {platform_ref}"
+# Re-exported so existing callers (app/cli.py, tests) keep one import path.
+PREFLIGHT_FAILURES = marketing_ops.PREFLIGHT_FAILURES
+confirm_phrase = marketing_ops.confirm_phrase
 
 
 def preflight(
     conn: Any, *, tenant_id: uuid.UUID, settings: WorkerSettings,
     now: datetime, footer_explicit: bool,
 ) -> list[str]:
-    failed: list[str] = []
-    if config.proactive_template(TEMPLATE_ID) is None:
-        failed.append("template_not_registered")
-    # H103: the footer must be a deliberate, owner-set value - not just the
-    # code default. `footer_explicit` = MARKETING_FOOTER_AR is set in the env.
-    if not footer_explicit or not settings.marketing_footer_ar.strip():
-        failed.append("footer_not_explicit")
-
-    channels = [c for c in repos_marketing.read_tenant_channels(conn, tenant_id=tenant_id)
-                if c["status"] == "connected"]
-    if not channels:
-        failed.append("no_connected_channel")
-    else:
-        if any(c["health_state"] != "healthy" for c in channels):
-            failed.append("number_not_healthy")
-        started = [c["warmup_started_at"] for c in channels]
-        if any(s is None for s in started):
-            failed.append("warmup_not_started")
-        elif not all(
-            warmup.day_index(s, now, timezone.utc) >= settings.marketing_min_warmup_days
-            for s in started
-        ):
-            failed.append("warmup_too_young")
-        if any(
-            repos_outbox.effective_switch(
-                conn, tenant_id=tenant_id, channel_account_id=c["channel_id"],
-                capability="marketing",
-            ) == "off"
-            for c in channels
-        ):
-            failed.append("global_switch_off")
-
-    if repos_marketing.count_eligible_subscribers(conn, tenant_id=tenant_id) == 0:
-        failed.append("no_eligible_subscribers")
-    return failed
+    """The worker-layer wrapper: injects the facts only this layer can see (is the
+    template registered? is the footer non-empty?) into the neutral implementation
+    in app.marketing_ops, which the superadmin API shares."""
+    return marketing_ops.preflight(
+        conn, tenant_id=tenant_id, now=now,
+        template_registered=config.proactive_template(TEMPLATE_ID) is not None,
+        footer_explicit=bool(footer_explicit and settings.marketing_footer_ar.strip()),
+        min_warmup_days=settings.marketing_min_warmup_days,
+    )
 
 
-def disable_tenant(
-    conn: Any, *, tenant_id: uuid.UUID, actor: str, reason: str | None,
-) -> dict[str, int]:
-    """H101 level 2, ONE transaction (the caller's): off + cancel the queue +
-    give the slots back. Idempotent - disabling a disabled tenant just logs."""
-    repos_marketing.set_enabled(
-        conn, tenant_id=tenant_id, enabled=False, actor=actor, reason=reason,
+disable_tenant = marketing_ops.disable_tenant
+
+
+def build_env() -> marketing_ops.MarketingEnv:
+    """The API-side injection (H104). Read from the ENVIRONMENT of the API process -
+    the same variables the workers read - so MARKETING_FOOTER_AR must be set in the
+    API's environment too, or `enable` is refused with footer_not_explicit."""
+    raw_footer = os.environ.get("MARKETING_FOOTER_AR", "").strip()
+    footer = raw_footer or config.DEFAULT_MARKETING_FOOTER_AR
+    days_raw = os.environ.get("MARKETING_MIN_WARMUP_DAYS", "").strip()
+    try:
+        min_days = int(days_raw) if days_raw else 3
+    except ValueError:
+        min_days = 3
+    registered = config.proactive_template(TEMPLATE_ID) is not None
+    sample = ""
+    if registered:
+        text, _meta = proactive.render_text(
+            TEMPLATE_ID, {"items_phrase": cart_reminder.items_phrase("عنوان تجريبي", 3)},
+        )
+        sample = f"{text}\n{footer}"
+    return marketing_ops.MarketingEnv(
+        template_registered=registered, footer_explicit=bool(raw_footer),
+        min_warmup_days=min_days, footer_text=footer, sample_text=sample,
     )
-    dropped = repos_policy.cancel_pending_marketing(
-        conn, tenant_id=tenant_id, reason=repos_marketing.MARKETING_DISABLED_REASON,
-    )
-    channels = repos_policy.release_reserved_ledger(
-        conn, outbox_ids=[oid for oid, _ch in dropped],
-    )
-    for channel_id in channels:
-        repos_policy.release_send_slot(conn, channel_id=channel_id, message_class="marketing")
-    jobs = repos_scheduler.cancel_pending_kind(
-        conn, tenant_id=tenant_id, kind="cart_reminder",
-        reason=repos_marketing.MARKETING_DISABLED_REASON,
-    )
-    return {"outbox_dropped": len(dropped), "slots_released": len(channels),
-            "jobs_cancelled": jobs}
 
 
 def preview(
