@@ -401,11 +401,13 @@ class RealtimeWorker:
         # is TEXT-message-only (H96): a media caption carries body text but is
         # not a text message, and only an explicit full word counts.
         if optout_langs:
-            repos_consent.record_optout(
+            action = repos_consent.record_optout(
                 conn, tenant_id=resolution.tenant_id, customer_id=customer_id,
                 message_id=message_id,
             )
-            metrics.consent_events_total.labels("revoked", repos_consent.OPTOUT_REASON).inc()
+            # F-P3-29: a repeated STOP is a noop in the ledger (H99) - counted,
+            # never an error; the queue cancel below runs in BOTH cases.
+            metrics.consent_events_total.labels(action, repos_consent.OPTOUT_REASON).inc()
             # D4: STOP cancels the queue immediately - every pending automation row
             # for a suppressed scope's templates is dropped (sending rows are caught
             # by the send-time gate, H76). The scope->templates map is DERIVED from

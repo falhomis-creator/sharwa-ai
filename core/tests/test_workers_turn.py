@@ -1,23 +1,36 @@
 """Pure deterministic turn-decision + template tests (P1.2, H25/H23).
 
 No DB/Redis: only decide()'s fixed input->output table and the approved
-template texts are under test.
+template texts are under test. P3.3 fix round: decide() takes ONE consent
+input - the customer's LAST explicit consent word (F-P3-28, H96 as amended).
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from app.workers import templates
 from app.workers.config import PROACTIVE_TEMPLATES
-from app.workers.turn import Decision, decide
+from app.workers.turn import Decision, decide, last_consent_word
 
 
 def _decide(**kw: object) -> object:
     base = dict(
         kill_switch_state="on", consecutive_bot_replies=0,
-        max_consecutive=8, optout_detected=False, optin_detected=False,
-        explicit_handoff=False,
+        max_consecutive=8, consent_word=None, explicit_handoff=False,
     )
     base.update(kw)
     return decide(**base)  # type: ignore[arg-type]
+
+
+def _phrase_settings():
+    return SimpleNamespace(
+        core_optout_phrases_ar=("إيقاف", "ايقاف", "توقف"),
+        core_optout_phrases_en=("stop", "unsubscribe"),
+        core_optin_phrases_ar=("اشتراك", "اشترك"),
+        core_optin_phrases_en=("subscribe",),
+        core_handoff_phrases_ar=("موظف",),
+        core_handoff_phrases_en=("human",),
+    )
 
 
 def test_default_decision_is_handoff_not_silence():
@@ -29,27 +42,43 @@ def test_default_decision_is_handoff_not_silence():
     assert d.handoff_reason == "bot_cannot_answer"
 
 
-def test_optout_wins_and_does_not_handoff():
-    d = _decide(optout_detected=True)
+def test_optout_word_gives_optout_confirm_and_no_handoff():
+    d = _decide(consent_word="optout")
     assert d.decision == Decision.OPTOUT_CONFIRM
     assert d.template_id == "optout_confirm"
     assert d.handoff is False
 
 
 def test_optin_confirm_no_handoff():
-    # P3.3/H96: the explicit opt-in word gets its template confirmation.
-    d = _decide(optin_detected=True)
+    # H96: the explicit opt-in word gets its template confirmation.
+    d = _decide(consent_word="optin")
     assert d.decision == Decision.OPTIN_CONFIRM
     assert d.template_id == "optin_confirm"
     assert d.handoff is False
     assert d.handoff_reason is None
 
 
-def test_optout_beats_optin_in_the_same_turn():
-    # H96: a batch carrying both a STOP and an opt-in is a STOP, alone.
-    d = _decide(optout_detected=True, optin_detected=True)
-    assert d.decision == Decision.OPTOUT_CONFIRM
-    assert d.template_id == "optout_confirm"
+def test_one_message_matching_both_lists_is_stop():
+    # F-P3-28: within ONE message STOP beats an opt-in word; last_consent_word
+    # walks by seq and the batch-level winner is the LAST word.
+    settings = _phrase_settings()
+    assert last_consent_word([(1, "إيقاف", "text")], settings) == "optout"
+    # stop then subscribe => the LAST word wins: optin (ledger and reply agree).
+    assert last_consent_word([(1, "stop", "text"), (2, "subscribe", "text")], settings) == "optin"
+    # subscribe then stop => optout.
+    assert last_consent_word([(1, "subscribe", "text"), (2, "stop", "text")], settings) == "optout"
+    # an opt-in word from an IMAGE caption never counts (F-P3-26); a STOP does.
+    assert last_consent_word([(1, "اشتراك", "image")], settings) is None
+    assert last_consent_word([(1, "إيقاف", "image")], settings) == "optout"
+    # no consent word at all => None (the kill-switch ladder decides).
+    assert last_consent_word([(1, "مرحبا", "text")], settings) is None
+    # a word literally in BOTH lists (custom lists) is a STOP in one message.
+    both = SimpleNamespace(
+        core_optout_phrases_ar=("بدّل",), core_optout_phrases_en=(),
+        core_optin_phrases_ar=("بدّل",), core_optin_phrases_en=(),
+        core_handoff_phrases_ar=(), core_handoff_phrases_en=(),
+    )
+    assert last_consent_word([(1, "بدّل", "text")], both) == "optout"
 
 
 def test_killswitch_off_gives_safe_ack_and_handoff():

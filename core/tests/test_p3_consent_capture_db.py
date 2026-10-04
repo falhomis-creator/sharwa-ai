@@ -18,7 +18,7 @@ from app.db import repos_consent
 from app.db import repos_outbox
 from app.db import repos_policy
 from app.db import testsupport as db_testsupport
-from app.workers import realtime, schema
+from app.workers import realtime, schema, turn
 from app.workers.config import (
     DEFAULT_OPTIN_AR,
     DEFAULT_OPTIN_EN,
@@ -126,14 +126,20 @@ def test_text_optin_captures_once_with_identifier_evidence_only(capture_ctx):
 
 def test_stop_via_realtime_writes_history_suppressions_and_cancels_queue(capture_ctx):
     """§4.3: a text STOP => three granted=false rows + three suppressions + the
-    pending automation queue cancelled, and order_updates untouched."""
+    pending automation queue cancelled, and order_updates untouched.
+    F-P3-30.1: the worker's commit CREATES the conversation - read the
+    existing one instead of seeding a second (UniqueViolation trap)."""
     dsn, tid, chid, worker = capture_ctx
     wa = f"9677{uuid.uuid4().int % 10**10:010d}"
     assert _commit(worker, chid, tid, _entry(wa, "مرحبا")) == "committed"
     cid = _customer_id(dsn, tid, wa)
-    conv = db_testsupport.seed_conversation(
-        dsn, tenant_id=tid, channel_id=chid, customer_id=cid, bot_status="active", epoch=0,
-    )
+    with core_db.tenant_tx(tid) as conn:
+        row = conn.execute(
+            "SELECT id FROM conversations WHERE tenant_id = %s AND customer_id = %s",
+            (tid, cid),
+        ).fetchone()
+    assert row is not None
+    conv = row[0]
     oid = db_testsupport.seed_outbox_row(
         dsn, tenant_id=tid, channel_id=chid, conversation_id=conv,
         origin="automation", message_class="utility", to_wa_id=wa,
@@ -200,3 +206,89 @@ def test_full_cycle_optin_stop_optin_via_realtime(capture_ctx):
     assert ok1 is True and stopped is False and blocked is True and ok2 is True
     assert marketing_now is False, "H97: exactly the optout-caused block is lifted"
     assert bis_now is True and rr_now is True, "the other scopes stay blocked"
+
+
+# --- §2(b) / F-P3-26 + F-P3-28: the ledger and the reply agree (4 cases) --------
+
+
+def _turn_view(dsn, tid, cid, settings):
+    """The turn's real read path: typed inbound messages -> last consent word
+    -> decide()."""
+    with core_db.tenant_tx(tid) as conn:
+        conv = conn.execute(
+            "SELECT id FROM conversations WHERE tenant_id = %s AND customer_id = %s",
+            (tid, cid),
+        ).fetchone()
+        assert conv is not None
+        typed = repos_outbox.latest_inbound_typed(conn, conv[0], 0)
+    d = turn.decide(
+        kill_switch_state="on", consecutive_bot_replies=0, max_consecutive=8,
+        consent_word=turn.last_consent_word(typed, settings),
+        explicit_handoff=False,
+    )
+    return d
+
+
+def test_ledger_and_reply_agree_four_cases(capture_ctx):
+    """F-P3-26 + F-P3-28 probes, literal: (1) an image captioned «اشتراك» =>
+    0 ledger rows and the decision is NOT OPTIN_CONFIRM; (2) stop then
+    subscribe => marketing eligible AND OPTIN_CONFIRM; (3) subscribe then stop
+    => not eligible AND OPTOUT_CONFIRM; (4) one message matching BOTH lists
+    => STOP."""
+    dsn, tid, chid, worker = capture_ctx
+    settings = _settings()
+
+    # (1) image caption: no consent, no false confirmation.
+    wa1 = f"9677{uuid.uuid4().int % 10**10:010d}"
+    image = schema.WalEntry(
+        session_id=f"s-{uuid.uuid4()}", provider_message_id=f"pmid-{uuid.uuid4()}",
+        type="image", identity=schema.WalIdentity(wa_id=wa1), text="اشتراك",
+        media=schema.WalMedia(kind="image", status="ok", object_key="obj-a"),
+    )
+    assert _commit(worker, chid, tid, image) == "committed"
+    cid1 = _customer_id(dsn, tid, wa1)
+    assert _history(dsn, tid, cid1) == []
+    d1 = _turn_view(dsn, tid, cid1, settings)
+    assert d1.decision != turn.Decision.OPTIN_CONFIRM
+
+    # (2) stop then subscribe: eligible + OPTIN_CONFIRM (last word wins).
+    wa2 = f"9677{uuid.uuid4().int % 10**10:010d}"
+    assert _commit(worker, chid, tid, _entry(wa2, "إيقاف")) == "committed"
+    assert _commit(worker, chid, tid, _entry(wa2, "اشتراك")) == "committed"
+    cid2 = _customer_id(dsn, tid, wa2)
+    with core_db.tenant_tx(tid) as conn:
+        eligible2 = repos_policy.read_latest_consent(conn, tenant_id=tid, customer_id=cid2, scope="marketing")
+    d2 = _turn_view(dsn, tid, cid2, settings)
+    assert eligible2 is True
+    assert d2.decision == turn.Decision.OPTIN_CONFIRM
+
+    # (3) subscribe then stop: not eligible + OPTOUT_CONFIRM.
+    wa3 = f"9677{uuid.uuid4().int % 10**10:010d}"
+    assert _commit(worker, chid, tid, _entry(wa3, "اشتراك")) == "committed"
+    assert _commit(worker, chid, tid, _entry(wa3, "إيقاف")) == "committed"
+    cid3 = _customer_id(dsn, tid, wa3)
+    with core_db.tenant_tx(tid) as conn:
+        eligible3 = repos_policy.read_latest_consent(conn, tenant_id=tid, customer_id=cid3, scope="marketing")
+    d3 = _turn_view(dsn, tid, cid3, settings)
+    assert eligible3 is False
+    assert d3.decision == turn.Decision.OPTOUT_CONFIRM
+
+    # (4) ONE message matching BOTH lists => STOP (within-message precedence).
+    both_worker = realtime.RealtimeWorker(SimpleNamespace(
+        core_optout_phrases_ar=("بدّل",), core_optout_phrases_en=(),
+        core_optin_phrases_ar=("بدّل",), core_optin_phrases_en=(),
+        core_ingest_max_body_chars=65536,
+    ))
+    both_settings = SimpleNamespace(
+        core_optout_phrases_ar=("بدّل",), core_optout_phrases_en=(),
+        core_optin_phrases_ar=("بدّل",), core_optin_phrases_en=(),
+        core_handoff_phrases_ar=(), core_handoff_phrases_en=(),
+    )
+    wa4 = f"9677{uuid.uuid4().int % 10**10:010d}"
+    assert _commit(both_worker, chid, tid, _entry(wa4, "بدّل")) == "committed"
+    cid4 = _customer_id(dsn, tid, wa4)
+    with core_db.tenant_tx(tid) as conn:
+        suppressed4 = repos_outbox.has_suppression(conn, tid, cid4, "marketing")
+    d4 = _turn_view(dsn, tid, cid4, both_settings)
+    assert suppressed4 is True
+    assert d4.decision == turn.Decision.OPTOUT_CONFIRM

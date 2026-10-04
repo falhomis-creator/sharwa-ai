@@ -174,27 +174,47 @@ def test_record_optout_three_scopes_and_no_order_updates(consent_ctx):
     assert all(r[4] == str(mid) for r in rows), "H98: evidence = the message UUID"
 
 
-def test_optin_after_stop_lifts_only_marketing(consent_ctx):
-    """§4.4: STOP then an opt-in word => granted row + the marketing
-    suppression (cause: customer_message_optout) alone is lifted; the other
-    two scopes stay suppressed; an operator-caused block is NEVER lifted."""
+def test_optin_after_stop_keeps_operator_block(consent_ctx):
+    """F-P3-30.2: the operator block is seeded BEFORE the STOP (so the STOP's
+    ON CONFLICT DO NOTHING preserves its reason); a later customer opt-in
+    returns 'granted' (not granted_and_lifted), the operator marketing block
+    SURVIVES the customer word, and the other scopes stay blocked."""
     dsn, tid = consent_ctx
     cid = _customer(dsn, tid)
     with core_db.tenant_tx(tid) as conn:
-        repos_consent.record_optout(conn, tenant_id=tid, customer_id=cid, message_id=uuid.uuid4())
+        # operator block first - the STOP's own write must NOT overwrite it
         repos_consent.insert_suppressions(
             conn, tenant_id=tid, customer_id=cid, scopes=("marketing",), reason="operator",
         )
+        repos_consent.record_optout(conn, tenant_id=tid, customer_id=cid, message_id=uuid.uuid4())
     with core_db.tenant_tx(tid) as conn:
         result = repos_consent.record_optin(conn, tenant_id=tid, customer_id=cid, message_id=uuid.uuid4())
         marketing_blocked = repos_outbox.has_suppression(conn, tid, cid, "marketing")
         bis = repos_outbox.has_suppression(conn, tid, cid, "back_in_stock")
         rr = repos_outbox.has_suppression(conn, tid, cid, "review_request")
         granted = repos_policy.read_latest_consent(conn, tenant_id=tid, customer_id=cid, scope="marketing")
-    assert result == "granted"  # the optout row was lifted, the operator row remains
+    assert result == "granted"  # nothing was lifted: the marketing row is the operator's
     assert marketing_blocked is True, "H97: an operator block survives the customer word"
     assert bis is True and rr is True, "H97: only the subscribed scope is lifted"
     assert granted is True, "latest-wins: the new granted row reopens the scope"
+
+
+def test_optin_after_customer_stop_only_lifts_marketing(consent_ctx):
+    """F-P3-30.2 (the standalone counterpart): a customer STOP with NO
+    operator block, then an opt-in => 'granted_and_lifted' and back_in_stock
+    + review_request remain blocked."""
+    dsn, tid = consent_ctx
+    cid = _customer(dsn, tid)
+    with core_db.tenant_tx(tid) as conn:
+        repos_consent.record_optout(conn, tenant_id=tid, customer_id=cid, message_id=uuid.uuid4())
+    with core_db.tenant_tx(tid) as conn:
+        result = repos_consent.record_optin(conn, tenant_id=tid, customer_id=cid, message_id=uuid.uuid4())
+        marketing_blocked = repos_outbox.has_suppression(conn, tid, cid, "marketing")
+        bis = repos_outbox.has_suppression(conn, tid, cid, "back_in_stock")
+        rr = repos_outbox.has_suppression(conn, tid, cid, "review_request")
+    assert result == "granted_and_lifted"
+    assert marketing_blocked is False, "exactly the optout-caused block is lifted"
+    assert bis is True and rr is True, "the other scopes stay blocked"
 
 
 def test_record_waitlist_join_scopes_and_lift(consent_ctx):
@@ -276,3 +296,71 @@ def test_interleaved_stop_and_optin_never_corrupts(consent_ctx):
         latest = repos_consent._latest(conn, tenant_id=tid, customer_id=cid, scope="marketing")
     assert len(rows) >= 1
     assert latest is not None, "the final state is exactly the last committed write"
+
+
+# --- F-P3-29: a repeated STOP is a ledger noop ----------------------------------
+
+
+def test_three_consecutive_stops_write_three_rows_not_nine(consent_ctx):
+    """§2(c) / F-P3-29 acceptance: three stop messages in a row => 3 rows
+    total (the 2nd and 3rd are noop), and the block stays enforced."""
+    dsn, tid = consent_ctx
+    cid = _customer(dsn, tid)
+    with core_db.tenant_tx(tid) as conn:
+        assert repos_consent.record_optout(conn, tenant_id=tid, customer_id=cid, message_id=uuid.uuid4()) == "revoked"
+    for _ in range(2):
+        with core_db.tenant_tx(tid) as conn:
+            assert repos_consent.record_optout(conn, tenant_id=tid, customer_id=cid, message_id=uuid.uuid4()) == "noop"
+    rows = _history_rows(dsn, tid, cid)
+    assert len(rows) == 3, "no noise: a STOP after a STOP writes nothing"
+    with core_db.tenant_tx(tid) as conn:
+        for scope in ("marketing", "back_in_stock", "review_request"):
+            assert repos_outbox.has_suppression(conn, tid, cid, scope) is True
+
+
+def test_stop_optin_stop_writes_seven_rows(consent_ctx):
+    """F-P3-29 acceptance (the architect's probe, literal): STOP then opt-in
+    then STOP => 3 + 1 + 3 = 7 rows - the intervening opt-in makes the new
+    STOP speak again (all three scopes re-revoked)."""
+    dsn, tid = consent_ctx
+    cid = _customer(dsn, tid)
+    with core_db.tenant_tx(tid) as conn:
+        assert repos_consent.record_optout(conn, tenant_id=tid, customer_id=cid, message_id=uuid.uuid4()) == "revoked"
+        assert repos_consent.record_optin(conn, tenant_id=tid, customer_id=cid, message_id=uuid.uuid4()) == "granted_and_lifted"
+        assert repos_consent.record_optout(conn, tenant_id=tid, customer_id=cid, message_id=uuid.uuid4()) == "revoked"
+    rows = _history_rows(dsn, tid, cid)
+    assert len(rows) == 7, f"3 + 1 + 3, got {len(rows)}"
+
+
+def _history_rows(dsn, tid, cid):
+    with core_db.tenant_tx(tid) as conn:
+        return repos_consent.read_history(conn, tenant_id=tid, customer_id=cid)
+
+
+# --- F-P3-27: deterministic order inside ONE transaction -------------------------
+
+
+def test_two_rows_one_transaction_deterministic_order_50_iterations(consent_ctx):
+    """§2(d) / F-P3-27: granted=false then granted=true for the same (customer,
+    scope) in ONE transaction => read_latest_consent reflects the LATEST
+    WRITTEN (True), and read_history keeps that write order - 50 consecutive
+    iterations, no interleaving (clock_timestamp() is monotonic in-tx; the
+    old DEFAULT now() tied and the random UUID tiebreaker flipped it)."""
+    dsn, tid = consent_ctx
+    for i in range(50):
+        cid = _customer(dsn, tid)
+        with core_db.tenant_tx(tid) as conn:
+            repos_consent.write_consent(
+                conn, tenant_id=tid, customer_id=cid, scope="marketing",
+                granted=False, source="customer_message_optout", evidence=str(uuid.uuid4()),
+            )
+            repos_consent.write_consent(
+                conn, tenant_id=tid, customer_id=cid, scope="marketing",
+                granted=True, source="customer_message_optin", evidence=str(uuid.uuid4()),
+            )
+            latest = repos_policy.read_latest_consent(
+                conn, tenant_id=tid, customer_id=cid, scope="marketing",
+            )
+            history = repos_consent.read_history(conn, tenant_id=tid, customer_id=cid)
+        assert latest is True, f"iteration {i}: the LAST write must win"
+        assert [r[1] for r in history] == [False, True], f"iteration {i}: history order flipped"

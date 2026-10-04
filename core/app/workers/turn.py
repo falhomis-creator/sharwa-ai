@@ -16,7 +16,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from app import db as core_db
 from app import ws_publish
@@ -55,16 +55,17 @@ def decide(
     kill_switch_state: str | None,
     consecutive_bot_replies: int,
     max_consecutive: int,
-    optout_detected: bool,
-    optin_detected: bool,
+    consent_word: Literal["optout", "optin"] | None,
     explicit_handoff: bool,
 ) -> TurnDecision:
     """Deterministic decision (H25). Order matters (any gate that fails takes an
-    explicit safe path, never silence). P3.3/H96: optout first, then optin -
-    a batch carrying both is a STOP - then the kill-switch ladder."""
-    if optout_detected:
+    explicit safe path, never silence). F-P3-28 (H96 as amended): ONE input -
+    the customer's LAST explicit consent word by arrival order - so the ledger
+    and the reply always agree; 'optout' => OPTOUT_CONFIRM, 'optin' =>
+    OPTIN_CONFIRM, None => the kill-switch ladder as before."""
+    if consent_word == "optout":
         return TurnDecision(Decision.OPTOUT_CONFIRM, "optout_confirm", False, None)
-    if optin_detected:
+    if consent_word == "optin":
         # H96: the explicit opt-in word is confirmed with its template, no
         # handoff; a repeat while already subscribed confirms the same way
         # (the ledger row is a noop - the reply is never silence).
@@ -79,30 +80,6 @@ def decide(
     return TurnDecision(Decision.HANDOFF, "handoff_notice", True, "bot_cannot_answer")
 
 
-def detect_optout(bodies: list[tuple[int, str | None]], settings: WorkerSettings) -> bool:
-    for _seq, body in bodies:
-        if body and optout.detect(
-            body,
-            phrases_ar=settings.core_optout_phrases_ar,
-            phrases_en=settings.core_optout_phrases_en,
-        ):
-            return True
-    return False
-
-
-def detect_optin(bodies: list[tuple[int, str | None]], settings: WorkerSettings) -> bool:
-    """P3.3 (H96): any body in the batch is a full-equality opt-in phrase.
-    STOP precedence lives in decide() (optout is checked first)."""
-    for _seq, body in bodies:
-        if body and optout.detect_optin(
-            body,
-            phrases_ar=settings.core_optin_phrases_ar,
-            phrases_en=settings.core_optin_phrases_en,
-        ):
-            return True
-    return False
-
-
 def detect_handoff(bodies: list[tuple[int, str | None]], settings: WorkerSettings) -> bool:
     for _seq, body in bodies:
         if body and optout.detect_handoff(
@@ -112,6 +89,36 @@ def detect_handoff(bodies: list[tuple[int, str | None]], settings: WorkerSetting
         ):
             return True
     return False
+
+
+def last_consent_word(
+    messages: list[tuple[int, str | None, str]], settings: WorkerSettings,
+) -> Literal["optout", "optin"] | None:
+    """F-P3-28 (H96 as amended): walk the batch's inbound messages by seq and
+    return the LAST explicit consent word - 'optout' or 'optin' - or None.
+    Within ONE message STOP beats an opt-in word; an opt-in counts only from a
+    `type == 'text'` message (F-P3-26: a media caption never opts in) while a
+    STOP counts from any body (a media caption stops, as always). The capture
+    at ingest follows the same per-message rule, so the ledger and this reply
+    can never disagree."""
+    word: Literal["optout", "optin"] | None = None
+    for _seq, body, msg_type in sorted(messages, key=lambda m: m[0]):
+        if not body:
+            continue
+        if optout.detect(
+            body,
+            phrases_ar=settings.core_optout_phrases_ar,
+            phrases_en=settings.core_optout_phrases_en,
+        ):
+            word = "optout"
+            continue
+        if msg_type == "text" and optout.detect_optin(
+            body,
+            phrases_ar=settings.core_optin_phrases_ar,
+            phrases_en=settings.core_optin_phrases_en,
+        ):
+            word = "optin"
+    return word
 
 
 @dataclass(frozen=True)
@@ -315,13 +322,15 @@ def process_turn(
             conn, tenant_id=tenant_id, channel_account_id=channel_id, capability="ai_reply",
         )
         consecutive = repos_outbox.count_consecutive_bot_replies(conn, conversation_id)
-        bodies = repos_outbox.latest_inbound_texts(conn, conversation_id, conv.last_processed_seq)
+        # F-P3-26: typed reads - the opt-in word counts only from a TEXT
+        # message; STOP still matches any body (a media caption stops).
+        typed = repos_outbox.latest_inbound_typed(conn, conversation_id, conv.last_processed_seq)
+        bodies = [(seq, body) for seq, body, _msg_type in typed]
         decision = decide(
             kill_switch_state=kill_switch,
             consecutive_bot_replies=consecutive,
             max_consecutive=settings.core_max_consecutive_bot_replies,
-            optout_detected=detect_optout(bodies, settings),
-            optin_detected=detect_optin(bodies, settings),
+            consent_word=last_consent_word(typed, settings),
             explicit_handoff=detect_handoff(bodies, settings),
         )
 

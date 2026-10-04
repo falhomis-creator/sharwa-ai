@@ -19,6 +19,7 @@ import pytest
 from app import db as core_db
 from app.db import repos_consent
 from app.db import repos_outbox
+from app.db import repos_policy
 from app.db import testsupport as db_testsupport
 from app.policy.types import TemplateMeta
 from app.workers import config, policy_gate, realtime, schema
@@ -164,7 +165,12 @@ def test_matrix_explicit_optin_sends_then_stop_suppresses_then_reoptin_sends(e2e
         repos_consent.record_optin(conn, tenant_id=tid, customer_id=cid, message_id=uuid.uuid4())
     decision, oid = _gate(dsn, tid, chid, conv, wa)
     assert decision.send is True
-    assert db_testsupport.fetch_outbox_status(dsn, oid) == "sending"
+    # F-P3-30.3: the gate RESERVES (H85) - "sending" is the dispatcher's job,
+    # so the outbox row itself stays pending.
+    with core_db.tenant_tx(tid) as conn:
+        ledger = repos_policy.read_ledger_status(conn, outbox_id=oid)
+    assert ledger == "reserved"
+    assert db_testsupport.fetch_outbox_status(dsn, oid) == "pending"
 
     # «إيقاف» through the REAL ingest commit: suppressed at the gate AND the
     # pending queue for the injected marketing template is cancelled.
@@ -197,7 +203,10 @@ def test_matrix_explicit_optin_sends_then_stop_suppresses_then_reoptin_sends(e2e
         repos_consent.record_optin(conn, tenant_id=tid, customer_id=cid, message_id=uuid.uuid4())
     decision3, oid3 = _gate(dsn, tid, chid, conv, wa)
     assert decision3.send is True
-    assert db_testsupport.fetch_outbox_status(dsn, oid3) == "sending"
+    with core_db.tenant_tx(tid) as conn:
+        ledger3 = repos_policy.read_ledger_status(conn, outbox_id=oid3)
+    assert ledger3 == "reserved"  # H85
+    assert db_testsupport.fetch_outbox_status(dsn, oid3) == "pending"
 
 
 def test_matrix_rls_same_wa_id_other_tenant_unaffected(e2e):

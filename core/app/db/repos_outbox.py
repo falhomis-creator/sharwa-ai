@@ -95,6 +95,22 @@ def latest_inbound_texts(
     return [(r[0], r[1]) for r in rows]
 
 
+def latest_inbound_typed(
+    conn: psycopg.Connection, conversation_id: uuid.UUID, after_seq: int,
+) -> list[tuple[int, str | None, str]]:
+    """F-P3-26: (seq, body, type) of unprocessed inbound messages (seq >
+    after_seq), oldest first. The turn's OPT-IN detection must count TEXT
+    messages only (a media caption is body text but never a marketing
+    consent, H96) while STOP still matches any body - so the reader has to
+    expose the real `messages.type` column (NOT NULL, 0001)."""
+    rows = conn.execute(
+        "SELECT seq, body, type FROM messages "
+        "WHERE conversation_id = %s AND direction = 'in' AND seq > %s ORDER BY seq",
+        (conversation_id, after_seq),
+    ).fetchall()
+    return [(r[0], r[1], r[2]) for r in rows]
+
+
 def effective_switch(
     conn: psycopg.Connection, *, tenant_id: uuid.UUID,
     channel_account_id: uuid.UUID, capability: str,

@@ -49,10 +49,15 @@ def write_consent(
     scope: str, granted: bool, source: str, evidence: str | None,
 ) -> None:
     """Append one consents row (latest-wins). The low-level appender the
-    record_* functions build on (H94: append-only, no UPDATE ever)."""
+    record_* functions build on (H94: append-only, no UPDATE ever).
+    F-P3-27: created_at is written EXPLICITLY as clock_timestamp() - the
+    table's DEFAULT now() is the TRANSACTION START time, so two rows from
+    one transaction would tie and the id DESC tiebreaker (a random UUID)
+    could flip latest-wins. clock_timestamp() is strictly monotonic within a
+    transaction, which makes the order deterministic."""
     conn.execute(
-        "INSERT INTO consents (tenant_id, customer_id, scope, granted, source, evidence) "
-        "VALUES (%s, %s, %s, %s, %s, %s)",
+        "INSERT INTO consents (tenant_id, customer_id, scope, granted, source, evidence, created_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s, clock_timestamp())",
         (tenant_id, customer_id, scope, granted, source, evidence),
     )
 
@@ -64,7 +69,13 @@ def insert_suppressions(
     """Write suppression rows (idempotent ON CONFLICT DO NOTHING) - moved here
     from repos_ingest (H95: every suppressions write belongs to the one
     consent writer). order_updates is deliberately never suppressed (service
-    fails open, marketing fails closed - H4). Returns NEW rows written."""
+    fails open, marketing fails closed - H4). Returns NEW rows written.
+    F-P3-30 NOTE: the conflict target is the WHOLE row identity
+    (tenant, customer, scope), and the reason is NOT updated on conflict - a
+    later writer with a different reason is silently swallowed. A future
+    operator-block writer MUST use DO UPDATE SET reason here (or its own
+    writer), otherwise an earlier STOP block swallows the operator reason and
+    a later customer opt-in then lifts a block the operator wanted to keep."""
     written = 0
     for scope in scopes:
         cur = conn.execute(
@@ -138,17 +149,34 @@ def record_optout(
     """A customer's STOP: append granted=false for the three scopes (source
     customer_message_optout, evidence = the message UUID, H98) AND write the
     suppressions exactly as the ingest path always did (H4: order_updates is
-    never touched). Always 'revoked' - every STOP is history (H94)."""
-    for scope in OPTOUT_SCOPES:
-        write_consent(
-            conn, tenant_id=tenant_id, customer_id=customer_id, scope=scope,
-            granted=False, source=OPTOUT_REASON, evidence=str(message_id),
-        )
+    never touched).
+    F-P3-29 (H99: no noise): the STOP is a NOOP when the customer's LATEST
+    consent row (any scope, latest-wins order) is already a
+    customer_message_optout revocation - i.e. no consent event of any kind
+    happened since the previous STOP, so nothing new is said and nothing new
+    is written. Anything else (an opt-in, a waitlist join, an operator write)
+    in between makes the new STOP speak again and it appends all three
+    scopes. Returns 'revoked' when at least one row was written, 'noop' when
+    none was; the suppression block is re-asserted (ON CONFLICT DO NOTHING)
+    in BOTH cases and the queue cancel is the caller's unchanged behavior."""
+    row = conn.execute(
+        "SELECT granted, source FROM consents "
+        "WHERE tenant_id = %s AND customer_id = %s "
+        "ORDER BY created_at DESC, id DESC LIMIT 1",
+        (tenant_id, customer_id),
+    ).fetchone()
+    already_stopped = row is not None and not bool(row[0]) and str(row[1]) == OPTOUT_REASON
+    if not already_stopped:
+        for scope in OPTOUT_SCOPES:
+            write_consent(
+                conn, tenant_id=tenant_id, customer_id=customer_id, scope=scope,
+                granted=False, source=OPTOUT_REASON, evidence=str(message_id),
+            )
     insert_suppressions(
         conn, tenant_id=tenant_id, customer_id=customer_id,
         scopes=OPTOUT_SCOPES, reason=OPTOUT_REASON,
     )
-    return "revoked"
+    return "noop" if already_stopped else "revoked"
 
 
 def record_waitlist_join(

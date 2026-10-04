@@ -16,6 +16,7 @@ from app.workers.config import (
     DEFAULT_OPTOUT_AR,
     DEFAULT_OPTOUT_EN,
 )
+from app.workers.turn import last_consent_word
 
 _AR = DEFAULT_OPTIN_AR
 _EN = DEFAULT_OPTIN_EN
@@ -94,20 +95,31 @@ def test_stop_phrase_is_stop_not_optin():
     assert _optin(msg) is False
 
 
-def test_batch_with_stop_and_optin_is_stop_alone():
-    # §4.6 (turn level): both bodies present => OPTOUT_CONFIRM.
+def test_batch_with_stop_and_optin_last_word_wins():
+    # §4.6 / F-P3-28 (H96 as amended): in the batch the LAST explicit word by
+    # arrival order wins - here «إيقاف» follows «اشتراك», so the turn is a
+    # STOP, and the ledger (written message-by-message) agrees.
     settings = _turn_settings()
-    bodies = [(1, "اشتراك"), (2, "إيقاف")]
-    assert turn.detect_optout(bodies, settings) is True
-    assert turn.detect_optin(bodies, settings) is True
+    typed = [(1, "اشتراك", "text"), (2, "إيقاف", "text")]
+    word = last_consent_word(typed, settings)
+    assert word == "optout"
     d = turn.decide(
         kill_switch_state="on", consecutive_bot_replies=0, max_consecutive=8,
-        optout_detected=turn.detect_optout(bodies, settings),
-        optin_detected=turn.detect_optin(bodies, settings),
+        consent_word=word,
         explicit_handoff=False,
     )
     assert d.decision == turn.Decision.OPTOUT_CONFIRM
     assert d.template_id == "optout_confirm"
+    # And the other direction: stop then subscribe => the customer opted back
+    # in, the ledger says granted, and so does the reply.
+    word2 = last_consent_word([(1, "إيقاف", "text"), (2, "اشتراك", "text")], settings)
+    assert word2 == "optin"
+    d2 = turn.decide(
+        kill_switch_state="on", consecutive_bot_replies=0, max_consecutive=8,
+        consent_word=word2,
+        explicit_handoff=False,
+    )
+    assert d2.decision == turn.Decision.OPTIN_CONFIRM
 
 
 def test_marketing_stays_dark_in_the_catalog():
