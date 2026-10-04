@@ -79,6 +79,19 @@ DEFAULT_OPTOUT_AR = (
 )
 DEFAULT_OPTOUT_EN = ("stop", "unsubscribe", "opt out", "optout")
 
+# P3.3 (H96): default opt-IN phrases. FULL-EQUALITY match only (optout.detect_optin)
+# - a "نعم", a purchase, silence, or a waitlist join is NEVER a marketing
+# consent. FORBIDDEN here: "نعم"/"موافق"/"ok"/"yes" (H96, literal). Env-tunable
+# without a code deploy like STOP (OQ-P3-13: the owner reviews these lists).
+DEFAULT_OPTIN_AR = (
+    "اشتراك",
+    "اشترك",
+    "اشتراك في الرسائل",
+    "فعل الرسائل",
+    "فعّل الرسائل",
+)
+DEFAULT_OPTIN_EN = ("subscribe", "start", "opt in", "optin")
+
 # D6: deterministic "hand me to a human" phrases (same whole/beginning match,
 # H25 - no classifier). customer_requested is reserved for an ACTUAL match.
 DEFAULT_HANDOFF_AR = ("موظف", "شخص حقيقي", "بشري", "ممثل", "خدمة العملاء", "حولني", "انسان", "إنسان")
@@ -295,6 +308,8 @@ class WorkerSettings:
     core_worker_metrics_port: int
     core_optout_phrases_ar: tuple[str, ...]
     core_optout_phrases_en: tuple[str, ...]
+    core_optin_phrases_ar: tuple[str, ...]
+    core_optin_phrases_en: tuple[str, ...]
     core_handoff_phrases_ar: tuple[str, ...]
     core_handoff_phrases_en: tuple[str, ...]
     dedupe_done_ttl_s: int
@@ -596,6 +611,12 @@ class WorkerSettings:
             ),
             core_optout_phrases_en=_csv(
                 "CORE_OPTOUT_PHRASES_EN", ",".join(DEFAULT_OPTOUT_EN)
+            ),
+            core_optin_phrases_ar=_csv(
+                "CORE_OPTIN_PHRASES_AR", ",".join(DEFAULT_OPTIN_AR)
+            ),
+            core_optin_phrases_en=_csv(
+                "CORE_OPTIN_PHRASES_EN", ",".join(DEFAULT_OPTIN_EN)
             ),
             core_handoff_phrases_ar=_csv(
                 "CORE_HANDOFF_PHRASES_AR", ",".join(DEFAULT_HANDOFF_AR)

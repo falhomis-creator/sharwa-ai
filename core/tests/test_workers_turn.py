@@ -6,13 +6,15 @@ template texts are under test.
 from __future__ import annotations
 
 from app.workers import templates
+from app.workers.config import PROACTIVE_TEMPLATES
 from app.workers.turn import Decision, decide
 
 
 def _decide(**kw: object) -> object:
     base = dict(
         kill_switch_state="on", consecutive_bot_replies=0,
-        max_consecutive=8, optout_detected=False, explicit_handoff=False,
+        max_consecutive=8, optout_detected=False, optin_detected=False,
+        explicit_handoff=False,
     )
     base.update(kw)
     return decide(**base)  # type: ignore[arg-type]
@@ -32,6 +34,22 @@ def test_optout_wins_and_does_not_handoff():
     assert d.decision == Decision.OPTOUT_CONFIRM
     assert d.template_id == "optout_confirm"
     assert d.handoff is False
+
+
+def test_optin_confirm_no_handoff():
+    # P3.3/H96: the explicit opt-in word gets its template confirmation.
+    d = _decide(optin_detected=True)
+    assert d.decision == Decision.OPTIN_CONFIRM
+    assert d.template_id == "optin_confirm"
+    assert d.handoff is False
+    assert d.handoff_reason is None
+
+
+def test_optout_beats_optin_in_the_same_turn():
+    # H96: a batch carrying both a STOP and an opt-in is a STOP, alone.
+    d = _decide(optout_detected=True, optin_detected=True)
+    assert d.decision == Decision.OPTOUT_CONFIRM
+    assert d.template_id == "optout_confirm"
 
 
 def test_killswitch_off_gives_safe_ack_and_handoff():
@@ -58,6 +76,10 @@ def test_templates_are_owner_approved_and_clean():
     assert "بوت" not in templates.template_text("handoff_notice")
     assert "ذكاء" not in templates.template_text("handoff_notice")
     assert templates.template_text("optout_confirm").startswith("تم إيقاف الرسائل")
+    # P3.3 (OQ-P3-10): the proposed opt-in confirmation, kept verbatim.
+    assert templates.template_text("optin_confirm").startswith("تم تفعيل الرسائل الترويجية بنجاح")
+    # It is a REPLY template, never a proactive/marketing send (marketing stays dark).
+    assert "optin_confirm" not in PROACTIVE_TEMPLATES
     assert templates.template_text("safe_ack").startswith("وصلتنا رسالتك")
 
 

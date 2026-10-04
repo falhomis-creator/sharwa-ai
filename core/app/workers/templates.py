@@ -25,6 +25,12 @@ TEMPLATES: dict[str, str] = {
         "تم إيقاف الرسائل الترويجية والتسويقية بنجاح. سنستمر فقط في إرسال "
         "التحديثات الهامة الخاصة بحالة طلباتك لضمان وصول شحناتك في الوقت المحدد. 📦"
     ),
+    # P3.3 opt-in confirmation. PROPOSED text (OQ-P3-10) kept VERBATIM until
+    # the owner decides otherwise - it is a reply to an inbound message, not a
+    # proactive send, so it is NOT in POLICY_EXEMPT_TEMPLATES either.
+    "optin_confirm": (
+        "تم تفعيل الرسائل الترويجية بنجاح. يمكنك إيقافها في أي وقت بإرسال كلمة «إيقاف». 🎁"
+    ),
     "safe_ack": "وصلتنا رسالتك، شكراً لتواصلك معنا! سيتم مراجعتها قريباً.",
     # P1.7 order tracking (PROMPT §6). Conservative, no time promise, no
     # "بوت"/"ذكاء اصطناعي" (OQ-P1-08). order_unverified + order_blocked hand off.

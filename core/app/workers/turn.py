@@ -37,6 +37,7 @@ from app.workers.stream import TransientError
 
 class Decision(str, Enum):
     OPTOUT_CONFIRM = "optout_confirm"
+    OPTIN_CONFIRM = "optin_confirm"
     SAFE_ACK = "safe_ack"
     HANDOFF = "handoff"
 
@@ -55,12 +56,19 @@ def decide(
     consecutive_bot_replies: int,
     max_consecutive: int,
     optout_detected: bool,
+    optin_detected: bool,
     explicit_handoff: bool,
 ) -> TurnDecision:
     """Deterministic decision (H25). Order matters (any gate that fails takes an
-    explicit safe path, never silence)."""
+    explicit safe path, never silence). P3.3/H96: optout first, then optin -
+    a batch carrying both is a STOP - then the kill-switch ladder."""
     if optout_detected:
         return TurnDecision(Decision.OPTOUT_CONFIRM, "optout_confirm", False, None)
+    if optin_detected:
+        # H96: the explicit opt-in word is confirmed with its template, no
+        # handoff; a repeat while already subscribed confirms the same way
+        # (the ledger row is a noop - the reply is never silence).
+        return TurnDecision(Decision.OPTIN_CONFIRM, "optin_confirm", False, None)
     if kill_switch_state == "off":
         return TurnDecision(Decision.SAFE_ACK, "safe_ack", True, "kill_switch_off")
     if explicit_handoff:
@@ -77,6 +85,19 @@ def detect_optout(bodies: list[tuple[int, str | None]], settings: WorkerSettings
             body,
             phrases_ar=settings.core_optout_phrases_ar,
             phrases_en=settings.core_optout_phrases_en,
+        ):
+            return True
+    return False
+
+
+def detect_optin(bodies: list[tuple[int, str | None]], settings: WorkerSettings) -> bool:
+    """P3.3 (H96): any body in the batch is a full-equality opt-in phrase.
+    STOP precedence lives in decide() (optout is checked first)."""
+    for _seq, body in bodies:
+        if body and optout.detect_optin(
+            body,
+            phrases_ar=settings.core_optin_phrases_ar,
+            phrases_en=settings.core_optin_phrases_en,
         ):
             return True
     return False
@@ -300,6 +321,7 @@ def process_turn(
             consecutive_bot_replies=consecutive,
             max_consecutive=settings.core_max_consecutive_bot_replies,
             optout_detected=detect_optout(bodies, settings),
+            optin_detected=detect_optin(bodies, settings),
             explicit_handoff=detect_handoff(bodies, settings),
         )
 

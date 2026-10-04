@@ -795,6 +795,20 @@ scheduler_handler_errors_total = Counter(
     registry=registry,
 )
 
+
+# --- P3.3 consent capture (H94-H99) -------------------------------------------
+# Closed labels only (H20/H48): no tenant / customer / message text or phone -
+# the (action, source) pair is the whole story; the evidence stays a UUID in
+# the append-only ledger (H98). action vocabulary: granted | revoked | noop |
+# lifted (granted_and_lifted counts one granted + one lifted).
+
+consent_events_total = Counter(
+    "consent_events_total",
+    "Consent ledger events (granted|revoked|noop|lifted), by source.",
+    labelnames=["action", "source"],
+    registry=registry,
+)
+
 scheduler_oldest_due_seconds = Gauge(
     "scheduler_oldest_due_seconds",
     "Age in seconds of the oldest overdue pending job, by kind (SchedulerLagHigh).",

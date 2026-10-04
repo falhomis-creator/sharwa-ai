@@ -51,6 +51,25 @@ def detect(message: str, *, phrases_ar: tuple[str, ...], phrases_en: tuple[str, 
     return tuple(detected)
 
 
+def detect_optin(message: str, *, phrases_ar: tuple[str, ...], phrases_en: tuple[str, ...]) -> bool:
+    """P3.3 (H96): True only when the WHOLE normalized message EQUALS one of
+    the opt-in phrases - no startswith, no contains, no classifier (an opt-in
+    is an explicit, unambiguous word; "اشتراك الباقة كم سعرها" is a question,
+    not a consent). STOP precedence is the CALLER's rule (checked first);
+    a message that matches both lists is a STOP, and «إيقاف اشتراك» never
+    full-equals an opt-in phrase anyway. Never logs the text (H20)."""
+    if not message:
+        return False
+    normalized = normalize(message)
+    if not normalized:
+        return False
+    for phrase in tuple(phrases_ar) + tuple(phrases_en):
+        p = normalize(phrase)
+        if p and p == normalized:
+            return True
+    return False
+
+
 def detect_handoff(message: str, *, phrases_ar: tuple[str, ...], phrases_en: tuple[str, ...]) -> bool:
     """D6: True when the customer explicitly asks for a human (same normalize +
     whole/beginning match, same deterministic word-list discipline - H25)."""

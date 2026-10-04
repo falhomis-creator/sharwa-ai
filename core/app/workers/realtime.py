@@ -395,11 +395,17 @@ class RealtimeWorker:
         )
         metrics.inbox_events_written_total.labels("message.new").inc()
 
+        # P3.3 capture (H96/H99): STOP first - a message matching both lists
+        # is a STOP, never an opt-in. Both write in THIS commit transaction,
+        # with the message id as the only evidence (H98). The opt-in capture
+        # is TEXT-message-only (H96): a media caption carries body text but is
+        # not a text message, and only an explicit full word counts.
         if optout_langs:
-            repos_consent.insert_suppressions(
+            repos_consent.record_optout(
                 conn, tenant_id=resolution.tenant_id, customer_id=customer_id,
-                scopes=repos_consent.OPTOUT_SCOPES, reason=repos_consent.OPTOUT_REASON,
+                message_id=message_id,
             )
+            metrics.consent_events_total.labels("revoked", repos_consent.OPTOUT_REASON).inc()
             # D4: STOP cancels the queue immediately - every pending automation row
             # for a suppressed scope's templates is dropped (sending rows are caught
             # by the send-time gate, H76). The scope->templates map is DERIVED from
@@ -411,6 +417,22 @@ class RealtimeWorker:
                         conn, tenant_id=resolution.tenant_id, customer_id=customer_id,
                         template_ids=template_ids,
                     )
+        elif entry.type == "text" and optout.detect_optin(
+            entry.text or "",
+            phrases_ar=self.settings.core_optin_phrases_ar,
+            phrases_en=self.settings.core_optin_phrases_en,
+        ):
+            action = repos_consent.record_optin(
+                conn, tenant_id=resolution.tenant_id, customer_id=customer_id,
+                message_id=message_id,
+            )
+            if action == "granted":
+                metrics.consent_events_total.labels("granted", "customer_message_optin").inc()
+            elif action == "granted_and_lifted":
+                metrics.consent_events_total.labels("granted", "customer_message_optin").inc()
+                metrics.consent_events_total.labels("lifted", "customer_message_optin").inc()
+            else:  # noop: already subscribed by an explicit message opt-in
+                metrics.consent_events_total.labels("noop", "customer_message_optin").inc()
 
         return CommitResult(
             outcome="committed", session_id=entry.session_id,
