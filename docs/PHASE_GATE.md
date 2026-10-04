@@ -121,9 +121,15 @@ P3.1: CLOSED (مشروط) — بإغلاق F-P3-20 وF-P3-21 والتحقق: run
 P3.1: CLOSED (نهائياً) — 2026-10-04: شرطا الإغلاق تحقّقا على قاعدة حقيقية (PG16+PostGIS+Redis) بالتزام c1b6e0b: F-P3-20 مُغلَق (exclude_outbox_id في count_class_handoffs وgate؛ decide() ما زالت قبل فحص الدفتر H85) وF-P3-21 مُغلَق (مقارنة مجموعات + N=30 بدفعة 20). البوّابة `STATIC GATE PASSED — 0 violations.` rc=0؛ نقي `303 passed`؛ run_db_suite ⇒ `[run 1] 303 passed in 202.98s` و`[run 2] 303 passed in 202.90s` ⇒ `DB SUITE: STABLE (303 passed twice)` [2026-10-03 22:13–22:20Z].
 P3.2-STEP0: APPROVED (c1b6e0b) — المراحل B–G مُصرَّح بها بـPROMPT_P3_02_for_deepseek.md حرفياً، التزام لكل مرحلة، ولا بند «fixed» بلا ناتج قاعدة وإلا UNVERIFIED (no db) يشغّله المعماري. لا تسجيل لأي قالب تسويقي ولا cart_reminder في الكتالوج (التسويق مُظلَم حتى P3.4).
 P3.2: OPEN — محرك الجدولة والأحداث المتأخرة + نقطة استقبال أحداث السلة المتروكة (التسويق ما زال مُظلَماً). بـ PROMPT_P3_02_for_deepseek.md. الخطوة صفر الإلزامية: F-P3-20 وF-P3-21 + run_db_suite أخضر مرّتين متساويتين قبل أي مرحلة تالية. أرقام §4 مقترحات بانتظار موافقة المالك (OQ-P3-06). P3.3..: LOCKED
+P3.2: CLOSED (مشروط) — 2026-10-04، docs/P3_02_FINAL_AUDIT.md. الالتزامات 51745c5→124715b على قاعدة حقيقية: البوّابة `STATIC GATE PASSED — 0 violations.` rc=0؛ نقي `306 passed`؛ 0015 يُطبَّق ويُعاد مرّتين بلا خطأ؛ run_db_suite ⇒ `[run 1] 347 passed in 195.11s` و`[run 2] 347 passed in 198.95s` ⇒ `DB SUITE: STABLE (347 passed twice)`. S24 مثبَتة بحقن المعماري. التسويق ما زال مُظلَماً (الاختبار المظلم يمرّ).
+F-P3-22 [متوسط، كامن، حاجز لـP3.4]: مهمة مُلغاة إلغاءً قابلاً للتعافي (too_late/template_not_registered/no_conversation) لا تُعاد جدولتها بنشاط السلة الجديد (schedule = DO NOTHING) ⇒ سلة open يتيمة؛ والإظلام يحرق خط الأنابيب فلا يُذكَّر أحد عند تسجيل القالب في P3.4. مسبار: job status=cancelled والسلة open. مفتوح — الخطوة صفر في P3.3.
+F-P3-23 [منخفض-متوسط]: fail_attempt/defer/complete/finish_failed بلا `AND status='processing'` ⇒ cancel ثم fail_attempt ⇒ status=pending (الإلغاء يُبعَث). مفتوح — الخطوة صفر في P3.3.
+F-P3-24 [منخفض]: حدث نهائي قبل أول cart.updated لا يُوشَّم فيُعاد فتح السلة بتحديث قديم. يُوثَّق في PLATFORM_CART_CONTRACT.md فقط الآن.
+الدستور: أُضيفت H87–H93 (بنصّها + تعديل H92) إلى docs/CONSTITUTION.md بيد المعماري.
+P3.3: OPEN — الخطوة صفر الإلزامية فقط: F-P3-22 وF-P3-23 (وتوثيق F-P3-24) + run_db_suite أخضر مرّتين متساويتين. نطاق P3.3 (التقاط الموافقة التسويقية) بانتظار تحديد المالك، ولا يُكتب منه سطر قبل الخطوة صفر. P3.4..: LOCKED. أرقام §4 (OQ-P3-06) وOQ-P3-08 بانتظار المالك قبل P3.4.
 P2.4: APPROVED
 P2: CLOSED — الشرطان تحقّقا على قاعدة حقيقية (2026-10-03، docs/P3_01_FINAL_AUDIT.md): F-P2-07 (البذر + الاختبار الذهبي) وF-P1-12 (dispatch_cycle يُرسل صفوف bot/human/automation على القاعدة).
-P3: OPEN (P3.2)
+P3: OPEN (P3.3 — الخطوة صفر)
 P4: LOCKED
 P5: LOCKED
 
