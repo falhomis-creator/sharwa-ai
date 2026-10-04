@@ -20,7 +20,7 @@ test itself needs to control which connection/transaction they run on (e.g.
 from __future__ import annotations
 
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 import psycopg
@@ -149,6 +149,8 @@ def delete_tenant_full(dsn: str, tenant_id: uuid.UUID) -> None:
             "DELETE FROM stock_levels WHERE tenant_id = %s",
             "DELETE FROM geo_gazetteer WHERE tenant_id = %s",
             "DELETE FROM scheduled_jobs WHERE tenant_id = %s",
+            # carts references customers (P3.2), so it MUST precede customers.
+            "DELETE FROM carts WHERE tenant_id = %s",
             "DELETE FROM tenant_counters WHERE tenant_id = %s",
             "DELETE FROM tenant_budgets WHERE tenant_id = %s",
             "DELETE FROM staff_members WHERE tenant_id = %s",
@@ -521,6 +523,11 @@ def seed_tenant_with_rows(dsn: str, *, tenant_id: uuid.UUID) -> None:
             "VALUES (%s, 'landmark', 'مطعم', 'مطعم', ST_GeomFromText('POINT(44.2 15.3)', 4326))",
             (tenant_id,),
         )
+        conn.execute(
+            "INSERT INTO carts (tenant_id, customer_id, platform_cart_id, status, last_activity_at, snapshot) "
+            "VALUES (%s, %s, 'CART-CLEANUP', 'open', now(), '{}'::jsonb)",
+            (tenant_id, cust[0]),
+        )
 
 
 def seed_conversation(
@@ -562,6 +569,7 @@ def seed_outbox_row(
     dsn: str, *, tenant_id: uuid.UUID, channel_id: uuid.UUID,
     conversation_id: uuid.UUID | None, origin: str, message_class: str, to_wa_id: str,
     expected_epoch: int | None = None, status: str = "pending", payload: dict | None = None,
+    idempotency_key: str | None = None,
 ) -> uuid.UUID:
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
@@ -569,7 +577,8 @@ def seed_outbox_row(
             "idempotency_key, origin, message_class, expected_epoch, to_wa_id, payload, status) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
             (
-                tenant_id, conversation_id, channel_id, f"dispatch-{uuid.uuid4()}",
+                tenant_id, conversation_id, channel_id,
+                idempotency_key or f"dispatch-{uuid.uuid4()}",
                 origin, message_class, expected_epoch, to_wa_id, Jsonb(payload or {}), status,
             ),
         ).fetchone()
@@ -677,12 +686,142 @@ def fast_forward_number_health(dsn: str, *, channel_id: uuid.UUID) -> None:
         )
 
 
+# --- P3.2 scheduler + carts helpers (engine/webhook/e2e tests) ---------------
+
+
+def db_now(dsn: str) -> datetime:
+    """The DATABASE's clock (claim_due_jobs compares run_at to now(), so engine
+    tests must compute margins against the DB clock, not the test process's)."""
+    with psycopg.connect(dsn) as conn:
+        row = conn.execute("SELECT now()").fetchone()
+    assert row is not None
+    return row[0]
+
+
+def insert_cart(
+    dsn: str, *, tenant_id: uuid.UUID, customer_id: uuid.UUID, platform_cart_id: str,
+    status: str = "open", last_activity_at: datetime | None = None,
+    snapshot: dict | None = None,
+) -> uuid.UUID:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "INSERT INTO carts (tenant_id, customer_id, platform_cart_id, status, "
+            "last_activity_at, snapshot) VALUES (%s, %s, %s, %s, COALESCE(%s, now()), %s) "
+            "RETURNING id",
+            (tenant_id, customer_id, platform_cart_id, status, last_activity_at, Jsonb(snapshot or {})),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("INSERT ... RETURNING id produced no row")
+    return row[0]
+
+
+def fetch_cart(dsn: str, tenant_id: uuid.UUID, platform_cart_id: str) -> dict | None:
+    with psycopg.connect(dsn) as conn:
+        row = conn.execute(
+            "SELECT id, customer_id, status, last_activity_at, snapshot "
+            "FROM carts WHERE tenant_id = %s AND platform_cart_id = %s",
+            (tenant_id, platform_cart_id),
+        ).fetchone()
+    if row is None:
+        return None
+    return {"id": row[0], "customer_id": row[1], "status": row[2],
+            "last_activity_at": row[3], "snapshot": row[4]}
+
+
+def insert_scheduled_job(
+    dsn: str, *, tenant_id: uuid.UUID, kind: str, dedupe_key: str,
+    run_at: datetime | None = None, payload: dict | None = None,
+    max_lateness_s: int = 0, status: str = "pending", attempts: int = 0,
+    locked_until: datetime | None = None,
+) -> uuid.UUID:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "INSERT INTO scheduled_jobs (tenant_id, kind, dedupe_key, run_at, payload, "
+            "max_lateness_s, status, attempts, locked_until) "
+            "VALUES (%s, %s, %s, COALESCE(%s, now() - interval '1 hour'), %s, %s, %s, %s, %s) "
+            "RETURNING id",
+            (tenant_id, kind, dedupe_key, run_at, Jsonb(payload or {}), max_lateness_s,
+             status, attempts, locked_until),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("INSERT ... RETURNING id produced no row")
+    return row[0]
+
+
+def fetch_scheduled_job(dsn: str, job_id: uuid.UUID) -> dict | None:
+    with psycopg.connect(dsn) as conn:
+        row = conn.execute(
+            "SELECT id, tenant_id, kind, dedupe_key, run_at, status, attempts, "
+            "max_lateness_s, cancel_reason, last_error, finished_at "
+            "FROM scheduled_jobs WHERE id = %s",
+            (job_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {"id": row[0], "tenant_id": row[1], "kind": row[2], "dedupe_key": row[3],
+            "run_at": row[4], "status": row[5], "attempts": row[6],
+            "max_lateness_s": row[7], "cancel_reason": row[8], "last_error": row[9],
+            "finished_at": row[10]}
+
+
+def fetch_scheduled_job_by_key(dsn: str, tenant_id: uuid.UUID, dedupe_key: str) -> dict | None:
+    with psycopg.connect(dsn) as conn:
+        row = conn.execute(
+            "SELECT id, kind, run_at, status, attempts, cancel_reason, last_error "
+            "FROM scheduled_jobs WHERE tenant_id = %s AND dedupe_key = %s",
+            (tenant_id, dedupe_key),
+        ).fetchone()
+    if row is None:
+        return None
+    return {"id": row[0], "kind": row[1], "run_at": row[2], "status": row[3],
+            "attempts": row[4], "cancel_reason": row[5], "last_error": row[6]}
+
+
+def fast_forward_jobs(dsn: str, *, tenant_id: uuid.UUID) -> None:
+    """P3.2 engine tests: make every pending job due now (no sleep)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE scheduled_jobs SET run_at = '1970-01-01'::timestamptz, locked_until = NULL "
+            "WHERE tenant_id = %s AND status = 'pending'",
+            (tenant_id,),
+        )
+
+
+def expire_job_lease(dsn: str, job_id: uuid.UUID) -> None:
+    """Simulate a dead worker: the job is 'processing' but its lease is past."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE scheduled_jobs SET locked_until = now() - interval '1 hour' WHERE id = %s",
+            (job_id,),
+        )
+
+
+def reset_job_to_pending(dsn: str, job_id: uuid.UUID) -> None:
+    """Simulate a crash after the handler's effects but before `complete`."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE scheduled_jobs SET status = 'pending', locked_until = NULL WHERE id = %s",
+            (job_id,),
+        )
+
+
+def count_outbox_by_idempotency_key(dsn: str, tenant_id: uuid.UUID, idempotency_key: str) -> int:
+    with psycopg.connect(dsn) as conn:
+        row = conn.execute(
+            "SELECT count(*) FROM outbox WHERE tenant_id = %s AND idempotency_key = %s",
+            (tenant_id, idempotency_key),
+        ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
 def count_rows_for_tenant(dsn: str, *, table: str, tenant_id: uuid.UUID) -> int:
     """Count `tenant_id = %s` rows on one of the six cleanup-test tables (a
     CLOSED allowlist - the same whitelist pattern as INBOX_EVENT_ALLOWED_KEYS)."""
     allowed = frozenset({
         "waitlist_entries", "stock_holds", "address_resolutions",
         "order_lookup_attempts", "verifier_blocks", "geo_gazetteer", "proactive_ledger",
+        "carts",
     })
     if table not in allowed:
         raise ValueError(f"table {table!r} not in the cleanup-test allowlist")
@@ -720,6 +859,16 @@ __all__: Sequence[str] = (
     "fetch_outbox_policy_reason",
     "fast_forward_outbox",
     "fast_forward_number_health",
+    "db_now",
+    "insert_cart",
+    "fetch_cart",
+    "insert_scheduled_job",
+    "fetch_scheduled_job",
+    "fetch_scheduled_job_by_key",
+    "fast_forward_jobs",
+    "expire_job_lease",
+    "reset_job_to_pending",
+    "count_outbox_by_idempotency_key",
     "fetch_schema_migration_checksum",
     "fetch_schema_migrations",
     "fetch_tenant_row",

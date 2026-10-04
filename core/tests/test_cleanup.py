@@ -15,6 +15,7 @@ pytestmark = pytest.mark.db
 _TABLES = (
     "waitlist_entries", "stock_holds", "address_resolutions",
     "order_lookup_attempts", "verifier_blocks", "geo_gazetteer", "proactive_ledger",
+    "carts",
 )
 
 
