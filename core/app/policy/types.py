@@ -12,11 +12,13 @@ OK = "ok"
 DROP_REASONS = frozenset({
     "unknown_template", "expired", "kill_switch_off", "conversation_closed",
     "suppressed", "no_consent", "no_prior_interaction", "frequency_cap_skip",
+    "marketing_not_enabled",   # P3.4 (H100): the tenant has not been enabled for marketing
 })
 DEFER_REASONS = frozenset({
     "channel_not_connected", "number_paused", "human_active", "active_chat",
     "quiet_hours", "frequency_cap_defer", "cap_reached", "spacing",
     "no_health_row", "policy_error", "invalid_timezone",
+    "canary_cap_reached",      # P3.4 (H102): the tenant's per-day canary cap is spent
 })
 REASONS = DROP_REASONS | DEFER_REASONS | {"ok"}
 
@@ -54,6 +56,11 @@ class PolicyInput:
     per_24h_marketing: int
     per_7d_marketing: int
     per_24h_utility: int
+    # P3.4 (H100-H102). Defaults are FAIL-CLOSED: a caller that forgets to pass
+    # them gets "marketing not enabled", never an accidental enablement.
+    marketing_enabled: bool = False
+    tenant_marketing_24h: int = 0
+    canary_cap: int = 0
 
 
 @dataclass(frozen=True)

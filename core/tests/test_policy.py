@@ -26,6 +26,7 @@ def _inp(**kw) -> PolicyInput:
         number_paused=False, human_active=False, active_chat=False, quiet_hours=False,
         marketing_24h=0, marketing_7d=0, utility_24h=0,
         per_24h_marketing=1, per_7d_marketing=2, per_24h_utility=3,
+        marketing_enabled=True, tenant_marketing_24h=0, canary_cap=5,
     )
     base.update(kw)
     return PolicyInput(**base)

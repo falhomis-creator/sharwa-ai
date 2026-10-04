@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
+from app.db import repos_marketing
 from app.db import repos_outbox
 from app.db import repos_policy
 from app.db.context import tenant_tx
@@ -75,6 +76,10 @@ def _defer_until(reason, *, now, settings, conn, tenant_id, customer_id, tz_name
         last = repos_policy.last_inbound_at(conn, tenant_id=tenant_id, customer_id=customer_id)
         if last is not None:
             return last + timedelta(seconds=settings.send_policy_active_chat_cooldown_s)
+    if reason == "canary_cap_reached":
+        # H102: re-poll every 15 minutes, not every 60s - the cap is a rolling
+        # 24h window, hammering it wastes cycles (the row's TTL still bounds it).
+        return now + timedelta(minutes=15)
     return now + timedelta(seconds=60)
 
 
@@ -155,6 +160,21 @@ def gate(settings: WorkerSettings, row: repos_outbox.OutboxRow, *, now: datetime
             message_class="utility", hours=24, now=now, exclude_outbox_id=row.id,
         ) if customer_id is not None else 0
 
+        # P3.4 (H100/H102): per-tenant enablement + the ledger-counted canary.
+        # Only a MARKETING row reads them; absence of an activation row = disabled
+        # (and the PolicyInput defaults are fail-closed too).
+        marketing_enabled = False
+        tenant_marketing_24h = 0
+        canary_cap = 0
+        if meta.message_class == "marketing":
+            activation = repos_marketing.read_activation(conn, tenant_id=row.tenant_id)
+            if activation is not None and activation["enabled"]:
+                marketing_enabled = True
+                canary_cap = int(activation["canary_cap_per_day"])
+                tenant_marketing_24h = repos_marketing.marketing_sent_24h(
+                    conn, tenant_id=row.tenant_id, now=now, exclude_outbox_id=row.id,
+                )
+
         inp = PolicyInput(
             template=meta, now=now, created_at=row.created_at, ttl_hours=ttl_hours,
             kill_switch_state=kill_switch,
@@ -169,6 +189,8 @@ def gate(settings: WorkerSettings, row: repos_outbox.OutboxRow, *, now: datetime
             per_24h_marketing=settings.send_policy_marketing_per_24h,
             per_7d_marketing=settings.send_policy_marketing_per_7d,
             per_24h_utility=settings.send_policy_utility_per_24h,
+            marketing_enabled=marketing_enabled,
+            tenant_marketing_24h=tenant_marketing_24h, canary_cap=canary_cap,
         )
         verdict = decision.decide(inp)
 
@@ -252,3 +274,5 @@ def mark_sent(settings: WorkerSettings, row: repos_outbox.OutboxRow) -> None:
         repos_outbox.mark_outbox_sent(conn, outbox_id=row.id)
         repos_policy.mark_ledger_handed_off(conn, outbox_id=row.id)
     metrics.dispatch_attempts_total.labels("sent").inc()
+    if row.message_class == "marketing":
+        metrics.marketing_sent_total.inc()
