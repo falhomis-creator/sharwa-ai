@@ -783,7 +783,7 @@ scheduler_claimed_total = Counter(
 
 scheduler_outcomes_total = Counter(
     "scheduler_outcomes_total",
-    "Scheduled job outcomes (done|defer|cancel_*|retry|failed), by kind.",
+    "Scheduled job outcomes (done|defer|cancel_*|retry|failed|superseded), by kind.",
     labelnames=["kind", "outcome"],
     registry=registry,
 )

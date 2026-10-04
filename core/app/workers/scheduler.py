@@ -11,8 +11,10 @@ H88: claim_due_jobs increments `attempts` on every claim; a Defer (or a
 not-yet-due re-check) rolls that increment back - only REAL handler exceptions
 consume an attempt. H90: JOB_KINDS is a closed registry - an unknown kind fails
 the job without executing it. H92: a job later than its max_lateness_s over
-its run_at is cancelled (too_late), never executed. The clock is injectable
-(H84) and no `sleep` appears in this logic.
+its run_at is cancelled (too_late), never executed. F-P3-23: the result
+writers are status-guarded - a job cancelled mid-flight keeps its cancel (H92
+beats the engine's write-back) and the outcome is counted "superseded", never
+raised. The clock is injectable (H84) and no `sleep` appears in this logic.
 """
 from __future__ import annotations
 
@@ -88,8 +90,12 @@ def _run_one(settings: WorkerSettings, job: dict[str, Any], now: datetime) -> No
     if spec is None:
         # H90: unknown kind => failed + metric, NEVER executed.
         with tenant_tx(tenant_id) as conn:
-            repos_scheduler.finish_failed(conn, job_id=job_id, error=f"unknown_kind:{kind}")
-        metrics.scheduler_outcomes_total.labels(kind, "failed").inc()
+            finished = repos_scheduler.finish_failed(
+                conn, job_id=job_id, error=f"unknown_kind:{kind}",
+            )
+        metrics.scheduler_outcomes_total.labels(
+            kind, "failed" if finished else "superseded",
+        ).inc()
         obs_logging.log_event(
             _log, event="scheduler.unknown_kind", component="scheduler",
             level=logging.WARNING, kind=kind,
@@ -112,8 +118,12 @@ def _run_one(settings: WorkerSettings, job: dict[str, Any], now: datetime) -> No
     attempts = int(job.get("attempts") or 0)  # includes THIS claim
     if attempts > max_attempts:
         with tenant_tx(tenant_id) as conn:
-            repos_scheduler.finish_failed(conn, job_id=job_id, error="max_attempts_exceeded")
-        metrics.scheduler_outcomes_total.labels(kind, "failed").inc()
+            finished = repos_scheduler.finish_failed(
+                conn, job_id=job_id, error="max_attempts_exceeded",
+            )
+        metrics.scheduler_outcomes_total.labels(
+            kind, "failed" if finished else "superseded",
+        ).inc()
         return
 
     try:
@@ -135,14 +145,18 @@ def _run_one(settings: WorkerSettings, job: dict[str, Any], now: datetime) -> No
 
 def _apply_result(conn, *, kind: str, job_id, result: Any) -> None:
     if isinstance(result, Defer):
-        repos_scheduler.defer(conn, job_id=job_id, run_at=result.run_at)  # H88
-        outcome = "defer"
+        # H88 + F-P3-23: False => the job was cancelled meanwhile (H92 wins);
+        # the verdict applied to nothing and the outcome is "superseded".
+        outcome = "defer" if repos_scheduler.defer(
+            conn, job_id=job_id, run_at=result.run_at,
+        ) else "superseded"
     elif isinstance(result, Cancel):
         repos_scheduler.cancel_by_id(conn, job_id=job_id, reason=result.reason)
         outcome = "cancel_" + result.reason
     else:  # Done (or a handler returning nothing sensible -> treat as done)
-        repos_scheduler.complete(conn, job_id=job_id)
-        outcome = "done"
+        outcome = "done" if repos_scheduler.complete(
+            conn, job_id=job_id,
+        ) else "superseded"
     metrics.scheduler_outcomes_total.labels(kind, outcome).inc()
 
 
@@ -154,15 +168,19 @@ def _retry_or_fail(
     msg = f"{type(error).__name__}: {error}"[:500]
     if attempts >= max_attempts:
         with tenant_tx(tenant_id) as conn:
-            repos_scheduler.finish_failed(conn, job_id=job_id, error=msg)
-        metrics.scheduler_outcomes_total.labels(kind, "failed").inc()
+            finished = repos_scheduler.finish_failed(conn, job_id=job_id, error=msg)
+        metrics.scheduler_outcomes_total.labels(
+            kind, "failed" if finished else "superseded",
+        ).inc()
         return
     backoff_s = min(cap, base * 2 ** max(0, attempts - 1))
     with tenant_tx(tenant_id) as conn:
-        repos_scheduler.fail_attempt(
+        recorded = repos_scheduler.fail_attempt(
             conn, job_id=job_id, error=msg, retry_at=now + timedelta(seconds=backoff_s),
         )
-    metrics.scheduler_outcomes_total.labels(kind, "retry").inc()
+    metrics.scheduler_outcomes_total.labels(
+        kind, "retry" if recorded else "superseded",
+    ).inc()
 
 
 def _refresh_stats() -> None:
