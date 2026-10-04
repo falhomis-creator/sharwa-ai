@@ -36,6 +36,7 @@ from pathlib import Path
 import jwt as pyjwt
 
 from app.db import repos
+from app.db import repos_consent
 from app.db import repos_inbox
 from app.db import repos_policy
 from app.db import repos_scheduler
@@ -156,6 +157,25 @@ def cmd_scheduler_cancel(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_consent_history(args: argparse.Namespace) -> int:
+    """One customer's consent history (read-only - no CLI command ever writes
+    a consent, H94). scope / granted / source / created_at / evidence only:
+    identifiers, never a phone or message text (H48/H98)."""
+    history = repos_consent.consent_history(
+        _migration_dsn(), platform_ref=args.platform_ref,
+        customer_id=uuid.UUID(args.customer_id),
+    )
+    if history is None:
+        _err(f"unknown tenant_ref {args.platform_ref!r}")
+        return 1
+    if not history:
+        _out("no consent history")
+        return 0
+    for scope, granted, source, created_at, evidence in history:
+        _out(f"{scope}\t{granted}\t{source}\t{created_at.isoformat()}\t{evidence or ''}")
+    return 0
+
+
 def cmd_migrate(args: argparse.Namespace) -> int:
     migrations_dir = Path(args.migrations_dir).resolve()
     if not migrations_dir.is_dir():
@@ -231,6 +251,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_scancel.add_argument("--dedupe-key", required=True)
     p_scancel.add_argument("--reason", default="operator_cancel")
     p_scancel.set_defaults(func=cmd_scheduler_cancel)
+
+    p_consent = sub.add_parser("consent", help="consent ledger operator commands (history - read-only)")
+    p_consent_sub = p_consent.add_subparsers(dest="consent_command", required=True)
+    p_chistory = p_consent_sub.add_parser(
+        "history", help="one customer's consent history (identifiers only, H48/H98)"
+    )
+    p_chistory.add_argument("--platform-ref", required=True)
+    p_chistory.add_argument("--customer-id", required=True)
+    p_chistory.set_defaults(func=cmd_consent_history)
 
     p_migrate = sub.add_parser("migrate", help="apply core/migrations/*.sql (forward-only, idempotent)")
     p_migrate.add_argument("--migrations-dir", default="migrations")

@@ -607,5 +607,21 @@ groups:
           summary: "the platform's cart webhook deliveries are being rejected"
           description: "cart_webhook_requests_total{status=~\"401|413|422\"} is rising - a bad signature, an expired timestamp, an oversized body or a schema violation; the store team should check docs/PLATFORM_CART_CONTRACT.md."
 
+  # P3.3 (consent capture, H94-H99). One rule: an unusual rate of customer
+  # STOPs is a product signal (something people did not want went out), not
+  # an infrastructure fault. The 10-revokes/10m default is the documented ops
+  # default - tune it HERE (Prometheus thresholds are rule data, not app
+  # settings; there is deliberately no env knob for an alert threshold).
+  - name: sharwa_ai_p3_3
+    rules:
+      - alert: ConsentRevokesSpike
+        expr: increase(consent_events_total{action="revoked"}[10m]) > 10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "an unusual rate of customer STOPs"
+          description: "consent_events_total{action=\"revoked\"} is rising fast - customers are opting out in numbers; check what was sent recently (the ledger's evidence UUIDs map to the exact inbound messages)."
+
 
 

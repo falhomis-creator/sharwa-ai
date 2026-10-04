@@ -31,7 +31,10 @@ def test_join_waitlist_registers_once(monkeypatch):
         lambda conn, **kw: (inserts.append(kw) or uuid.uuid4()),
     )
     consents: list[dict] = []
-    monkeypatch.setattr(stock.repos_consent, "write_consent", lambda conn, **kw: consents.append(kw))
+    monkeypatch.setattr(
+        stock.repos_consent, "record_waitlist_join",
+        lambda conn, **kw: consents.append(kw) or "granted",
+    )
 
     d = stock.join_waitlist(
         None, _settings(), tenant_id=uuid.uuid4(),
@@ -40,9 +43,10 @@ def test_join_waitlist_registers_once(monkeypatch):
     assert d.kind == "joined"
     assert d.platform_variant_id == "VAR-X"
     assert len(inserts) == 1
-    # D3: joining the waitlist writes a back_in_stock consent in the same tx.
-    assert consents and consents[0]["scope"] == "back_in_stock"
-    assert consents[0]["granted"] is True
+    # D3 + OQ-P3-12: joining the waitlist writes a back_in_stock consent in
+    # the same tx, keyed by the ENTRY id (the coordinator, never the tool).
+    assert consents and consents[0]["customer_id"] == customer_id
+    uuid.UUID(str(consents[0]["entry_id"]))
 
 
 def test_join_waitlist_duplicate_rejected(monkeypatch):

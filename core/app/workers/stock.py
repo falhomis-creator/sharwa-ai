@@ -85,12 +85,21 @@ def join_waitlist(
         conn, tenant_id=tenant_id, customer_id=customer_id,
         conversation_id=conversation_id, platform_variant_id=variant,
     )
-    # H50 / D3: the back_in_stock consent is written HERE (the coordinator), in
-    # the same join transaction - never in the pure join_waitlist tool.
-    repos_consent.write_consent(
-        conn, tenant_id=tenant_id, customer_id=customer_id,
-        scope="back_in_stock", granted=True, source="waitlist_join", evidence=str(entry_id),
+    # H50 / D3 / OQ-P3-12 (owner-approved default): the join is an explicit
+    # act - the back_in_stock consent is written HERE (the coordinator), in
+    # the same join transaction, never in the pure join_waitlist tool, and it
+    # lifts exactly the optout-caused back_in_stock suppression (otherwise the
+    # stock_joined promise would be a lie). Marketing stays untouched.
+    action = repos_consent.record_waitlist_join(
+        conn, tenant_id=tenant_id, customer_id=customer_id, entry_id=entry_id,
     )
+    if action == "granted":
+        metrics.consent_events_total.labels("granted", "waitlist_join").inc()
+    elif action == "granted_and_lifted":
+        metrics.consent_events_total.labels("granted", "waitlist_join").inc()
+        metrics.consent_events_total.labels("lifted", "waitlist_join").inc()
+    else:  # noop: already granted by an earlier join
+        metrics.consent_events_total.labels("noop", "waitlist_join").inc()
     metrics.waitlist_entries_total.labels("joined").inc()
     return decision
 

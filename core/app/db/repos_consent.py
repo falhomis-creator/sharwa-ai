@@ -188,3 +188,20 @@ def read_history(
         (tenant_id, customer_id),
     ).fetchall()
     return [(r[0], bool(r[1]), r[2], r[3], r[4]) for r in rows]
+
+
+def consent_history(
+    dsn: str, *, platform_ref: str, customer_id: uuid.UUID,
+) -> list[tuple[str, bool, str, Any, str | None]] | None:
+    """Operator-CLI reader (migration role, DSN-based): resolve the tenant by
+    platform_ref then read one customer's chronological history. None when
+    the tenant is unknown. READ-ONLY - no CLI command ever writes a consent
+    (H94: the ledger is appended by the capture paths only). Identifiers
+    only (H48/H98): no phone, no message text, ever."""
+    with psycopg.connect(dsn) as conn:
+        row = conn.execute(
+            "SELECT id FROM tenants WHERE platform_ref = %s", (platform_ref,),
+        ).fetchone()
+        if row is None:
+            return None
+        return read_history(conn, tenant_id=row[0], customer_id=customer_id)
