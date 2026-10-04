@@ -37,6 +37,11 @@ exit 1 = violations as `file:line: [phase] detail`.
         repos_outbox.insert_outbox (proactive.py only).
   S26 - P3.2 (H91): in routes_carts, verify_platform_signature runs BEFORE any
         json.loads, and no logging call passes payload/events/items.
+  S28 - P3.3 (F-P3-25/H86): in app/db/repos_*.py no SQL execute() parameter is
+         a module-level tuple/set/frozenset constant or a literal tuple -
+         psycopg adapts a tuple as a RECORD ('malformed array literal' at
+         runtime); sequences are passed as an explicit list(...).
+
 
 """
 from __future__ import annotations
@@ -680,6 +685,62 @@ def _s24_violations(mods: dict[str, Path], test_mods: dict[str, Path]) -> list[t
                 if not allowed:
                     bad.append((str(path.relative_to(ROOT)), getattr(node, "lineno", 0),
                                 f"repos_scheduler.{node.func.attr} called outside the engine surface (S24-b/H87)"))
+    return bad
+
+
+# --- S28 (P3.3, F-P3-25/H86): sequences passed to SQL must be list(...) --------
+
+
+def _s28_sequence_constant_names(tree: ast.Module) -> set[str]:
+    """Top-level constants whose value is a tuple/set literal or frozenset(...)."""
+    names: set[str] = set()
+    for node in tree.body:
+        target: ast.Name | None = None
+        value: ast.expr | None = None
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            target, value = node.targets[0], node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+            target, value = node.target, node.value
+        if target is None or value is None:
+            continue
+        if isinstance(value, (ast.Tuple, ast.Set)):
+            names.add(target.id)
+        elif (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+              and value.func.id == "frozenset"):
+            names.add(target.id)
+    return names
+
+
+def _s28_violations(mods: dict[str, Path]) -> list[tuple[str, int, str]]:
+    """S28 (F-P3-25): psycopg adapts a Python tuple as a RECORD, never an
+    array - `= ANY(%s)` with a tuple dies at runtime with 'malformed array
+    literal' (the P3.3 step-zero regression). In app/db/repos_*.py, any
+    execute() parameter that IS a module-level tuple/set/frozenset constant
+    (by name or attribute) or a literal tuple is a violation; the sequence
+    must be passed as an explicit list(...)."""
+    bad: list[tuple[str, int, str]] = []
+    for mod, path in mods.items():
+        if not mod.startswith("app.db.repos_"):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        seq_consts = _s28_sequence_constant_names(tree)
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "execute"):
+                continue
+            params = node.args[1] if len(node.args) >= 2 else None
+            if not isinstance(params, ast.Tuple):
+                continue  # a non-literal parameter list is not statically decidable
+            for el in params.elts:
+                detail = None
+                if isinstance(el, ast.Name) and el.id in seq_consts:
+                    detail = f"sequence SQL parameter '{el.id}' is a tuple/set constant - pass list(...) (psycopg adapts a tuple as a record)"
+                elif isinstance(el, ast.Attribute) and el.attr in seq_consts:
+                    detail = f"sequence SQL parameter '{el.attr}' is a tuple/set constant - pass list(...) (psycopg adapts a tuple as a record)"
+                elif isinstance(el, ast.Tuple):
+                    detail = "literal tuple inside SQL execute parameters - pass list(...) (psycopg adapts a tuple as a record)"
+                if detail is not None:
+                    bad.append((str(path.relative_to(ROOT)), getattr(el, "lineno", 0), detail))
     return bad
 
 
@@ -1618,6 +1679,10 @@ def main() -> int:
     # ---- S26 (P3.2, H91): signature-before-parse + no payloads in logs --------
     for rel, lineno, detail in _s26_violations(mods):
         _err("S26", rel, lineno, detail)
+
+    # ---- S28 (P3.3, F-P3-25/H86): sequence SQL params must be list(...) -------
+    for rel, lineno, detail in _s28_violations(mods):
+        _err("S28", rel, lineno, detail)
 
     # ---- S14 (P2.1): a function must be able to return its promised type -----
     for mod, path in mods.items():

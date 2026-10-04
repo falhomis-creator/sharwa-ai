@@ -54,7 +54,7 @@ def schedule(
         "WHERE scheduled_jobs.status = 'cancelled' "
         "AND scheduled_jobs.cancel_reason = ANY(%s) RETURNING id",
         (tenant_id, kind, dedupe_key, run_at, Jsonb(payload), max_lateness_s,
-         REVIVABLE_CANCEL_REASONS),
+         list(REVIVABLE_CANCEL_REASONS)),
     ).fetchone()
     return row is not None
 
