@@ -822,5 +822,12 @@ cart_events_total = Counter(
     registry=registry,
 )
 
+cart_webhook_requests_total = Counter(
+    "cart_webhook_requests_total",
+    "POST /webhooks/platform/cart requests, by HTTP status (CartWebhookRejects).",
+    labelnames=["status"],
+    registry=registry,
+)
+
 
 

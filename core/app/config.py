@@ -131,6 +131,13 @@ class Settings:
     console_rate_limit_write: int = 60
     console_rate_limit_ticket: int = 10
     console_rate_limit_window_s: float = 60.0
+    # P3.2 cart webhook: the SAME env keys the realtime worker reads - the API
+    # process needs them to schedule the reminder job while applying cart
+    # events (single source of truth = the environment, never a second copy).
+    cart_reminder_delay_h: int = 24
+    cart_reminder_max_late_h: int = 12
+    cart_item_title_max: int = 60
+    default_country_code: str = "967"
 
     @staticmethod
     def load() -> Settings:
@@ -178,4 +185,8 @@ class Settings:
             console_rate_limit_write=_int("CONSOLE_RATE_LIMIT_WRITE", 60),
             console_rate_limit_ticket=_int("CONSOLE_RATE_LIMIT_TICKET", 10),
             console_rate_limit_window_s=float(_optional("CONSOLE_RATE_LIMIT_WINDOW_S", "60.0")),
+            cart_reminder_delay_h=_int("CART_REMINDER_DELAY_H", 24),
+            cart_reminder_max_late_h=_int("CART_REMINDER_MAX_LATE_H", 12),
+            cart_item_title_max=_int("CART_ITEM_TITLE_MAX", 60),
+            default_country_code=_optional("DEFAULT_COUNTRY_CODE", "967"),
         )

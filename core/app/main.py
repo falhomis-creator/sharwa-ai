@@ -28,6 +28,7 @@ from redis import asyncio as redis_asyncio
 from app import db as core_db
 from app import ws_publish
 from app.api.errors import ApiError, api_error_handler, unhandled_exception_handler
+from app.api.routes_carts import router as carts_router
 from app.api.routes_catalog import router as catalog_router
 from app.api.routes_channels import router as channels_router
 from app.api.routes_health import router as health_router
@@ -136,6 +137,7 @@ def create_app() -> FastAPI:
     app.include_router(killswitches_router)
     app.include_router(inbox_router)
     app.include_router(catalog_router)
+    app.include_router(carts_router)
     app.include_router(channels_router)
     app.include_router(ws_router)
 
