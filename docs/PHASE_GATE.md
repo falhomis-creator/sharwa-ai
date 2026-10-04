@@ -105,10 +105,25 @@ F-P1-12: الـdispatcher لا يعمل على قاعدة حقيقية (ثلاث
 --- قرار معماري (2026-10-03): P2 CLOSED (مشروط) وP3 OPEN ---
 P2 تُغلَق مشروطةً بإغلاق F-P2-07 وF-P1-12 في الخطوة صفر من P3.1 قبل أي عمل على السياسة؛ للمالك حقّ رفض الإغلاق وإعادته OPEN. أرقام السياسة الافتراضية في P3.1 مقترحات بانتظار موافقة المالك (OQ-P3-03). لا يُرسَل أي تسويق فعلي قبل P3.4 (wired but dark).
 P3.1: OPEN — Send Policy: التقطير، الإحماء، حدود التكرار، الساعات الهادئة، الموافقة/الحظر، فشل مُغلَق. بـ PROMPT_P3_01_sendpolicy_for_deepseek.md.
-P3.2..: LOCKED
-P2.4: APPROVED (مشروط)
-P2: CLOSED (مشروط)
-P3: OPEN (P3.1)
+P3.1-B/C: APPROVED جزئياً (2026-10-03، docs/P3_01_BC_AUDIT.md) — C (app/policy/ النقيّة) مقبولة، B (مخطّط 0013) مقبولة عدا reserve_send_slot. أرقام التقطير مطابقة للمعتمد، وwired-but-dark مطابق.
+F-P3-10 [حرج]: app.reserve_send_slot تنهار AmbiguousColumn عند أول حجز (أعمدة RETURNS TABLE تتعارض مع number_health). مفتوح — ترحيل 0014.
+F-P1-12 [حرج] عاد مفتوحاً: dispatcher ميّت على قاعدة حقيقية رغم 39c1513 — F-P3-11 (row_factory على Connection.execute)، F-P3-12 (UNION … ORDER BY بتعبير في 0012)، F-P3-13 (seed_suppression بلا reason). شرط إغلاق P2 الثاني غير مستوفى.
+F-P3-14: البوّابة الساكنة تفشل على المستودع الحيّ (S20 تفحص static_gate.py نفسه ×2) والتقرير ذكر 0 — مفتوح. F-P3-15: اختبار test_migrate adopt يخالف مخرج الـCLI — مفتوح.
+P3.1-D..G: OPEN بعد جولة الإصلاح 0′ — PROMPT_P3_01_stage_DG_for_deepseek.md. قاعدة جديدة: لا بند «fixed» بلا ناتج قاعدة حقيقية؛ وإلا UNVERIFIED (no db).
+P3.1-FINAL (2026-10-03، docs/P3_01_FINAL_AUDIT.md): لا تُغلَق. a16ca22+fc9c2f3 على قاعدة حقيقية: F-P3-10/11/12/13/14/15 مُغلَقة (حجز يعمل، الـdispatcher حيّ، البوّابة rc=0، نقي 303). حزمة db كما سُلِّمت: 11 فشل/271 نجاح مرّتين متساويتين (كلها fixtures).
+F-P3-16 [حرج]: التأجيل يستهلك attempts فتُفشَل الإشعارات بصمت — مسبار dispatch_cycle: 12 إشعاراً ⇒ 8 مُرسَل/4 failed؛ 30 ⇒ 13/17. انحدار من المرحلة D. مفتوح.
+F-P3-17 [حرج]: cancel_pending_proactive يتجاهل customer_id — STOP من عميل A يُلغي إشعار عميل B. مفتوح.
+F-P3-18: S22/S23 غير موجودتين. F-P3-19: 11 اختبار db بفخاخ fixtures + فجوات تغطية H86 (المكنسة، CLI، STOP، الفشل المُغلَق، سقوف التكرار، الدفعة عبر dispatch_cycle). مفتوحان.
+P3.1-R3 (2026-10-03، docs/P3_01_FINAL_AUDIT.md §6): F-P3-16 وF-P3-17 وF-P3-18 وF-P3-19 مُغلَقة بمساباري المستقلة (12→12 و30→30 sent/0 failed؛ STOP لا يمسّ B؛ البوّابة rc=0 وS22-d بإفشال متعمَّد؛ نقي 303). حزمة db: 2 فشل/296 نجاح ثابتة، وتشغيلا run_db_suite غير متساويين (2 مقابل 3).
+F-P3-20 [متوسط-عالٍ]: gate يعدّ صفّ الرسالة نفسه في سقف التكرار (بعد N-6) فتُسقَط إعادة معالجة صفّ محجوز — تسويق: dropped_policy/frequency_cap_skip والدفتر reserved للأبد (أثره الحيّ صفر: التسويق مُظلَم). مفتوح — الخطوة صفر في P3.2.
+F-P3-21 [منخفض]: test_burst يفترض ترتيب إرسال حتمياً (تعادل next_attempt_at) فيتقطّع. مفتوح — الخطوة صفر في P3.2.
+P3.1: CLOSED (مشروط) — بإغلاق F-P3-20 وF-P3-21 والتحقق: run_db_suite صفر إخفاق ومرّتان متساويتان. للمالك حقّ الرفض.
+P3.1: CLOSED (نهائياً) — 2026-10-04: شرطا الإغلاق تحقّقا على قاعدة حقيقية (PG16+PostGIS+Redis) بالتزام c1b6e0b: F-P3-20 مُغلَق (exclude_outbox_id في count_class_handoffs وgate؛ decide() ما زالت قبل فحص الدفتر H85) وF-P3-21 مُغلَق (مقارنة مجموعات + N=30 بدفعة 20). البوّابة `STATIC GATE PASSED — 0 violations.` rc=0؛ نقي `303 passed`؛ run_db_suite ⇒ `[run 1] 303 passed in 202.98s` و`[run 2] 303 passed in 202.90s` ⇒ `DB SUITE: STABLE (303 passed twice)` [2026-10-03 22:13–22:20Z].
+P3.2-STEP0: APPROVED (c1b6e0b) — المراحل B–G مُصرَّح بها بـPROMPT_P3_02_for_deepseek.md حرفياً، التزام لكل مرحلة، ولا بند «fixed» بلا ناتج قاعدة وإلا UNVERIFIED (no db) يشغّله المعماري. لا تسجيل لأي قالب تسويقي ولا cart_reminder في الكتالوج (التسويق مُظلَم حتى P3.4).
+P3.2: OPEN — محرك الجدولة والأحداث المتأخرة + نقطة استقبال أحداث السلة المتروكة (التسويق ما زال مُظلَماً). بـ PROMPT_P3_02_for_deepseek.md. الخطوة صفر الإلزامية: F-P3-20 وF-P3-21 + run_db_suite أخضر مرّتين متساويتين قبل أي مرحلة تالية. أرقام §4 مقترحات بانتظار موافقة المالك (OQ-P3-06). P3.3..: LOCKED
+P2.4: APPROVED
+P2: CLOSED — الشرطان تحقّقا على قاعدة حقيقية (2026-10-03، docs/P3_01_FINAL_AUDIT.md): F-P2-07 (البذر + الاختبار الذهبي) وF-P1-12 (dispatch_cycle يُرسل صفوف bot/human/automation على القاعدة).
+P3: OPEN (P3.2)
 P4: LOCKED
 P5: LOCKED
 
