@@ -139,10 +139,16 @@ DEFAULT_ADDRESS_W_LEVEL: dict[str, Any] = {
 }
 DEFAULT_ADDRESS_W_MATCH: dict[str, Any] = {"exact": 1.00, "synonym": 0.90, "prefix": 0.70}
 
+# H103 (P3.4): the opt-out footer shown under EVERY marketing message. PROPOSED
+# text, pending the owner's approval (OQ-P3-15); MARKETING_FOOTER_AR overrides it
+# and `marketing enable` requires that variable to be set explicitly.
+DEFAULT_MARKETING_FOOTER_AR = "لإيقاف الرسائل الترويجية أرسل: إيقاف"
+
 # P3.1 proactive template catalog (H77/H83): template_id -> (meta, text, merge_keys).
 # H83: no proactive text without an approved template; the message_class is DERIVED
-# here, never passed by the producer. There is NO marketing template in production
-# ("wired but dark"): any marketing row => unknown_template => drop, until P3.4.
+# here, never passed by the producer. P3.4 registers the first MARKETING template
+# (cart_reminder) - but registration is NOT activation: a tenant gets marketing
+# only through `marketing enable` (H100), so every tenant stays dark by default.
 PROACTIVE_TEMPLATES: dict[str, tuple[TemplateMeta, str, tuple[str, ...]]] = {
     "stock_available": (
         TemplateMeta(
@@ -161,6 +167,17 @@ PROACTIVE_TEMPLATES: dict[str, tuple[TemplateMeta, str, tuple[str, ...]]] = {
         ),
         "انتهت مدة حجزك. ما زال بإمكانك الطلب من جديد متى شئت.",
         (),
+    ),
+    # P3.4 / OQ-P3-15 PROPOSED text (pending the owner's verbatim approval, H103).
+    # The one merge key is built by cart_reminder.items_phrase (pure, OQ-P3-08).
+    "cart_reminder": (
+        TemplateMeta(
+            template_id="cart_reminder", message_class="marketing",
+            consent_scope="marketing", capability="marketing",
+            quiet_hours=True, footer_required=True,
+        ),
+        "مرحباً، تركتَ في سلّتك «items_phrase». إذا أحببتَ إكمال طلبك فأخبرنا هنا.",
+        ("items_phrase",),
     ),
 }
 
@@ -418,7 +435,10 @@ class WorkerSettings:
     send_policy_sweep_interval_s: int = 60
     send_policy_idle_reset_d: int = 14
     send_policy_complaint_words: tuple[str, ...] = ("سبام", "ازعاج", "إزعاج", "بلاغ", "ابلاغ", "report", "spam")
-    marketing_footer_ar: str = "لإيقاف الرسائل الترويجية أرسل: إيقاف"
+    marketing_footer_ar: str = DEFAULT_MARKETING_FOOTER_AR
+    # P3.4 (H100): `enable` refuses a number whose warm-up is younger than this
+    # many days (the ladder's first rung is day 0 - too young to carry marketing).
+    marketing_min_warmup_days: int = 3
     # P3.2 scheduler + cart events (PROMPT §4). Architect PROPOSALS pending the
     # owner's OQ-P3-06 approval - env-overridable settings, never hardcoded at
     # the call sites (directive rule 8).
@@ -530,11 +550,17 @@ class WorkerSettings:
             raise ConfigError("marketing gap min must be >= 10 (Baileys conservative)")
         if min(sp_marketing_24h, sp_marketing_7d, sp_utility_24h) < 1:
             raise ConfigError("per-customer caps must be >= 1")
-        # D2 (H83): a registered marketing template must require a non-empty footer
-        # (wired-but-dark: there is no marketing template yet, so this is vacuous).
+        # D2 (H83): a registered marketing template must require a non-empty footer.
+        # P3.4: the template IS registered now, so this is live - it checks the
+        # EFFECTIVE footer (env or the code default), so a boot never silently
+        # lacks one. That the footer is also a DELIBERATE owner-set value is
+        # enforced where it matters - `marketing enable` preflight (H103).
+        effective_footer = _optional("MARKETING_FOOTER_AR", DEFAULT_MARKETING_FOOTER_AR)
         for _tid, (meta, _text, _keys) in PROACTIVE_TEMPLATES.items():
-            if meta.message_class == "marketing" and (not meta.footer_required or not _optional("MARKETING_FOOTER_AR", "")):
+            if meta.message_class == "marketing" and (not meta.footer_required or not effective_footer.strip()):
                 raise ConfigError("a marketing proactive template must require a non-empty opt-out footer")
+        if _int("MARKETING_MIN_WARMUP_DAYS", 3) < 0:
+            raise ConfigError("MARKETING_MIN_WARMUP_DAYS must be >= 0")
         # N-4 / P3.1 §1.5: equal quiet start/end means "quiet forever" - refuse.
         quiet_start = _hhmm(_optional("SEND_POLICY_QUIET_START", "22:00"))
         quiet_end = _hhmm(_optional("SEND_POLICY_QUIET_END", "09:00"))
@@ -710,7 +736,8 @@ class WorkerSettings:
             send_policy_sweep_interval_s=_int("SEND_POLICY_SWEEP_INTERVAL_S", 60),
             send_policy_idle_reset_d=_int("SEND_POLICY_IDLE_RESET_D", 14),
             send_policy_complaint_words=_csv("SEND_POLICY_COMPLAINT_WORDS", "سبام,ازعاج,إزعاج,بلاغ,ابلاغ,report,spam"),
-            marketing_footer_ar=_optional("MARKETING_FOOTER_AR", "لإيقاف الرسائل الترويجية أرسل: إيقاف"),
+            marketing_footer_ar=_optional("MARKETING_FOOTER_AR", DEFAULT_MARKETING_FOOTER_AR),
+            marketing_min_warmup_days=_int("MARKETING_MIN_WARMUP_DAYS", 3),
             scheduler_poll_interval_s=sched_poll,
             scheduler_batch=sched_batch,
             scheduler_lease_s=sched_lease,

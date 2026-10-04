@@ -68,6 +68,7 @@ def reprocess_ctx():
     tid = db_testsupport.insert_tenant_returning_id(
         dsn, platform_ref=f"rep-{uuid.uuid4()}", name="Reprocess Tenant",
     )
+    db_testsupport.enable_marketing(dsn, tenant_id=tid)  # P3.4: this TEST tenant is opted in (H100)
     chid = db_testsupport.insert_channel_account(
         dsn, tenant_id=tid, type_="whatsapp_baileys",
         session_id=f"sess-{uuid.uuid4()}", status="connected", engine="ai_core",

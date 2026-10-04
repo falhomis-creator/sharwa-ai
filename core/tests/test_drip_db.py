@@ -62,6 +62,7 @@ def test_drip_respects_cap_and_reprocess_is_idempotent(monkeypatch):
     tid = db_testsupport.insert_tenant_returning_id(
         dsn, platform_ref=f"drip-{uuid.uuid4()}", name="Drip Tenant",
     )
+    db_testsupport.enable_marketing(dsn, tenant_id=tid, cap=500)  # P3.4: opted in; the number cap (not the canary) must bind here (H100)
     chid = db_testsupport.insert_channel_account(
         dsn, tenant_id=tid, type_="whatsapp_baileys",
         session_id=f"sess-{uuid.uuid4()}", status="connected", engine="ai_core",

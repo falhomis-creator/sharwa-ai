@@ -60,6 +60,7 @@ def test_marketing_24h_cap_one_per_customer(monkeypatch):
     tid = db_testsupport.insert_tenant_returning_id(
         dsn, platform_ref=f"freq-{uuid.uuid4()}", name="Freq Tenant",
     )
+    db_testsupport.enable_marketing(dsn, tenant_id=tid)  # P3.4: this TEST tenant is opted in (H100)
     chid = db_testsupport.insert_channel_account(
         dsn, tenant_id=tid, type_="whatsapp_baileys",
         session_id=f"sess-{uuid.uuid4()}", status="connected", engine="ai_core",

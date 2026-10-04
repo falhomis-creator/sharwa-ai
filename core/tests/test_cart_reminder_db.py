@@ -64,6 +64,7 @@ def handler_ctx():
     tid = db_testsupport.insert_tenant_returning_id(
         dsn, platform_ref=f"rem-{uuid.uuid4()}", name="Reminder Tenant",
     )
+    db_testsupport.enable_marketing(dsn, tenant_id=tid)  # P3.4: opted in; the default-off test clears it explicitly (H100)
     chid = db_testsupport.insert_channel_account(
         dsn, tenant_id=tid, type_="whatsapp_baileys",
         session_id=f"sess-{uuid.uuid4()}", status="connected", engine="ai_core",
@@ -89,19 +90,20 @@ def handler_ctx():
 # --- §5.11: the official DARK test -------------------------------------------
 
 
-def test_dark_production_catalog_cancels_with_zero_outbox(handler_ctx):
+def test_default_off_production_template_cancels_marketing_disabled(handler_ctx):
+    """P3.4 replacement of the P3.2 dark test. The PRODUCTION `cart_reminder`
+    template is registered now, but registration is not activation (H100): a
+    tenant with NO activation row (the default state - the fixture's opt-in is
+    cleared here) cancels with the REVIVABLE `marketing_disabled`, the cart stays
+    open, and the engine produces ZERO outbox rows."""
     dsn, tid, _chid, _cid, _conv, _job_id = handler_ctx
-    # The wired-but-dark invariant itself: this FAILS if anyone registers a
-    # marketing template in the production catalog.
-    assert "cart_reminder" not in config.PROACTIVE_TEMPLATES, (
-        "a marketing cart_reminder template must NOT be registered in production "
-        "(P3.4 owner approval required)"
-    )
+    assert "cart_reminder" in config.PROACTIVE_TEMPLATES      # registered ...
+    db_testsupport.clear_marketing_activation(dsn, tenant_id=tid)  # ... but this tenant is not enabled
 
     engine.run_due(_settings(), now=NOW)
     job = db_testsupport.fetch_scheduled_job_by_key(dsn, tid, "cart:CART-H:stage1")
     assert job["status"] == "cancelled"
-    assert job["cancel_reason"] == "template_not_registered"
+    assert job["cancel_reason"] == "marketing_disabled"
     cart = db_testsupport.fetch_cart(dsn, tid, "CART-H")
     assert cart["status"] == "open", "nothing happens to the cart in the dark"
     assert db_testsupport.count_outbox_rows(dsn, tenant_id=tid) == 0, \

@@ -28,6 +28,7 @@ class Settings:
     verify_profanity_en = ()
     verify_competitors = ()
     verify_disclosure = ()
+    marketing_footer_ar = "لإيقاف الرسائل الترويجية أرسل: إيقاف"
 
 
 def _rules() -> verify_rules.BlocklistSet:

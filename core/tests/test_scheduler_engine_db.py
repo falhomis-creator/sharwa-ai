@@ -108,7 +108,7 @@ def test_future_job_not_executed_until_due(engine_ctx):
     engine.run_due(_settings(), now=NOW)
     job = db_testsupport.fetch_scheduled_job_by_key(dsn, tid, key)
     assert job["status"] == "cancelled"
-    assert job["cancel_reason"] == "template_not_registered"  # dark, by design
+    assert job["cancel_reason"] == "marketing_disabled"  # P3.4: template registered, tenant not enabled (H100)
 
 
 # --- §5.4a: H88 - twelve consecutive defers never fail the job ---------------

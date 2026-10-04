@@ -122,11 +122,17 @@ def test_batch_with_stop_and_optin_last_word_wins():
     assert d2.decision == turn.Decision.OPTIN_CONFIRM
 
 
-def test_marketing_stays_dark_in_the_catalog():
-    """The formal dark rule (P3.2 §5.11, still binding through P3.3): no
-    marketing template and no cart_reminder in PROACTIVE_TEMPLATES."""
+def test_catalog_has_exactly_the_approved_templates():
+    """P3.4 replaces the P3.2/P3.3 dark rule (it is NOT silently dropped): the
+    catalog holds exactly the two utility templates plus the ONE marketing
+    template, and cart_reminder is the only marketing entry - registration is
+    not activation (H100: absence of a marketing_activation row = disabled; the
+    db tests prove the default-off behaviour)."""
     from app.workers.config import PROACTIVE_TEMPLATES
 
-    for template_id, (meta, _text, _keys) in PROACTIVE_TEMPLATES.items():
-        assert meta.message_class != "marketing", template_id
-        assert template_id != "cart_reminder"
+    assert set(PROACTIVE_TEMPLATES) == {"stock_available", "stock_hold_expired", "cart_reminder"}
+    marketing = [t for t, (m, _x, _k) in PROACTIVE_TEMPLATES.items() if m.message_class == "marketing"]
+    assert marketing == ["cart_reminder"]
+    meta, _text, keys = PROACTIVE_TEMPLATES["cart_reminder"]
+    assert meta.footer_required is True and meta.consent_scope == "marketing"
+    assert keys == ("items_phrase",)

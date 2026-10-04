@@ -95,6 +95,7 @@ def e2e_tenant():
     tid = db_testsupport.insert_tenant_returning_id(
         dsn, platform_ref=platform_ref, name="E2E Tenant",
     )
+    db_testsupport.enable_marketing(dsn, tenant_id=tid)  # P3.4: opted in; the default-off test clears it explicitly (H100)
     chid = db_testsupport.insert_channel_account(
         dsn, tenant_id=tid, type_="whatsapp_baileys",
         session_id=f"sess-{uuid.uuid4()}", status="connected", engine="ai_core",
@@ -190,13 +191,15 @@ def test_full_chain_without_consent_drops_at_the_gate(e2e_client, e2e_tenant, mo
     assert client.sent == []
 
 
-def test_full_chain_dark_no_template_no_outbox_at_all(e2e_client, e2e_tenant):
-    """§5.11's official e2e dark proof: with the PRODUCTION catalog (no
-    cart_reminder template) the chain stops at the engine - cancelled/
-    template_not_registered and ZERO outbox rows, consent or not."""
-    assert "cart_reminder" not in config.PROACTIVE_TEMPLATES
+def test_full_chain_default_off_no_activation_no_outbox_at_all(e2e_client, e2e_tenant):
+    """P3.4 replacement of §5.11's e2e dark proof: with the PRODUCTION template
+    registered but the tenant NOT enabled (no activation row, the default), the
+    chain stops at the engine - cancelled/marketing_disabled and ZERO outbox
+    rows, consent or not."""
+    assert "cart_reminder" in config.PROACTIVE_TEMPLATES
     c = e2e_client
     dsn, platform_ref, tid, chid, cid, conv = e2e_tenant
+    db_testsupport.clear_marketing_activation(dsn, tenant_id=tid)
     db_testsupport.insert_consent(
         dsn, tenant_id=tid, customer_id=cid, scope="marketing", granted=True,
     )
@@ -207,7 +210,7 @@ def test_full_chain_dark_no_template_no_outbox_at_all(e2e_client, e2e_tenant):
     engine.run_due(_settings(), now=NOW)
     job = db_testsupport.fetch_scheduled_job_by_key(dsn, tid, "cart:CART-E2E-DARK:stage1")
     assert job["status"] == "cancelled"
-    assert job["cancel_reason"] == "template_not_registered"
+    assert job["cancel_reason"] == "marketing_disabled"
     assert db_testsupport.count_outbox_rows(dsn, tenant_id=tid) == 0
 
     client = _FakeGateway()
@@ -215,3 +218,102 @@ def test_full_chain_dark_no_template_no_outbox_at_all(e2e_client, e2e_tenant):
         dispatch_mod.dispatch_cycle(_settings(), client)
     assert client.sent == []
 
+
+
+# --- P3.4: the PRODUCTION template, end to end ----------------------------------
+
+
+class _RecordingGateway:
+    def __init__(self):
+        self.sent: list[tuple[str, str]] = []
+
+    def send(self, *, session_id, to, text, client_msg_id, kind):
+        self.sent.append((to, text))
+        return SimpleNamespace(status_code=202)
+
+
+def _outside_quiet_hours(dsn, tid):
+    """Settings whose quiet window is 6h-7h from NOW in the tenant's own tz, so
+    the production template's quiet_hours=True can never make this test flaky."""
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo(db_testsupport.fetch_tenant_timezone(dsn, tid))
+    local = datetime.now(tz)
+    return _settings(
+        send_policy_quiet_start=(local + timedelta(hours=6)).strftime("%H:%M"),
+        send_policy_quiet_end=(local + timedelta(hours=7)).strftime("%H:%M"),
+    )
+
+
+def _world_ready_for_production_send(dsn, tid, chid, cid, conv):
+    from app import db as core_db
+    from app.db import repos_consent
+    with core_db.tenant_tx(tid) as conn:
+        repos_consent.record_optin(conn, tenant_id=tid, customer_id=cid, message_id=uuid.uuid4())
+    db_testsupport.seed_inbound_message(dsn, tenant_id=tid, conversation_id=conv, body="اشتراك")
+    db_testsupport.seed_number_health(
+        dsn, tenant_id=tid, channel_id=chid, daily_cap=50, sent_today=0, day="1970-01-01",
+    )
+
+
+def test_production_template_full_chain_sends_exactly_one_message_with_footer(e2e_client, e2e_tenant):
+    """The FIRST end-to-end proof of the real thing (no injected template):
+    signed webhook -> job -> engine -> outbox -> gate (enabled tenant, explicit
+    opt-in, canary) -> dispatcher -> a FAKE gateway. The text is the approved
+    template + the pure items_phrase + the opt-out footer, delivered ONCE even
+    across repeated dispatch cycles."""
+    c = e2e_client
+    dsn, platform_ref, tid, chid, cid, conv = e2e_tenant
+    _world_ready_for_production_send(dsn, tid, chid, cid, conv)
+    settings = _outside_quiet_hours(dsn, tid)
+
+    assert _post_cart_updated(c, platform_ref, "CART-PROD", "967735000001").status_code == 200
+    engine.run_due(settings, now=NOW)
+    assert db_testsupport.fetch_scheduled_job_by_key(dsn, tid, "cart:CART-PROD:stage1")["status"] == "done"
+
+    client = _RecordingGateway()
+    for _ in range(4):
+        dispatch_mod.dispatch_cycle(settings, client)
+        db_testsupport.fast_forward_outbox(dsn, tenant_id=tid)
+        db_testsupport.fast_forward_number_health(dsn, channel_id=chid)
+
+    assert len(client.sent) == 1, client.sent
+    to, text = client.sent[0]
+    assert to == "967735000001"
+    assert text == (
+        "مرحباً، تركتَ في سلّتك «قميص» ومنتج آخر. إذا أحببتَ إكمال طلبك فأخبرنا هنا."
+        "\n" + config.DEFAULT_MARKETING_FOOTER_AR
+    )
+    row = db_testsupport.fetch_outbox_row_by_idempotency(dsn, tid, "cart:CART-PROD:stage1")
+    assert row["status"] == "sent"
+    assert db_testsupport.fetch_ledger_rows(dsn, tid) == [(row["id"], "handed_off")]
+
+
+def test_disable_after_enqueue_means_nothing_is_sent(e2e_client, e2e_tenant):
+    """H101 level 2 mid-flight: the engine already enqueued a marketing row; the
+    operator disables the tenant; the queue is dropped and NOTHING reaches the
+    gateway - and the consent/number state is untouched."""
+    from app.db import repos_marketing
+    from app.workers import marketing as marketing_coord
+    c = e2e_client
+    dsn, platform_ref, tid, chid, cid, conv = e2e_tenant
+    _world_ready_for_production_send(dsn, tid, chid, cid, conv)
+    settings = _outside_quiet_hours(dsn, tid)
+
+    assert _post_cart_updated(c, platform_ref, "CART-OFF", "967735000001").status_code == 200
+    engine.run_due(settings, now=NOW)
+    row = db_testsupport.fetch_outbox_row_by_idempotency(dsn, tid, "cart:CART-OFF:stage1")
+    assert row is not None and row["status"] == "pending"
+
+    with repos_marketing.operator_conn(dsn) as conn:
+        counts = marketing_coord.disable_tenant(conn, tenant_id=tid, actor="op", reason="mid-flight")
+        conn.commit()
+    assert counts["outbox_dropped"] == 1
+
+    client = _RecordingGateway()
+    for _ in range(3):
+        dispatch_mod.dispatch_cycle(settings, client)
+        db_testsupport.fast_forward_outbox(dsn, tenant_id=tid)
+    assert client.sent == []
+    row = db_testsupport.fetch_outbox_row_by_idempotency(dsn, tid, "cart:CART-OFF:stage1")
+    assert row["status"] == "dropped_policy"
+    assert db_testsupport.fetch_outbox_policy_reason(dsn, row["id"]) == "marketing_disabled"

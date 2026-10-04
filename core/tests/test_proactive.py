@@ -29,4 +29,4 @@ def test_render_rejects_unknown_merge_key():
 
 def test_scope_to_template_ids_is_derived():
     assert "stock_available" in proactive.template_ids_for_scope("back_in_stock")
-    assert proactive.template_ids_for_scope("marketing") == ()
+    assert proactive.template_ids_for_scope("marketing") == ("cart_reminder",)

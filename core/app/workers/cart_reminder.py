@@ -6,8 +6,9 @@ order (tested as a table):
   2. not actually due yet (newer activity landed between schedule and run) =>
      Defer(last_activity + DELAY) - NO attempt consumed (H88)
   3. no ai_core conversation for the customer => Cancel('no_conversation')
-  4. template not registered (the case in ALL of P3.2: marketing is dark) =>
-     Cancel('template_not_registered') - no outbox row, no effect
+  4. template not registered => Cancel('template_not_registered') - no outbox
+     row, no effect. P3.4: tenant not enabled for marketing (H100, absence =
+     disabled) => Cancel('marketing_disabled') (revivable, the cart stays open)
   5. registered (tests inject it in-test only) => enqueue via proactive.py ONLY
      (never insert_outbox, S22) with idempotency_key cart:{id}:stage1
   6. carts.status ⇐ 'reminded' in the SAME transaction, then Done.
@@ -21,7 +22,7 @@ from datetime import datetime, timedelta
 
 import psycopg
 
-from app.db import repos_carts
+from app.db import repos_carts, repos_marketing
 from app.obs import metrics
 from app.workers import config, proactive, verify
 from app.workers.config import WorkerSettings
@@ -37,7 +38,33 @@ def _merge_fields(settings: WorkerSettings, snapshot: dict) -> dict[str, str]:
     first_title = ""
     if items and isinstance(items[0], dict):
         first_title = str(items[0].get("title", ""))[: settings.cart_item_title_max]
-    return {"title": first_title, "item_count": str(int(snapshot.get("item_count", 0)))}
+    item_count = int(snapshot.get("item_count", 0))
+    return {
+        "title": first_title, "item_count": str(item_count),
+        "items_phrase": items_phrase(first_title, item_count),
+    }
+
+
+def items_phrase(title: str, item_count: int) -> str:
+    """P3.4 / OQ-P3-08: the ONLY merge value the production template takes. A
+    PURE, deterministic function of (first item title, total count): the title
+    in «» then, if more items, "و{n} …" with correct Arabic number agreement.
+    No price, no customer name, no address - the title is already truncated by
+    the caller and stripped of guillemets here (it must never close the quote)."""
+    clean = title.replace("«", "").replace("»", "").strip()
+    if not clean:
+        return "منتجات"
+    head = f"«{clean}»"
+    extra = max(0, item_count - 1)
+    if extra == 0:
+        return head
+    if extra == 1:
+        return f"{head} ومنتج آخر"
+    if extra == 2:
+        return f"{head} ومنتجان آخران"
+    if extra <= 10:
+        return f"{head} و{extra} منتجات أخرى"
+    return f"{head} و{extra} منتجاً آخر"
 
 
 def handle_cart_reminder(
@@ -65,6 +92,13 @@ def handle_cart_reminder(
         # "Wired but dark": no marketing template is registered in P3.2, so the
         # engine runs and cancels - a clean shadow, never a message.
         return Cancel("template_not_registered")
+
+    # P3.4 (H100): marketing is enabled PER TENANT, absence = disabled. A
+    # disabled tenant's cart is NOT burned: Cancel('marketing_disabled') is a
+    # REVIVABLE reason, so fresh cart activity after enabling re-schedules it.
+    activation = repos_marketing.read_activation(conn, tenant_id=tenant_id)
+    if activation is None or not activation["enabled"]:
+        return Cancel("marketing_disabled")
 
     _meta, _text, merge_keys = entry
     merge = {k: v for k, v in _merge_fields(settings, cart["snapshot"] or {}).items()
