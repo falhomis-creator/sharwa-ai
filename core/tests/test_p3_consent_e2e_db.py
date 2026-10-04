@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -198,15 +198,27 @@ def test_matrix_explicit_optin_sends_then_stop_suppresses_then_reoptin_sends(e2e
     assert decision2.send is False
     assert db_testsupport.fetch_outbox_policy_reason(dsn, oid2) == "suppressed"
 
-    # «اشتراك» again: the exact optout-caused block is lifted => sent.
+    # «اشتراك» again - IMMEDIATELY: the first send's reservation is still
+    # inside the 1/24h per-customer cap, so the correct product behavior
+    # (H85 + the frequency cap) is a DROP, not a send (F-P3-31's lesson).
     with core_db.tenant_tx(tid) as conn:
         repos_consent.record_optin(conn, tenant_id=tid, customer_id=cid, message_id=uuid.uuid4())
     decision3, oid3 = _gate(dsn, tid, chid, conv, wa)
-    assert decision3.send is True
+    assert decision3.send is False
+    assert db_testsupport.fetch_outbox_policy_reason(dsn, oid3) == "frequency_cap_skip"
+
+    # Age the tenant's ledger past the 24h window (deterministic, no sleep) -
+    # NOW the re-opt-in send goes through: reserved (H85) + still pending
+    # (sending is the dispatcher's job, F-P3-30.3).
+    db_testsupport.age_proactive_ledger(
+        dsn, tenant_id=tid, reserved_at=PNOW - timedelta(hours=25),
+    )
+    decision4, oid4 = _gate(dsn, tid, chid, conv, wa)
+    assert decision4.send is True
     with core_db.tenant_tx(tid) as conn:
-        ledger3 = repos_policy.read_ledger_status(conn, outbox_id=oid3)
-    assert ledger3 == "reserved"  # H85
-    assert db_testsupport.fetch_outbox_status(dsn, oid3) == "pending"
+        ledger4 = repos_policy.read_ledger_status(conn, outbox_id=oid4)
+    assert ledger4 == "reserved"  # H85
+    assert db_testsupport.fetch_outbox_status(dsn, oid4) == "pending"
 
 
 def test_matrix_rls_same_wa_id_other_tenant_unaffected(e2e):

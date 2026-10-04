@@ -790,6 +790,19 @@ def fast_forward_jobs(dsn: str, *, tenant_id: uuid.UUID) -> None:
         )
 
 
+def age_proactive_ledger(dsn: str, *, tenant_id: uuid.UUID, reserved_at: datetime) -> None:
+    """F-P3-31 (P3.4 step zero): move one tenant's ledger reservations to an
+    ABSOLUTE injected timestamp (deterministic against the gate's injected
+    `now` - no sleep, and no now()/clock_timestamp() arithmetic needed here;
+    where a relative age IS needed, clock_timestamp() is the rule, never
+    now()=transaction-start)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE proactive_ledger SET reserved_at = %s WHERE tenant_id = %s",
+            (reserved_at, tenant_id),
+        )
+
+
 def expire_job_lease(dsn: str, job_id: uuid.UUID) -> None:
     """Simulate a dead worker: the job is 'processing' but its lease is past."""
     with psycopg.connect(dsn, autocommit=True) as conn:
@@ -920,6 +933,7 @@ __all__: Sequence[str] = (
     "fetch_scheduled_job",
     "fetch_scheduled_job_by_key",
     "fast_forward_jobs",
+    "age_proactive_ledger",
     "expire_job_lease",
     "reset_job_to_pending",
     "count_outbox_by_idempotency_key",
