@@ -33,3 +33,6 @@ npm-debug.log*
 # OS
 Thumbs.db
 .DS_Store
+
+# P3.5 local console demo secrets/keys (dev only)
+.dev-console/
