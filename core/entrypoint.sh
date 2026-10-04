@@ -99,7 +99,14 @@ verify_migrations || fail "migrations missing - run scripts/migrate.sh first"
 # 4. exec the role command.
 case "$role" in
     api)
-        exec python -m uvicorn app.main:app --host 0.0.0.0 --port 8080
+        # P4.1: production = several uvicorn workers (API_WORKERS, default 2), behind
+        # the loopback port / reverse proxy. No --reload, no dev server.
+        case "${API_WORKERS:-2}" in
+            ''|*[!0-9]*|0) fail "API_WORKERS must be a positive integer" ;;
+        esac
+        exec python -m uvicorn app.main:app --host 0.0.0.0 --port 8080 \
+            --workers "${API_WORKERS:-2}" --proxy-headers --forwarded-allow-ips "${FORWARDED_ALLOW_IPS:-127.0.0.1}" \
+            --no-server-header
         ;;
     worker)
         exec python -m app.workers.realtime

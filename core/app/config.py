@@ -146,7 +146,7 @@ class Settings:
             issuer=_required("JWT_ISSUER"),
             audience=_required("JWT_AUDIENCE"),
             jwks_url=os.environ.get("JWKS_URL", "").strip() or None,
-            public_key_pem=os.environ.get("JWT_PUBLIC_KEY_PEM", "").strip() or None,
+            public_key_pem=(os.environ.get("JWT_PUBLIC_KEY_PEM", "").strip().replace("\\n", "\n") or None),
             env=env,
         )
         db = DatabaseConfig(
