@@ -33,10 +33,15 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
+from datetime import datetime, timezone
+
 import jwt as pyjwt
 
 from app.db import repos
 from app.db import repos_consent
+from app.db import repos_marketing
+from app.workers import marketing
+from app.workers.config import WorkerSettings
 from app.db import repos_inbox
 from app.db import repos_policy
 from app.db import repos_scheduler
@@ -176,6 +181,111 @@ def cmd_consent_history(args: argparse.Namespace) -> int:
     return 0
 
 
+def _marketing_tenant(conn, platform_ref: str):
+    tenant_id = repos_marketing.resolve_tenant(conn, platform_ref=platform_ref)
+    if tenant_id is None:
+        _err(f"unknown tenant_ref {platform_ref!r}")
+    return tenant_id
+
+
+def cmd_marketing_status(args: argparse.Namespace) -> int:
+    """H100: activation state, cap, 24h count, channel health, eligible
+    subscribers - states and COUNTS only, never a phone or customer text (H20/H48)."""
+    with repos_marketing.operator_conn(_migration_dsn()) as conn:
+        tenant_id = _marketing_tenant(conn, args.tenant_ref)
+        if tenant_id is None:
+            return 1
+        act = repos_marketing.read_activation(conn, tenant_id=tenant_id)
+        _out(f"enabled: {bool(act and act['enabled'])}")
+        _out(f"canary_cap_per_day: {act['canary_cap_per_day'] if act else repos_marketing.DEFAULT_CANARY_CAP}")
+        _out(f"enabled_by: {(act or {}).get('enabled_by') or ''}")
+        _out(f"sent_24h: {repos_marketing.marketing_sent_24h(conn, tenant_id=tenant_id, now=datetime.now(timezone.utc))}")
+        _out(f"eligible_subscribers: {repos_marketing.count_eligible_subscribers(conn, tenant_id=tenant_id)}")
+        for ch in repos_marketing.read_tenant_channels(conn, tenant_id=tenant_id):
+            started = ch["warmup_started_at"]
+            _out(f"channel: status={ch['status']} health={ch['health_state'] or 'none'} "
+                 f"warmup_started={'yes' if started else 'no'}")
+        return 0
+
+
+def cmd_marketing_preview(args: argparse.Namespace) -> int:
+    """Dry run: counts + the template rendered with SYNTHETIC data. READ-ONLY
+    - the connection is opened read-only and rolled back."""
+    settings = WorkerSettings.load()
+    with repos_marketing.operator_conn(_migration_dsn(), read_only=True) as conn:
+        tenant_id = _marketing_tenant(conn, args.tenant_ref)
+        if tenant_id is None:
+            return 1
+        result = marketing.preview(conn, tenant_id=tenant_id, settings=settings)
+        conn.rollback()
+    _out(f"open_carts: {result['open_carts']}")
+    _out(f"eligible: {result['eligible']}")
+    _out(f"ineligible_would_drop: {result['ineligible']}")
+    _out("sample (synthetic data):")
+    _out(str(result["sample"]))
+    return 0
+
+
+def cmd_marketing_enable(args: argparse.Namespace) -> int:
+    """H100: the ONLY way a tenant becomes marketing-enabled. Needs the literal
+    confirmation phrase AND every preflight check. Writes the activation row and
+    the append-only log row in one transaction. NOTHING else enables a tenant."""
+    if args.confirm != marketing.confirm_phrase(args.tenant_ref):
+        _err(f"refused: --confirm must be exactly {marketing.confirm_phrase(args.tenant_ref)!r}")
+        return 1
+    settings = WorkerSettings.load()
+    with repos_marketing.operator_conn(_migration_dsn()) as conn:
+        tenant_id = _marketing_tenant(conn, args.tenant_ref)
+        if tenant_id is None:
+            return 1
+        failed = marketing.preflight(
+            conn, tenant_id=tenant_id, settings=settings, now=datetime.now(timezone.utc),
+            footer_explicit=bool(os.environ.get("MARKETING_FOOTER_AR", "").strip()),
+        )
+        if failed:
+            _err("refused: preflight failed: " + ", ".join(failed))
+            return 1
+        repos_marketing.set_enabled(
+            conn, tenant_id=tenant_id, enabled=True, actor=args.actor,
+            reason=args.reason, cap=args.cap,
+        )
+        conn.commit()
+    _out(f"enabled marketing for {args.tenant_ref} (canary cap {args.cap}/day)")
+    return 0
+
+
+def cmd_marketing_disable(args: argparse.Namespace) -> int:
+    """H101 level 2: off NOW, the pending marketing queue dropped, reserved
+    slots given back, cart reminders cancelled - one transaction. utility and
+    service traffic is untouched."""
+    with repos_marketing.operator_conn(_migration_dsn()) as conn:
+        tenant_id = _marketing_tenant(conn, args.tenant_ref)
+        if tenant_id is None:
+            return 1
+        counts = marketing.disable_tenant(
+            conn, tenant_id=tenant_id, actor=args.actor, reason=args.reason,
+        )
+        conn.commit()
+    _out(f"disabled marketing for {args.tenant_ref}: "
+         f"outbox_dropped={counts['outbox_dropped']} "
+         f"slots_released={counts['slots_released']} "
+         f"jobs_cancelled={counts['jobs_cancelled']}")
+    return 0
+
+
+def cmd_marketing_set_cap(args: argparse.Namespace) -> int:
+    with repos_marketing.operator_conn(_migration_dsn()) as conn:
+        tenant_id = _marketing_tenant(conn, args.tenant_ref)
+        if tenant_id is None:
+            return 1
+        repos_marketing.set_cap(
+            conn, tenant_id=tenant_id, cap=args.cap, actor=args.actor, reason=args.reason,
+        )
+        conn.commit()
+    _out(f"canary cap for {args.tenant_ref} = {args.cap}/day")
+    return 0
+
+
 def cmd_migrate(args: argparse.Namespace) -> int:
     migrations_dir = Path(args.migrations_dir).resolve()
     if not migrations_dir.is_dir():
@@ -260,6 +370,35 @@ def build_parser() -> argparse.ArgumentParser:
     p_chistory.add_argument("--platform-ref", required=True)
     p_chistory.add_argument("--customer-id", required=True)
     p_chistory.set_defaults(func=cmd_consent_history)
+
+    p_mk = sub.add_parser(
+        "marketing", help="marketing activation (H100-H103): status / preview / enable / disable / set-cap")
+    p_mk_sub = p_mk.add_subparsers(dest="marketing_command", required=True)
+    for name, fn, hlp in (
+        ("status", cmd_marketing_status, "activation state, cap, 24h count, channel health (counts only)"),
+        ("preview", cmd_marketing_preview, "dry run: counts + synthetic render, writes nothing"),
+    ):
+        sp = p_mk_sub.add_parser(name, help=hlp)
+        sp.add_argument("--tenant-ref", required=True)
+        sp.set_defaults(func=fn)
+    p_en = p_mk_sub.add_parser("enable", help="enable marketing for ONE tenant (confirm phrase + preflight)")
+    p_en.add_argument("--tenant-ref", required=True)
+    p_en.add_argument("--cap", type=int, required=True, help="canary cap per day (1-500)")
+    p_en.add_argument("--actor", required=True)
+    p_en.add_argument("--reason", required=True)
+    p_en.add_argument("--confirm", required=True, help='literally "ENABLE-MARKETING <tenant-ref>"')
+    p_en.set_defaults(func=cmd_marketing_enable)
+    p_dis = p_mk_sub.add_parser("disable", help="disable + drop the pending marketing queue (immediate)")
+    p_dis.add_argument("--tenant-ref", required=True)
+    p_dis.add_argument("--actor", required=True)
+    p_dis.add_argument("--reason", required=True)
+    p_dis.set_defaults(func=cmd_marketing_disable)
+    p_cap = p_mk_sub.add_parser("set-cap", help="change the canary cap (never enables)")
+    p_cap.add_argument("--tenant-ref", required=True)
+    p_cap.add_argument("--cap", type=int, required=True)
+    p_cap.add_argument("--actor", required=True)
+    p_cap.add_argument("--reason", required=True)
+    p_cap.set_defaults(func=cmd_marketing_set_cap)
 
     p_migrate = sub.add_parser("migrate", help="apply core/migrations/*.sql (forward-only, idempotent)")
     p_migrate.add_argument("--migrations-dir", default="migrations")
