@@ -176,24 +176,5 @@ def insert_message(
     return row[0], row[1]
 
 
-OPTOUT_SCOPES = ("marketing", "back_in_stock", "review_request")
-OPTOUT_REASON = "customer_message_optout"
-
-
-def insert_suppressions(
-    conn: psycopg.Connection, *, tenant_id: uuid.UUID, customer_id: uuid.UUID,
-    scopes: tuple[str, ...], reason: str,
-) -> int:
-    """Write suppression rows (idempotent ON CONFLICT DO NOTHING). order_updates
-    is deliberately never suppressed (service fails open, marketing fails
-    closed - H4). Returns the number of NEW rows written."""
-    written = 0
-    for scope in scopes:
-        cur = conn.execute(
-            "INSERT INTO suppressions (tenant_id, customer_id, scope, reason) "
-            "VALUES (%s, %s, %s, %s) "
-            "ON CONFLICT (tenant_id, customer_id, scope) DO NOTHING",
-            (tenant_id, customer_id, scope, reason),
-        )
-        written += cur.rowcount
-    return written
+# P3.3 (H95): OPTOUT_SCOPES / OPTOUT_REASON and insert_suppressions moved to
+# app/db/repos_consent.py - the single consent/suppression writer (S27-a).

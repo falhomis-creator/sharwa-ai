@@ -31,6 +31,7 @@ from app.channels.gateway_client import GatewayClient
 from app.commerce.adapter import SharwaCommerceAdapter
 from app.config import GatewayConfig
 from app.db import repos
+from app.db import repos_consent
 from app.db import repos_geo
 from app.db import repos_ingest
 from app.db import repos_inbox
@@ -395,15 +396,15 @@ class RealtimeWorker:
         metrics.inbox_events_written_total.labels("message.new").inc()
 
         if optout_langs:
-            repos_ingest.insert_suppressions(
+            repos_consent.insert_suppressions(
                 conn, tenant_id=resolution.tenant_id, customer_id=customer_id,
-                scopes=repos_ingest.OPTOUT_SCOPES, reason=repos_ingest.OPTOUT_REASON,
+                scopes=repos_consent.OPTOUT_SCOPES, reason=repos_consent.OPTOUT_REASON,
             )
             # D4: STOP cancels the queue immediately - every pending automation row
             # for a suppressed scope's templates is dropped (sending rows are caught
             # by the send-time gate, H76). The scope->templates map is DERIVED from
             # the catalog, never re-written here.
-            for scope in repos_ingest.OPTOUT_SCOPES:
+            for scope in repos_consent.OPTOUT_SCOPES:
                 template_ids = proactive.template_ids_for_scope(scope)
                 if template_ids:
                     repos_policy.cancel_pending_proactive(

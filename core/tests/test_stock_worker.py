@@ -31,7 +31,7 @@ def test_join_waitlist_registers_once(monkeypatch):
         lambda conn, **kw: (inserts.append(kw) or uuid.uuid4()),
     )
     consents: list[dict] = []
-    monkeypatch.setattr(stock.repos_policy, "write_consent", lambda conn, **kw: consents.append(kw))
+    monkeypatch.setattr(stock.repos_consent, "write_consent", lambda conn, **kw: consents.append(kw))
 
     d = stock.join_waitlist(
         None, _settings(), tenant_id=uuid.uuid4(),

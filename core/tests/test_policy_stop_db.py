@@ -9,7 +9,7 @@ import uuid
 import pytest
 
 from app import db as core_db
-from app.db import repos_ingest
+from app.db import repos_consent
 from app.db import repos_outbox
 from app.db import repos_policy
 from app.db import testsupport as db_testsupport
@@ -63,13 +63,15 @@ def test_optout_write_scopes_suppression_and_cancel_to_one_customer(stop_ctx):
     dsn, tid, chid = stop_ctx
     a_cid, a_oid = _seed_notice(dsn, tid, chid, "967700000001")
     b_cid, b_oid = _seed_notice(dsn, tid, chid, "967700000002")
-    # The exact sequence realtime.py runs when a customer's message opts out.
+    # The exact sequence realtime.py runs when a customer's message opts out
+    # (P3.3 Stage A: the suppression write goes through the single consent
+    # writer now - repos_consent).
     with core_db.tenant_tx(tid) as conn:
-        repos_ingest.insert_suppressions(
+        repos_consent.insert_suppressions(
             conn, tenant_id=tid, customer_id=a_cid,
-            scopes=repos_ingest.OPTOUT_SCOPES, reason=repos_ingest.OPTOUT_REASON,
+            scopes=repos_consent.OPTOUT_SCOPES, reason=repos_consent.OPTOUT_REASON,
         )
-        for scope in repos_ingest.OPTOUT_SCOPES:
+        for scope in repos_consent.OPTOUT_SCOPES:
             template_ids = proactive.template_ids_for_scope(scope)
             if template_ids:
                 repos_policy.cancel_pending_proactive(

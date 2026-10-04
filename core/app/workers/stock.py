@@ -18,8 +18,8 @@ from typing import Any
 from app import db as core_db
 from app.channels.commerce_client import CommerceClientError, CommerceUnavailableError
 from app.db import repos_catalog
+from app.db import repos_consent
 from app.db import repos_outbox
-from app.db import repos_policy
 from app.db import repos_stock
 from app.obs import metrics
 from app.tools import join_waitlist as join_waitlist_tool
@@ -87,7 +87,7 @@ def join_waitlist(
     )
     # H50 / D3: the back_in_stock consent is written HERE (the coordinator), in
     # the same join transaction - never in the pure join_waitlist tool.
-    repos_policy.write_consent(
+    repos_consent.write_consent(
         conn, tenant_id=tenant_id, customer_id=customer_id,
         scope="back_in_stock", granted=True, source="waitlist_join", evidence=str(entry_id),
     )

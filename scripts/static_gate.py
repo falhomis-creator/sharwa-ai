@@ -42,6 +42,12 @@ exit 1 = violations as `file:line: [phase] detail`.
          psycopg adapts a tuple as a RECORD ('malformed array literal' at
          runtime); sequences are passed as an explicit list(...).
 
+  S27 - P3.3 (H95): (a) raw consents INSERT / suppressions INSERT+DELETE
+         exists ONLY in app/db/repos_consent.py (testsupport.py is the
+         declared seed exception); (b) the consent WRITER functions are called
+         only from app/workers/realtime.py, app/workers/stock.py - and tests;
+         (c) CONSENT_SOURCES in code == the 0016 CHECK list verbatim.
+
 
 """
 from __future__ import annotations
@@ -741,6 +747,105 @@ def _s28_violations(mods: dict[str, Path]) -> list[tuple[str, int, str]]:
                     detail = "literal tuple inside SQL execute parameters - pass list(...) (psycopg adapts a tuple as a record)"
                 if detail is not None:
                     bad.append((str(path.relative_to(ROOT)), getattr(el, "lineno", 0), detail))
+    return bad
+
+
+# --- S27 (P3.3, H95): single consent/suppression writer -----------------------
+
+_S27_CONSENT_INSERT_RE = re.compile(r"(?i)insert\s+into\s+consents\b")
+_S27_SUPPRESSION_WRITE_RE = re.compile(r"(?i)(insert\s+into|delete\s+from)\s+suppressions\b")
+# H95: the repos_consent WRITERS (read_history is a reader - the CLI uses it).
+_S27_WRITER_FUNCS = frozenset({
+    "record_optin", "record_optout", "record_waitlist_join",
+    "write_consent", "insert_suppressions",
+})
+# H95: the ONLY non-test modules that may CALL the consent writers: the
+# message-ingest capture (H99) and the waitlist join (H50/OQ-P3-12).
+_S27_WRITER_CALLER_ALLOWLIST = frozenset({
+    "app.workers.realtime",
+    "app.workers.stock",
+})
+_S27_MIGRATION_FILE = ROOT / "core" / "migrations" / "0016_p3_consent.sql"
+_S27_CHECK_NAME = "consents_source_closed_list"
+
+
+def _s27_sources_in_code(mods: dict[str, Path]) -> list[str] | None:
+    """The CONSENT_SOURCES string tuple in app/db/repos_consent.py (None when
+    the module or the constant is missing/not a string tuple)."""
+    p = mods.get("app.db.repos_consent")
+    if p is None:
+        return None
+    tree = ast.parse(p.read_text(encoding="utf-8"))
+    for node in tree.body:
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, ast.AnnAssign) and node.target is not None:
+            targets = [node.target]
+        if not any(isinstance(t, ast.Name) and t.id == "CONSENT_SOURCES" for t in targets):
+            continue
+        if isinstance(node.value, ast.Tuple):
+            return [e.value for e in node.value.elts
+                    if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+        return None
+    return None
+
+
+def _s27_sources_in_migration() -> list[str] | None:
+    """The closed list inside the 0016 CHECK constraint (None when the
+    migration or the constraint text is missing)."""
+    text = _S27_MIGRATION_FILE.read_text(encoding="utf-8")
+    m = re.search(re.escape(_S27_CHECK_NAME) + r"[^\n]*CHECK\s*\(source\s+IN\s*\(([^)]*)\)", text)
+    if m is None:
+        return None
+    return re.findall(r"'([^']+)'", m.group(1))
+
+
+def _s27_violations(mods: dict[str, Path], test_mods: dict[str, Path]) -> list[tuple[str, int, str]]:
+    """S27 (H95): one consent/suppression writer, one caller surface, and the
+    code's closed source list identical to the 0016 constraint."""
+    bad: list[tuple[str, int, str]] = []
+    everywhere = dict(mods)
+    everywhere.update(test_mods)
+    for mod, path in everywhere.items():
+        # app/db/testsupport.py is the declared test-seeding exception (S24-a
+        # style): its charter is raw fixture SQL, exactly like its existing
+        # outbox/number_health/scheduled_jobs seeds.
+        if mod in ("app.db.repos_consent", "app.db.testsupport"):
+            continue
+        text = path.read_text(encoding="utf-8")
+        if _S27_CONSENT_INSERT_RE.search(text):
+            bad.append((str(path.relative_to(ROOT)), 0,
+                        "raw consents INSERT outside app/db/repos_consent.py (S27-a/H95)"))
+        if _S27_SUPPRESSION_WRITE_RE.search(text):
+            bad.append((str(path.relative_to(ROOT)), 0,
+                        "raw suppressions INSERT/DELETE outside app/db/repos_consent.py (S27-a/H95)"))
+        tree = ast.parse(text)
+        aliases = _import_aliases(tree)
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in _S27_WRITER_FUNCS
+                    and isinstance(node.func.value, ast.Name)
+                    and (node.func.value.id == "repos_consent"
+                         or aliases.get(node.func.value.id) == "app.db.repos_consent")):
+                allowed = (mod in _S27_WRITER_CALLER_ALLOWLIST
+                           or mod == "app.db.repos_consent"
+                           or mod.startswith("tests."))
+                if not allowed:
+                    bad.append((str(path.relative_to(ROOT)), getattr(node, "lineno", 0),
+                                f"repos_consent.{node.func.attr} called outside the consent capture surface (realtime/stock + tests) (S27-b/H95)"))
+    # (c) the closed source list in code == the 0016 CHECK list, verbatim.
+    code_sources = _s27_sources_in_code(mods)
+    sql_sources = _s27_sources_in_migration()
+    if code_sources is None:
+        bad.append(("core/app/db/repos_consent.py", 0,
+                    "CONSENT_SOURCES string tuple not found (S27-c/H95)"))
+    elif sql_sources is None:
+        bad.append((str(_S27_MIGRATION_FILE.relative_to(ROOT)), 0,
+                    f"{_S27_CHECK_NAME} CHECK (source IN (...)) not found in 0016 (S27-c/H95)"))
+    elif code_sources != sql_sources:
+        bad.append(("core/app/db/repos_consent.py", 0,
+                    f"CONSENT_SOURCES != the 0016 constraint list (code={code_sources}, sql={sql_sources}) (S27-c/H95)"))
     return bad
 
 
@@ -1679,6 +1784,10 @@ def main() -> int:
     # ---- S26 (P3.2, H91): signature-before-parse + no payloads in logs --------
     for rel, lineno, detail in _s26_violations(mods):
         _err("S26", rel, lineno, detail)
+
+    # ---- S27 (P3.3, H95): single consent/suppression writer -------------------
+    for rel, lineno, detail in _s27_violations(mods, _test_module_files()):
+        _err("S27", rel, lineno, detail)
 
     # ---- S28 (P3.3, F-P3-25/H86): sequence SQL params must be list(...) -------
     for rel, lineno, detail in _s28_violations(mods):

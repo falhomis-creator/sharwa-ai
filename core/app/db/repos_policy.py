@@ -116,33 +116,28 @@ def last_marketing_sent_at(conn: psycopg.Connection, *, channel_id: uuid.UUID) -
     return row[0] if row is not None else None
 
 
-# --- consent (H78) ---------------------------------------------------------
+# --- consent (H78/H95) --------------------------------------------------------
 
 def read_latest_consent(
     conn: psycopg.Connection, *, tenant_id: uuid.UUID, customer_id: uuid.UUID, scope: str,
 ) -> bool:
     """Latest-wins: the most recent consents row for (tenant, customer, scope).
-    No row => NOT consented (H78: the absence is a refusal)."""
+    No row => NOT consented (H78: the absence is a refusal). H95/P3.3: for
+    scope='marketing' the latest row must ALSO carry source
+    'customer_message_optin' - checkout_optin/import rows are stored but do
+    not open marketing until the owner's legal decision (OQ-P3-14); every
+    other scope ignores the source, exactly as before."""
     row = conn.execute(
-        "SELECT granted FROM consents "
+        "SELECT granted, source FROM consents "
         "WHERE tenant_id = %s AND customer_id = %s AND scope = %s "
         "ORDER BY created_at DESC, id DESC LIMIT 1",
         (tenant_id, customer_id, scope),
     ).fetchone()
-    return bool(row is not None and row[0])
-
-
-def write_consent(
-    conn: psycopg.Connection, *, tenant_id: uuid.UUID, customer_id: uuid.UUID,
-    scope: str, granted: bool, source: str, evidence: str | None,
-) -> None:
-    """Append a consents row (latest-wins). Written in the waitlist-join
-    transaction (H50: in the coordinator, not the tool)."""
-    conn.execute(
-        "INSERT INTO consents (tenant_id, customer_id, scope, granted, source, evidence) "
-        "VALUES (%s, %s, %s, %s, %s, %s)",
-        (tenant_id, customer_id, scope, granted, source, evidence),
-    )
+    if row is None or not row[0]:
+        return False
+    if scope == "marketing" and str(row[1]) != "customer_message_optin":
+        return False
+    return True
 
 
 # --- gate snapshot reads (H76) ---------------------------------------------

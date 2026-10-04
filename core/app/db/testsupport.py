@@ -635,9 +635,12 @@ def seed_number_health(
 
 def insert_consent(
     dsn: str, *, tenant_id: uuid.UUID, customer_id: uuid.UUID, scope: str,
-    granted: bool = True, source: str = "test",
+    granted: bool = True, source: str = "customer_message_optin",
 ) -> None:
-    """Insert a consents row (latest-wins read: the seed inserts a fresh row)."""
+    """Insert a consents row (latest-wins read: the seed inserts a fresh row).
+    P3.3: the 0016 CHECK constraint closes the source list - the seed default
+    is a valid explicit opt-in (which also satisfies the marketing source gate
+    in repos_policy.read_latest_consent, H95)."""
     with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute(
             "INSERT INTO consents (tenant_id, customer_id, scope, granted, source) "
