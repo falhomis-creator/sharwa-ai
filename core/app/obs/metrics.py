@@ -809,6 +809,24 @@ consent_events_total = Counter(
     registry=registry,
 )
 
+# --- P3.4 marketing under control (H100-H103) ---------------------------------
+# No labels at all: no tenant, no customer, no template text (H20/H48). The
+# per-reason drop/defer story already lives in policy_verdicts_total
+# {class="marketing", reason="marketing_not_enabled"|"canary_cap_reached"|...}.
+
+marketing_sent_total = Counter(
+    "marketing_sent_total",
+    "Marketing messages handed to the gateway (202 accepted).",
+    registry=registry,
+)
+
+marketing_optout_after_send_total = Counter(
+    "marketing_optout_after_send_total",
+    "Customer STOPs that arrived within 24h of a marketing message "
+    "(the MarketingOptoutRatioHigh numerator).",
+    registry=registry,
+)
+
 scheduler_oldest_due_seconds = Gauge(
     "scheduler_oldest_due_seconds",
     "Age in seconds of the oldest overdue pending job, by kind (SchedulerLagHigh).",

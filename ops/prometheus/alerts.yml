@@ -623,5 +623,22 @@ groups:
           summary: "an unusual rate of customer STOPs"
           description: "consent_events_total{action=\"revoked\"} is rising fast - customers are opting out in numbers; check what was sent recently (the ledger's evidence UUIDs map to the exact inbound messages)."
 
-
+  # P3.4 (marketing under control, H100-H103). The alert INFORMS a human and
+  # never switches anything off by itself (H102/H81: stopping marketing is a
+  # human decision - `app.cli marketing disable`, or the global kill switch).
+  # 5% STOP-after-send with at least 20 sends in 24h is the documented default;
+  # tune it HERE (rule data, deliberately no env knob).
+  - name: sharwa_ai_p3_4
+    rules:
+      - alert: MarketingOptoutRatioHigh
+        expr: >
+          (sum(increase(marketing_optout_after_send_total[24h]))
+            / clamp_min(sum(increase(marketing_sent_total[24h])), 1)) > 0.05
+          and sum(increase(marketing_sent_total[24h])) >= 20
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "more than 5% of marketing recipients opted out within a day of the message"
+          description: "marketing_optout_after_send_total / marketing_sent_total over 24h is above 5% with >=20 sends - the message or the audience is wrong. Follow docs/MARKETING_RUNBOOK.md: disable the tenant (app.cli marketing disable) or turn the global marketing kill switch off."
 

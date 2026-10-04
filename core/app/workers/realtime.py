@@ -36,6 +36,7 @@ from app.db import repos_geo
 from app.db import repos_ingest
 from app.db import repos_inbox
 from app.db import repos_llm
+from app.db import repos_marketing
 from app.db import repos_outbox
 from app.db import repos_policy
 from app.db.context import system_tx, tenant_tx
@@ -408,6 +409,13 @@ class RealtimeWorker:
             # F-P3-29: a repeated STOP is a noop in the ledger (H99) - counted,
             # never an error; the queue cancel below runs in BOTH cases.
             metrics.consent_events_total.labels(action, repos_consent.OPTOUT_REASON).inc()
+            # P3.4 (H102): a STOP within 24h of a marketing message is the
+            # MarketingOptoutRatioHigh numerator. Counted only on a REAL revoke
+            # (a repeated STOP is a noop) - a number, never an identifier.
+            if action == "revoked" and repos_marketing.had_marketing_24h(
+                conn, tenant_id=resolution.tenant_id, customer_id=customer_id,
+            ):
+                metrics.marketing_optout_after_send_total.inc()
             # D4: STOP cancels the queue immediately - every pending automation row
             # for a suppressed scope's templates is dropped (sending rows are caught
             # by the send-time gate, H76). The scope->templates map is DERIVED from
