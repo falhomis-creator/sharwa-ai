@@ -108,3 +108,13 @@ def test_batch_with_stop_and_optin_is_stop_alone():
     )
     assert d.decision == turn.Decision.OPTOUT_CONFIRM
     assert d.template_id == "optout_confirm"
+
+
+def test_marketing_stays_dark_in_the_catalog():
+    """The formal dark rule (P3.2 §5.11, still binding through P3.3): no
+    marketing template and no cart_reminder in PROACTIVE_TEMPLATES."""
+    from app.workers.config import PROACTIVE_TEMPLATES
+
+    for template_id, (meta, _text, _keys) in PROACTIVE_TEMPLATES.items():
+        assert meta.message_class != "marketing", template_id
+        assert template_id != "cart_reminder"
