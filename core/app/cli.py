@@ -38,6 +38,7 @@ import jwt as pyjwt
 from app.db import repos
 from app.db import repos_inbox
 from app.db import repos_policy
+from app.db import repos_scheduler
 from app.db.migrate import MigrationError, run_migrations
 
 
@@ -130,6 +131,31 @@ def cmd_policy_reinstate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_scheduler_status(args: argparse.Namespace) -> int:
+    """Job counts by kind/status + oldest overdue seconds - NEVER a payload or
+    a phone (H48)."""
+    rows = repos_scheduler.scheduler_status(_migration_dsn())
+    if not rows:
+        _out("no scheduled jobs")
+        return 0
+    for kind, status, jobs, oldest_due_s in rows:
+        _out(f"{kind}\t{status}\tjobs={jobs}\toldest_due_s={oldest_due_s:.0f}")
+    return 0
+
+
+def cmd_scheduler_cancel(args: argparse.Namespace) -> int:
+    """Cancel one pending/processing job by dedupe key, with an audit trail."""
+    tenant_id, cancelled = repos_scheduler.scheduler_cancel(
+        _migration_dsn(), platform_ref=args.tenant_ref,
+        dedupe_key=args.dedupe_key, reason=args.reason,
+    )
+    if tenant_id is None:
+        _err(f"unknown tenant_ref {args.tenant_ref!r}")
+        return 1
+    _out("cancelled" if cancelled else "no pending/processing job with that key")
+    return 0
+
+
 def cmd_migrate(args: argparse.Namespace) -> int:
     migrations_dir = Path(args.migrations_dir).resolve()
     if not migrations_dir.is_dir():
@@ -193,6 +219,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_reinstate.add_argument("--channel", required=True)
     p_reinstate.add_argument("--reason", required=True)
     p_reinstate.set_defaults(func=cmd_policy_reinstate)
+
+    p_sched = sub.add_parser("scheduler", help="scheduled-job operator commands (status / cancel)")
+    p_sched_sub = p_sched.add_subparsers(dest="scheduler_command", required=True)
+    p_sstatus = p_sched_sub.add_parser(
+        "status", help="job counts by kind/status + oldest due (no payloads, H48)")
+    p_sstatus.set_defaults(func=cmd_scheduler_status)
+    p_scancel = p_sched_sub.add_parser(
+        "cancel", help="cancel one pending/processing job by dedupe key (audited)")
+    p_scancel.add_argument("--tenant-ref", required=True)
+    p_scancel.add_argument("--dedupe-key", required=True)
+    p_scancel.add_argument("--reason", default="operator_cancel")
+    p_scancel.set_defaults(func=cmd_scheduler_cancel)
 
     p_migrate = sub.add_parser("migrate", help="apply core/migrations/*.sql (forward-only, idempotent)")
     p_migrate.add_argument("--migrations-dir", default="migrations")

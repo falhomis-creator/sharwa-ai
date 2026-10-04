@@ -565,5 +565,47 @@ groups:
           summary: "proactive rows are expiring before send"
           description: "policy_verdicts_total{reason=\"expired\"} is rising - rows are timing out (marketing 24h / utility 6h TTL); the gate is deferring more than it sends."
 
+  # P3.2 (scheduler engine + cart webhook, H87-H93). A stopped engine is a
+  # silence, not an error - it is visible ONLY through SchedulerStalled
+  # (scheduler_last_success_timestamp_seconds stops advancing). S4 verifies
+  # these rules reference metrics that exist in core/app/obs/metrics.py.
+  - name: sharwa_ai_p3_2
+    rules:
+      - alert: SchedulerStalled
+        expr: time() - scheduler_last_success_timestamp_seconds > 45
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "the scheduled-job engine has stopped"
+          description: "scheduler_last_success_timestamp_seconds is more than 45s old (3x the 15s cycle) - due jobs (cart reminders) are no longer being claimed or executed."
+
+      - alert: SchedulerLagHigh
+        expr: scheduler_oldest_due_seconds > 600
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "scheduled jobs are lagging behind their run_at"
+          description: "the oldest overdue pending job is over 600s old for 5 minutes - the engine cannot keep up with the claim batch or is stuck behind a poisoned tenant."
+
+      - alert: SchedulerJobsFailing
+        expr: increase(scheduler_outcomes_total{outcome="failed"}[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "scheduled jobs are reaching terminal failure"
+          description: "scheduler_outcomes_total{outcome=\"failed\"} is rising - handlers exhausted their attempts (or hit an unknown kind); scheduler_handler_errors_total carries the isolated exception count."
+
+      - alert: CartWebhookRejects
+        expr: increase(cart_webhook_requests_total{status=~"401|413|422"}[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "the platform's cart webhook deliveries are being rejected"
+          description: "cart_webhook_requests_total{status=~\"401|413|422\"} is rising - a bad signature, an expired timestamp, an oversized body or a schema violation; the store team should check docs/PLATFORM_CART_CONTRACT.md."
+
 
 
