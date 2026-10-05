@@ -490,7 +490,7 @@ groups:
           description: "stock_observation_stale_total increased - the platform is late with stock observations, so waiters are neither allocated nor notified (H73: never guess availability)."
 
       - alert: StockHoldsExpiringUnconverted
-        expr: rate(stock_holds_total{action=\"expired\"}[15m]) > 0
+        expr: rate(stock_holds_total{action="expired"}[15m]) > 0
         for: 15m
         labels:
           severity: warning
