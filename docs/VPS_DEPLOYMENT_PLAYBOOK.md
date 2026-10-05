@@ -247,3 +247,18 @@ docker compose logs worker-realtime --tail 30   # لا يجب أن يظهر أي
 | `worker-realtime` يعيد التشغيل: `DEEPSEEK_API_KEY is required` | المفتاح غير موجود/فارغ في `.env.prod` | نفّذ §8.5-أ (أ-1) ثم `docker compose --profile engine up -d worker-realtime` |
 | `worker-realtime`: `LLM_PROVIDER=fake is forbidden` | قيمة `LLM_PROVIDER` قديمة في `.env.prod` | نفّذ §8.5-أ (أ-2) |
 | اللوحة بيضاء | CSP/مسار | تأكد أن `./frontend` موجود على الخادم (`ls frontend/index.html`) |
+
+## 11. دروس النشر الفعلي الأول (2026-10-04/05) — اقرأها قبل أي نشر ثانٍ
+
+هذه تصحيحات خرجت من أول تشغيل حقيقي على الـVPS، وتتقدّم على أي نص أعلاه يخالفها:
+
+1. **لا تثق بـ`.env` القديم على الخادم.** إن كانت خدمات تعمل أصلاً، فكلمات مرور PG/Redis ومفتاح الـwebhook وقيم MinIO تُؤخذ من الحاويات العاملة (`docker inspect`/`env`) لا من ملف قديم؛ وإلا حصل `password authentication failed` و`WRONGPASS`. أعِد تسمية الملف القديم (`.env.stale-<تاريخ>`).
+2. **المتغيّر `SHARWA_AI_GATEWAY_WEBHOOK_SECRET` مطلوب** لتفسير compose؛ غيابه يوقف `compose config`.
+3. **المنفذ الافتراضي للـAPI على الاستضافة 8100** (`API_HOST_PORT`) لأن 8000 محجوز لـDjango لاحقاً؛ الوصول عبر نفق SSH.
+4. **JWT:** issuer=`sharwa-sso` وaudience=`sharwa-api` (قيم Django). المفتاح العام سطر واحد بـ`\n`. التوكن يُولَّد على جهازك فقط (`scripts/mint_admin_token.py`)، والمفتاح الخاص لا يغادر جهازك.
+5. **`MARKETING_FOOTER_AR` يجب أن يكون بين علامتي اقتباس** في `.env.prod`. و**لا تُنفِّذ `source .env.prod` أبداً**: يصدّر متغيّرات قديمة تتفوّق على env-file في compose. استخدم `export COMPOSE_ENV_FILES=.env.prod` في جلسة نظيفة.
+6. **الدمج على الـVPS:** `git fetch && git merge` وليس `git pull --ff-only` (يفشل مع commit دمج محلي). نفّذ `cd ~/sharwa_ai` أولاً، وقبل أي دمج: `git checkout -- <ملف عُدّل يدوياً>`.
+7. **Prometheus:** ملف `ops/prometheus/secrets/metrics_token` يجب `chown 65534` وصلاحية 600 وإلا لا يقرؤه. تحقّق دائماً بـ`promtool check config` قبل إعادة التشغيل (تعليق حلقة إعادة تشغيل سببها علامات اقتباس مهرّبة في alerts.yml).
+8. **العامل:** `docker compose --profile engine up -d --no-deps worker-realtime` كي لا تُعاد إنشاء بقية الخدمات. تحذير `shard_stale:0` عند الإقلاع الأول عابر.
+9. **ويندوز:** أوامر المفاتيح تُنفَّذ في CMD أو PowerShell على جهازك لا في bash على الـVPS؛ لا تلصق أحدهما في الآخر.
+10. **قبل الترحيل دائماً:** `pg_dump` احتياطي. الترحيلات للأمام فقط عبر `scripts/migrate.sh` ولا تعمل تلقائياً (H62).
