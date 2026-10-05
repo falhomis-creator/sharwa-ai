@@ -104,6 +104,30 @@ def test_fake_embedding_provider_rejected_in_production():
     validate_embedding_provider("test", "fake")  # no raise
 
 
+def test_local_embedding_provider_allowed_in_production():
+    # P4.2: `local` is REAL local code (deterministic, no network, no cost -
+    # app/llm/adapters/local_embedding.py), so production boots with it
+    # (DeepSeek exposes no embeddings endpoint).
+    from types import SimpleNamespace
+
+    from app.llm import registry
+    from app.llm.adapters.local_embedding import LocalEmbeddingProvider
+
+    validate_embedding_provider("production", "local")  # no raise
+    provider = registry.build_embedding_provider("local", SimpleNamespace(embedding_dim=1024))
+    assert isinstance(provider, LocalEmbeddingProvider)
+    result = provider.embed(texts=["قميص قطن", "حذاء"], timeout_s=1.0)
+    assert all(len(v) == EMBED_DIM for v in result.vectors)
+    assert result.usage.provider == "local"
+    assert result.usage.input_tokens == 0  # local computation: zero tokens, zero cost
+    # Byte-identical vectors to the dev/test fake provider (same algorithm and
+    # shared Arabic normalizer): catalog embeddings written before the switch
+    # stay valid under EMBEDDING_PROVIDER=local.
+    assert result.vectors[0] == embed_text("قميص قطن")
+    with pytest.raises(RuntimeError):
+        registry.build_embedding_provider("no-such-embedding", SimpleNamespace(embedding_dim=1024))
+
+
 # --- V11: slots whitelist ------------------------------------------------------
 
 

@@ -4,7 +4,7 @@
 
 ## 0. ثلاث حقائق قبل أن تبدأ
 
-1. **العامل `worker-realtime` لا يُشغَّل في هذا النشر.** هو يرفض الإقلاع تحت `ENV=production` ما دام مزوّد الـLLM/الـEmbedding الوحيد المنفَّذ هو `fake` (حارس H-safety: مزوّد وهمي لا يصل لعميل حقيقي). وُضع في profile باسم `engine`. لوحة التحكّم والـAPI لا يحتاجانه. تشغيله قرار منفصل بعد اختيار مزوّد حقيقي (سؤال مفتوح للمالك).
+1. **العامل `worker-realtime` اختياري في هذا النشر (profile باسم `engine`).** منذ P4.2 أصبح قابلاً للتشغيل تحت `ENV=production`: مزوّد الـLLM الحقيقي هو DeepSeek (`LLM_PROVIDER=deepseek` + `DEEPSEEK_API_KEY` — حارس H-safety صار يتعرّف عليه كمزوّد حقيقي) والـEmbedding المحلي `EMBEDDING_PROVIDER=local` (DeepSeek لا يوفّر واجهة تضمين). لوحة التحكّم والـAPI لا يحتاجانه؛ تشغيله خطوة منفصلة واعية (§8.5).
 2. **لا تُولِّد كلمات سر قاعدة البيانات من جديد.** مجلد `pgdata` موجود، وأدوار PostgreSQL أُنشئت بكلمات سر `.env` الحالية؛ تغييرها في الملف يكسر الاتصال. لذلك `.env.prod` يُبنى **من نسخة `.env` الحالي** ثم تُضاف إليه المتغيّرات الناقصة فقط.
 3. **المنفذ 8000 قد يكون محجوزاً لـDjango على نفس الخادم.** الخطوة 2 تفحصه وتختار 8000 أو 8100 تلقائياً. الـAPI مربوط على **127.0.0.1 فقط** (لا يُكشف للإنترنت)، وتصل إليه بنفق SSH (الخطوة 7).
 
@@ -16,7 +16,7 @@
 cd ~/sharwa-ai
 git status --short | head        # يجب أن يكون نظيفاً؛ إن ظهر تعديل محلي فاحفظه قبل المتابعة
 git pull --ff-only
-git log --oneline -3             # تأكد أن الأحدث يتضمن P3.5 وP4.1
+git log --oneline -3             # تأكد أن الأحدث يتضمن P3.5 وP4.1 وP4.2 (DeepSeek)
 docker compose version           # يجب ≥ 2.24 (لدعم COMPOSE_ENV_FILES)
 ```
 
@@ -184,10 +184,55 @@ docker compose stop api               # إيقاف اللوحة والـAPI فق
 git log --oneline -8 ; git checkout <SHA> && docker compose up -d --build api
 ```
 
+## 8.5 تشغيل محرك الذكاء الاصطناعي — `worker-realtime` + DeepSeek (P4.2)
+
+> قرار المالك P4.2: DeepSeek هو مزوّد الـLLM الحقيقي الوحيد (OpenAI مستبعَد) — واجهة متوافقة تماماً مع OpenAI على `https://api.deepseek.com` والنموذج `deepseek-chat`.
+
+### أ) المتغيّرات التي تُضاف يدوياً إلى `.env.prod`
+
+```bash
+cd ~/sharwa-ai && export COMPOSE_ENV_FILES=.env.prod && umask 077
+
+# 1) المفتاح الحقيقي من https://platform.deepseek.com (يُلصق مرة واحدة، لا يُطبع):
+read -rs DS_KEY && printf '\n' 
+sed -i '/^DEEPSEEK_API_KEY=/d' .env.prod
+printf 'DEEPSEEK_API_KEY=%s\n' "$DS_KEY" >> .env.prod
+unset DS_KEY
+
+# 2) صراحةً أوضح من الضمني (هذه قيم docker-compose الافتراضية الجديدة):
+sed -i '/^LLM_PROVIDER=/d;/^EMBEDDING_PROVIDER=/d' .env.prod
+printf 'LLM_PROVIDER=deepseek\nEMBEDDING_PROVIDER=local\n' >> .env.prod
+
+# 3) اختياري — تجاوز الافتراضات (base_url/النموذج):
+# printf 'DEEPSEEK_BASE_URL=https://api.deepseek.com\nDEEPSEEK_MODEL=deepseek-chat\n' >> .env.prod
+
+chmod 600 .env.prod
+docker compose config --quiet   # تحقّق أن الملف يُقرأ دون أخطاء
+```
+
+### ب) إعادة بناء الصورة ثم الإقلاع
+
+```bash
+git pull --ff-only
+docker compose build api                     # الصورة sharwa-ai-core مشتركة بين api وworker-realtime (تتضمن الآن مكتبة openai)
+docker compose --profile engine up -d worker-realtime
+sleep 25 && docker compose ps worker-realtime   # يجب أن تتحول إلى (healthy)
+docker compose logs worker-realtime --tail 30   # لا يجب أن يظهر أي ConfigError
+```
+
+- `DEEPSEEK_API_KEY is required` ⇒ الخطوة (أ-1) لم تُطبَّق.
+- `LLM_PROVIDER=fake is forbidden` ⇒ في `.env.prod` قيمة قديمة؛ أعد (أ-2).
+- فشل 401 من DeepSeek وقت التشغيل ⇒ المفتاح غير صحيح؛ أعد (أ-1). القاطع (breaker) سيحمي المحرك meantime والردود تتحول للقوالب/التسليم البشري.
+
+ملاحظات:
+- **`EMBEDDING_PROVIDER=local`**: DeepSeek لا يوفّر واجهة تضمين نصوص؛ `local` مزوّد محلي حتمي بلا شبكة وبلا تكلفة، والبحث المتجهي تحسين اختياري (H42) يفشل مفتوحاً إلى البحث العادي. عند اختيار مزوّد تضمين مدفوع لاحقاً يُستبدل بمتغيّر واحد.
+- **`DEEPSEEK_MODEL`**: الافتراضي `deepseek-chat` (قرار المالك). التشكيلة الحالية في وثائق DeepSeek تضم أيضاً `deepseek-flash` و`deepseek-v4-pro`؛ التبديل متغيّر بيئة واحد بلا نشر جديد.
+- كل مبادئ الحماية باقية: ميزانية شهرية للمستأجر (20$ افتراضياً، `TENANT_MONTHLY_BUDGET_MICRO_USD`)، قاطع + إعادة محاولة واحدة (H39)، «النموذج يصنّف والكود يكتب» (H38) — لا نصّ من إخراج النموذج يصل عميلاً أبداً.
+
 ## 9. ما يبقى مقفلاً (لا تغيّره في هذا النشر)
 
 - **لا مستأجر مُفعَّل للتسويق** وكل شيء الافتراضي OFF. التفعيل لاحقاً من اللوحة (عبارة تأكيد حرفية) أو CLI، وبقرارك.
-- لا إرسال حيّ: العامل مُوقَف، والمحرّك لا يرسل شيئاً.
+- لا إرسال حيّ ما لم تُشغّل العامل صراحةً (§8.5) وتُفعّل التسويق لمستأجر؛ وحتى مع تشغيله، كل مستأجر يبقى مُظلماً حتى `marketing enable`.
 - لا `issue-dev-token` في الإنتاج (محظور بتصميمه).
 
 ## 10. أعطال شائعة
@@ -199,4 +244,6 @@ git log --oneline -8 ; git checkout <SHA> && docker compose up -d --build api
 | 401 `UNAUTHENTICATED` | issuer/audience/المفتاح لا يطابق | أعد توليد التوكن بالقيم الصحيحة |
 | 403 `FORBIDDEN_ROLE` | التوكن ليس platform_admin | أعد التوليد بدون `--role` مخصص |
 | `up -d` يعلّق على `gateway` | api يعتمد على gateway healthy | `docker compose logs gateway --tail 30` (من P0) |
+| `worker-realtime` يعيد التشغيل: `DEEPSEEK_API_KEY is required` | المفتاح غير موجود/فارغ في `.env.prod` | نفّذ §8.5-أ (أ-1) ثم `docker compose --profile engine up -d worker-realtime` |
+| `worker-realtime`: `LLM_PROVIDER=fake is forbidden` | قيمة `LLM_PROVIDER` قديمة في `.env.prod` | نفّذ §8.5-أ (أ-2) |
 | اللوحة بيضاء | CSP/مسار | تأكد أن `./frontend` موجود على الخادم (`ls frontend/index.html`) |

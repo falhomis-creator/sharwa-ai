@@ -39,6 +39,42 @@ def test_load_succeeds_with_defaults(monkeypatch: pytest.MonkeyPatch):
     assert settings.system_pool_max >= tenant_min + 2
 
 
+def test_deepseek_without_api_key_is_rejected(monkeypatch: pytest.MonkeyPatch):
+    # P4.2 (H5): selecting the real provider without its secret must refuse
+    # boot - in EVERY env - with a message naming the missing variable.
+    _base_env(monkeypatch)
+    monkeypatch.setenv("ENV", "test")
+    monkeypatch.setenv("LLM_PROVIDER", "deepseek")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    with pytest.raises(ConfigError, match="DEEPSEEK_API_KEY"):
+        WorkerSettings.load()
+
+
+def test_deepseek_production_boot_allowed_with_key(monkeypatch: pytest.MonkeyPatch):
+    # P4.2: THE fix - the worker BOOTS under ENV=production with the real
+    # provider + key (M13 guard recognizes it) and the local embedding
+    # provider (fake embedding would still refuse).
+    _base_env(monkeypatch)
+    monkeypatch.setenv("ENV", "production")
+    monkeypatch.setenv("LLM_PROVIDER", "deepseek")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-deepseek")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "local")
+    settings = WorkerSettings.load()
+    assert settings.llm_provider == "deepseek"
+    assert settings.llm_api_key == "sk-test-deepseek"
+    assert settings.llm_base_url == "https://api.deepseek.com"
+    assert settings.llm_model == "deepseek-chat"
+
+
+def test_production_fake_provider_still_rejected(monkeypatch: pytest.MonkeyPatch):
+    _base_env(monkeypatch)
+    monkeypatch.setenv("ENV", "production")
+    monkeypatch.setenv("LLM_PROVIDER", "fake")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "local")
+    with pytest.raises(ConfigError):
+        WorkerSettings.load()
+
+
 def test_system_pool_max_below_minimum_is_rejected(monkeypatch: pytest.MonkeyPatch):
     _base_env(monkeypatch)
     monkeypatch.setenv("INGEST_SHARDS", "4")

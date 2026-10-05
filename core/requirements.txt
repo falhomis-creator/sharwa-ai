@@ -25,3 +25,11 @@ annotated-types==0.8.0
 # slim image never silently falls back to no timezone data (quiet-hours/reserve
 # would raise `time zone not recognized`).
 tzdata==2025.2
+# P4.2 real LLM provider: DeepSeek via the official OpenAI-compatible SDK
+# (base_url https://api.deepseek.com - see app/llm/adapters/deepseek.py).
+# httpx2/jiter/sniffio are its new-in-3.x transitive runtime deps, pinned to
+# the exact versions the adapter was written and self-verified against.
+openai==3.24.0
+httpx2==2.13.1
+jiter==0.17.0
+sniffio==1.3.1

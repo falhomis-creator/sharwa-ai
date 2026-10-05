@@ -155,11 +155,14 @@ def build_router(settings: WorkerSettings) -> LlmRouterHandle:
     app.llm (S8 rule 1: the single consumption point)."""
     from app.llm import registry
     from app.llm.breaker import CircuitBreaker
-    provider = registry.build_provider(settings.llm_provider)
+    provider = registry.build_provider(settings.llm_provider, settings)
     breaker = CircuitBreaker(settings.llm_breaker_fail_threshold, settings.llm_breaker_reset_s)
     return LlmRouterHandle(
         provider=provider, breaker=breaker,
-        provider_name=settings.llm_provider, model_name="fake-router",
+        provider_name=settings.llm_provider,
+        # P4.2: the real provider's model (a metrics/accounting label); the
+        # deterministic dev/test provider keeps its historical label.
+        model_name="fake-router" if settings.llm_provider == "fake" else settings.llm_model,
     )
 
 

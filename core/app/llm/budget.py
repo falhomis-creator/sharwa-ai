@@ -41,13 +41,16 @@ def compute_cost_micro_usd(
     provider: str, model: str,
 ) -> int:
     """micro-USD from the (provider, model) price table: micro-USD per 1k tokens
-    in and out. Unknown provider/model => 0 (fake provider is free by default)."""
+    in and out. Unknown provider/model => 0 (fake/local providers are free by
+    default). P4.2: real providers have SUB-micro-USD rates (see
+    DEFAULT_LLM_PRICE_TABLE in app/workers/config.py), so rates may be floats;
+    the result is still an int (floor, same as the previous integer-only math)."""
     entry = price_table.get(provider, {}).get(model)
     if entry is None:
         return 0
-    input_rate = int(entry.get("input", 0))
-    output_rate = int(entry.get("output", 0))
-    return (input_tokens * input_rate + output_tokens * output_rate) // 1000
+    input_rate = float(entry.get("input", 0))
+    output_rate = float(entry.get("output", 0))
+    return int((input_tokens * input_rate + output_tokens * output_rate) // 1000)
 
 
 def ensure_and_check(

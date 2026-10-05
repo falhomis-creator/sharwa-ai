@@ -1191,6 +1191,10 @@ _EXTERNAL_ALLOWLIST = frozenset({
     "psycopg_pool", "prometheus_client", "jwt", "redis", "httpx", "httpcore",
     "anyio", "uvicorn", "multipart", "h11", "idna", "certifi", "cryptography",
     "annotated_types", "typing_extensions", "yaml",
+    # P4.2: the OpenAI-compatible SDK the DeepSeek adapter is written against
+    # (app/llm/adapters/deepseek.py; httpx2 is its new-in-3.x transport, also
+    # imported by the adapter's tests). Pinned in core/requirements.txt.
+    "openai", "httpx2",
     # test-only packages (S16: core/tests/** is now scanned by S1)
     "pytest", "unittest",
 })

@@ -8,7 +8,7 @@ time, before uvicorn ever binds a port - never a silent "accept all" mode.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 class ConfigError(RuntimeError):
@@ -101,6 +101,24 @@ class GatewayConfig:
 
 
 @dataclass(frozen=True)
+class LlmConfig:
+    """P4.2 (owner decision): the marketing engine's LLM is DeepSeek - a fully
+    OpenAI-compatible API at https://api.deepseek.com, model deepseek-chat
+    (DEEPSEEK_MODEL overrides without a code deploy). OpenAI is excluded.
+
+    The api service itself NEVER calls the LLM (H38: only the worker's
+    turn/embed/summary layers do), so api_key is deliberately OPTIONAL here;
+    the WORKER enforces a non-empty DEEPSEEK_API_KEY at boot (H5) in
+    app/workers/config.py. This block exists so the whole stack documents ONE
+    provider configuration and .env stays the single source of truth."""
+
+    provider: str = "deepseek"
+    api_key: str = ""
+    base_url: str = "https://api.deepseek.com"
+    model: str = "deepseek-chat"
+
+
+@dataclass(frozen=True)
 class Settings:
     env: str
     db: DatabaseConfig
@@ -138,6 +156,9 @@ class Settings:
     cart_reminder_max_late_h: int = 12
     cart_item_title_max: int = 60
     default_country_code: str = "967"
+    # P4.2: the LLM provider block (see LlmConfig above) - informational for
+    # the api (it never calls the LLM); the worker enforces the key (H5).
+    llm: LlmConfig = field(default_factory=LlmConfig)
 
     @staticmethod
     def load() -> Settings:
@@ -189,4 +210,10 @@ class Settings:
             cart_reminder_max_late_h=_int("CART_REMINDER_MAX_LATE_H", 12),
             cart_item_title_max=_int("CART_ITEM_TITLE_MAX", 60),
             default_country_code=_optional("DEFAULT_COUNTRY_CODE", "967"),
+            llm=LlmConfig(
+                provider=_optional("LLM_PROVIDER", "deepseek"),
+                api_key=_optional("DEEPSEEK_API_KEY", ""),
+                base_url=_optional("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+                model=_optional("DEEPSEEK_MODEL", "deepseek-chat"),
+            ),
         )

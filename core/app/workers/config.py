@@ -127,8 +127,18 @@ PGBOUNCER_DEFAULT_POOL_SIZE = 25
 # P1.5 LLM price table default: micro-USD per 1000 tokens in/out. The fake
 # provider is free (owner decision); a real provider's table is JSON-overridable
 # without a code deploy.
+# P4.2: deepseek rates from the official pricing page (api-docs.deepseek.com,
+# PEAK column - the higher one, so the tenant budget never under-counts):
+# deepseek-flash and the deepseek-chat alias are $0.30/M in + $1.20/M out;
+# deepseek-v4-pro is $1.32/M in + $3.96/M out. Per 1k tokens that is
+# 0.3/1.2 and 1.32/3.96 micro-USD. 'local' embeddings are free (no entry).
 DEFAULT_LLM_PRICE_TABLE: dict[str, Any] = {
     "fake": {"fake-router": {"input": 0, "output": 0}},
+    "deepseek": {
+        "deepseek-chat": {"input": 0.3, "output": 1.2},
+        "deepseek-flash": {"input": 0.3, "output": 1.2},
+        "deepseek-v4-pro": {"input": 1.32, "output": 3.96},
+    },
 }
 
 # P2.2 address resolver: written confidence weights (H65). JSON-overridable
@@ -247,16 +257,37 @@ def _json_table(name: str, default: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
+# P4.2 (owner decision): LLM providers with a REAL adapter under
+# app/llm/adapters/ - i.e. allowed to boot under ENV=production. 'fake' is not
+# in this set by design (M13), and neither is any name without an adapter.
+REAL_LLM_PROVIDERS = frozenset({"deepseek"})
+
+
 def validate_llm_provider(env: str, provider: str) -> None:
     """M13: a fake provider must never reach a real customer (the same H-safety
-    posture as issue-dev-token refusing under ENV=production)."""
+    posture as issue-dev-token refusing under ENV=production).
+
+    P4.2: the guard now RECOGNIZES the real provider - 'deepseek' (via
+    app/llm/adapters/deepseek.py) boots the worker in production. Production
+    also refuses any name outside REAL_LLM_PROVIDERS (a typo must stop the
+    boot, not silently fall back); non-production envs keep 'fake' for
+    dev/tests and pass unknown names through to the registry's own refusal."""
     if env == "production" and provider == "fake":
         raise ConfigError("LLM_PROVIDER=fake is forbidden when ENV=production")
+    if env == "production" and provider not in REAL_LLM_PROVIDERS:
+        raise ConfigError(
+            f"LLM_PROVIDER={provider!r} is not a real provider; production allows "
+            f"one of {sorted(REAL_LLM_PROVIDERS)} (M13/H-safety)"
+        )
 
 
 def validate_embedding_provider(env: str, provider: str) -> None:
     """P1.5b V1: the fake embedding provider is a test approximation, so it must
-    never run against real customers either (same H-safety as the fake LLM)."""
+    never run against real customers either (same H-safety as the fake LLM).
+    P4.2: 'local' (app/llm/adapters/local_embedding.py) is REAL local code -
+    deterministic, no network, no cost - and is therefore allowed in
+    production: DeepSeek exposes no embeddings endpoint, so it is the
+    production-safe embedding until the owner picks a paid one."""
     if env == "production" and provider == "fake":
         raise ConfigError("EMBEDDING_PROVIDER=fake is forbidden when ENV=production")
 
@@ -352,6 +383,13 @@ class WorkerSettings:
     llm_router_max_input_chars: int = 2000
     llm_router_min_confidence: float = 0.6
     llm_router_max_output_tokens: int = 64
+    # P4.2: the real provider's credentials (DeepSeek, OpenAI-compatible API).
+    # Defaults are written (H4); the key is REQUIRED at load whenever a real
+    # provider is selected (H5 - see REAL_LLM_PROVIDERS above). The base URL
+    # and model are overridable per environment without a code deploy.
+    llm_api_key: str = ""
+    llm_base_url: str = "https://api.deepseek.com"
+    llm_model: str = "deepseek-chat"
     # P1.5b embedding + vector search (PROMPT §5.1-§5.3). All defaults written (H4).
     embedding_provider: str = "fake"
     embedding_dim: int = 1024
@@ -514,6 +552,17 @@ class WorkerSettings:
         env = _optional("ENV", "production")
         llm_provider = _optional("LLM_PROVIDER", "fake")
         validate_llm_provider(env, llm_provider)
+        # P4.2 (H5): a real provider requires its secret AT BOOT - an empty key
+        # refuses to start with a clear message instead of failing per-call
+        # (or, worse, billing) in production. Checked in EVERY env so a dev box
+        # selecting the real provider gets the same fail-fast.
+        llm_api_key = _optional("DEEPSEEK_API_KEY", "")
+        if llm_provider in REAL_LLM_PROVIDERS and not llm_api_key:
+            raise ConfigError(
+                f"DEEPSEEK_API_KEY is required when LLM_PROVIDER={llm_provider} (see .env)"
+            )
+        llm_base_url = _optional("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+        llm_model = _optional("DEEPSEEK_MODEL", "deepseek-chat")
 
         embedding_provider = _optional("EMBEDDING_PROVIDER", "fake")
         validate_embedding_provider(env, embedding_provider)
@@ -662,6 +711,9 @@ class WorkerSettings:
             llm_timeout_s=_float("LLM_TIMEOUT_S", 8.0),
             llm_breaker_fail_threshold=_int("LLM_BREAKER_FAIL_THRESHOLD", 5),
             llm_breaker_reset_s=_float("LLM_BREAKER_RESET_S", 60.0),
+            llm_api_key=llm_api_key,
+            llm_base_url=llm_base_url,
+            llm_model=llm_model,
             tenant_monthly_budget_micro_usd=_int("TENANT_MONTHLY_BUDGET_MICRO_USD", 20_000_000),
             llm_price_table=_json_table("LLM_PRICE_TABLE", DEFAULT_LLM_PRICE_TABLE),
             llm_router_history=_int("LLM_ROUTER_HISTORY", 6),

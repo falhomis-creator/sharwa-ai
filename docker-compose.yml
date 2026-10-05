@@ -335,9 +335,12 @@ services:
   # prometheus (app network) can reach /healthz + /metrics on :4003.
   worker-realtime:
     image: sharwa-ai-core:p1.0
-    # P4.1: opt-in profile. The worker refuses to boot under ENV=production while the only
-    # LLM/embedding provider is `fake` (H-safety M13/V1). Start it explicitly after the owner picks a
-    # real provider: `docker compose --profile engine up -d worker-realtime`.
+    # P4.1: opt-in profile. P4.2: the worker NOW BOOTS under ENV=production with
+    # the real DeepSeek provider (LLM_PROVIDER=deepseek + DEEPSEEK_API_KEY in
+    # .env.prod); embeddings default to `local` (deterministic, no network -
+    # DeepSeek exposes no embeddings endpoint). Start it explicitly:
+    # `docker compose --profile engine up -d worker-realtime` (see
+    # docs/VPS_DEPLOYMENT_PLAYBOOK.md §8.5).
     profiles: ["engine"]
     command: ["worker"]                      # entrypoint.sh role -> python -m app.workers.realtime
     environment:
@@ -365,8 +368,18 @@ services:
       # P4.1: required by workers/config.py (the old file lacked them => crash on boot).
       GATEWAY_BASE_URL: ${GATEWAY_BASE_URL:-http://gateway:4001}
       GATEWAY_API_KEY: ${SHARWA_AI_GATEWAY_API_KEY:?SHARWA_AI_GATEWAY_API_KEY is required (see .env)}
-      LLM_PROVIDER: ${LLM_PROVIDER:-fake}
-      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-fake}
+      # P4.2: DeepSeek is the real LLM (OpenAI-compatible API). An empty
+      # DEEPSEEK_API_KEY makes the worker itself refuse to boot (H5,
+      # workers/config.py) with a clear message; `:?` is deliberately NOT used
+      # here so the default (non-engine) stack keeps booting before the owner
+      # adds the key to .env.prod.
+      LLM_PROVIDER: ${LLM_PROVIDER:-deepseek}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
+      # DeepSeek exposes no embeddings endpoint; `local` is the deterministic
+      # no-network provider (production-safe; `fake` still refuses to boot).
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
       MARKETING_FOOTER_AR: ${MARKETING_FOOTER_AR:-}
       MARKETING_MIN_WARMUP_DAYS: ${MARKETING_MIN_WARMUP_DAYS:-3}
     networks: [data, app]                  # data: pg/pgbouncer/redis-durable/redis-cache. app: prometheus scrape target

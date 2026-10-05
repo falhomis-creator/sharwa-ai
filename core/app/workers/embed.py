@@ -50,13 +50,14 @@ def build_embed(settings: WorkerSettings) -> EmbedHandle:
     from app.llm import registry
     from app.llm.breaker import CircuitBreaker
 
-    provider = registry.build_embedding_provider(settings.embedding_provider)
+    provider = registry.build_embedding_provider(settings.embedding_provider, settings)
     breaker = CircuitBreaker(
         settings.llm_breaker_fail_threshold, settings.llm_breaker_reset_s,
     )
     return EmbedHandle(
         provider=provider, breaker=breaker,
-        provider_name=settings.embedding_provider, model_name="fake-embedding",
+        provider_name=settings.embedding_provider,
+        model_name=f"{settings.embedding_provider}-embedding",
     )
 
 
