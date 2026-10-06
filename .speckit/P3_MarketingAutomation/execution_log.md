@@ -198,3 +198,19 @@ outbox status/policy_reason: ('pending', 'active_chat', ...)
 - `git diff --stat` ⇒ ثلاثة ملفات فقط: `docs/MARKETING_RUNBOOK.md` + `tasks.md` + `execution_log.md`.
 
 **فحص التحوّل:** لا ينطبق (توثيق، بلا كود).
+
+## T14 — إغلاق حزمة P3 الهندسي (توثيق)
+
+**التعديل (توثيق فقط، بلا كود):**
+- `docs/PHASE_GATE.md`: سطر P3 استُبدل بـ`P3: BUILT & DARK — مُغلَق هندسياً...` (السطر 148).
+- `docs/P3_SPECKIT_CLOSEOUT.md`: ملف جديد (النطاق · جدول البنود · قياس T21 · VERIFIED/UNVERIFIED · المفتوح · قرار الدمج).
+- `MASTER_ROADMAP_AND_GAPS.md`: خلية P3 استُبدلت.
+- `docs/SPECKIT_PROTOCOL.md`: أُضيف صف P3.
+- `tasks.md`: Task 13 = VERIFIED بمراجعة المعماري، Task 14 = VERIFIED.
+
+**التحقق:**
+- `python scripts/static_gate.py` ⇒ `STATIC GATE PASSED — 0 violations.` (EXIT=0).
+- `grep "P3: BUILT & DARK" docs/PHASE_GATE.md` ⇒ السطر 148؛ `P3: OPEN` = 0.
+- `git diff --stat` ⇒ ستة ملفات.
+
+**فحص التحوّل:** لا ينطبق (توثيق، بلا كود).
