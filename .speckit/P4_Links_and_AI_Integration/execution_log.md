@@ -404,3 +404,36 @@ VERIFIED: الحارس يرفض الإقلاع بلا سرّ (فحص التحو�
 ## قرارات المعماري قبل Task 5/6 (2026-10-07)
 - **F-P4-01 (محسوم):** `/changes` بلا `since` يبدأ من أول التاريخ: يعيد الكتالوج الحالي كاملاً كأحداث upsert مُقسَّمة صفحات بـ`next_cursor`. `/snapshot` محجوز في العقد ولا يُطلب من شروه تنفيذه الآن (لا ندّاء له في المحرك).
 - **F-P4-03 (جديد، فقدان بيانات صامت محتمل):** `workers/catalog.py:56–74` يقصّ الأحداث إلى `catalog_reconcile_max_events_per_tenant` (500) ثم يحفظ `next_cursor` القادم من المنصة كما هو، فإن أعادت المنصة أكثر من 500 حدث في صفحة ضاعت البقية إلى الأبد. العلاج مزدوج: (أ) العقد يُلزم شروه بصفحة ≤ 500 حدث و`next_cursor` يشير بعد آخر حدث مُعاد؛ (ب) حارس في المحرك (Task 4ج): صفحة أكبر من الحدّ لا تُطبَّق ولا يتقدّم المؤشر، وتُسجَّل خطأ عقد.
+
+## T5 — عقد المسارات والتوقيع (VERIFIED)
+
+أُنشئ `docs/PLATFORM_COMMERCE_CONTRACT.md` بسبعة أقسام. مطابقة كل مفتاح/بند في العقد مع سطر كود:
+
+| بند العقد | سطر الكود |
+|---|---|
+| `events` / `next_cursor` | `adapter.py:19` |
+| `order` | `commerce_client.py:128` |
+| `observation` | `commerce_client.py:155` |
+| `available` (int ≥ 0) | `stock.py:137–138` |
+| `observed_at` (ISO-8601) | `stock.py:37` (+ `142`) |
+| `X-Sharwa-AI-Timestamp` | `commerce_client.py:64` |
+| `X-Sharwa-AI-Signature` | `commerce_client.py:65` |
+| `ORDER_CARD_FIELDS` | `port.py:16` |
+| حقول الأحداث (`type`/`version`/…) | `repos_catalog.py:64–76`, `421–427` |
+| صفحة ≤ 500 | `config.py:373` / `715` |
+| القاطع 5/30ث + مهلة 3ث | `commerce_client.py:73`, `70` |
+
+## T6 — قسم SSO (VERIFIED)
+
+| بند العقد | سطر الكود |
+|---|---|
+| RS256 فقط | `jwt.py:81–82`, `96` |
+| إلزامية `exp,iss,aud,sub` | `jwt.py:100` |
+| `sub/tenant/role` مطلوبة | `jwt.py:108–111` |
+| `ALLOWED_ROLES` | `jwt.py:20`؛ `permissions.py:4` |
+| leeway=clock_skew_s=30 | `jwt.py:99`؛ `config.py:76` |
+| PyJWKClient(lifespan=300) | `jwt.py:42` |
+| مطالبات mint_admin_token | `mint_admin_token.py:54–58` |
+| issuer/audience | `config.py:167–168` |
+
+`python scripts\static_gate.py` ⇒ `STATIC GATE PASSED — 0 violations.` (لم يُمَسّ أي كود).
