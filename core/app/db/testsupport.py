@@ -556,19 +556,25 @@ def seed_conversation(
 
 def seed_inbound_message(
     dsn: str, *, tenant_id: uuid.UUID, conversation_id: uuid.UUID, body: str = "مرحبا",
-    age: timedelta | None = None,
+    age: timedelta | None = None, created_at: datetime | None = None,
 ) -> uuid.UUID:
     """Insert one inbound messages row (prior-interaction / active-chat signal).
     F-P3-19: `age` defaults to 2 days so the customer is NOT "talking now";
-    pass age=timedelta(0) for an active-chat fixture."""
+    pass age=timedelta(0) for an active-chat fixture.
+    F-P3-35: `created_at`, when passed, is inserted verbatim (deterministic tests
+    that inject a fixed clock pass BASE - age); the default stays now() - age."""
     if age is None:
         age = timedelta(days=2)
+    if created_at is not None:
+        sql = ("INSERT INTO messages (tenant_id, conversation_id, direction, sent_by, type, body, status, created_at) "
+               "VALUES (%s, %s, 'in', 'customer', 'text', %s, 'received', %s) RETURNING id")
+        params = (tenant_id, conversation_id, body, created_at)
+    else:
+        sql = ("INSERT INTO messages (tenant_id, conversation_id, direction, sent_by, type, body, status, created_at) "
+               "VALUES (%s, %s, 'in', 'customer', 'text', %s, 'received', now() - %s) RETURNING id")
+        params = (tenant_id, conversation_id, body, age)
     with psycopg.connect(dsn, autocommit=True) as conn:
-        row = conn.execute(
-            "INSERT INTO messages (tenant_id, conversation_id, direction, sent_by, type, body, status, created_at) "
-            "VALUES (%s, %s, 'in', 'customer', 'text', %s, 'received', now() - %s) RETURNING id",
-            (tenant_id, conversation_id, body, age),
-        ).fetchone()
+        row = conn.execute(sql, params).fetchone()
     if row is None:
         raise RuntimeError("INSERT ... RETURNING id produced no row")
     return row[0]

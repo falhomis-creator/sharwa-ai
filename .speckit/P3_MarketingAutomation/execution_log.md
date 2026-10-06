@@ -82,3 +82,59 @@ run 3: 1 passed in 8.32s
 - أخطاء `test_migrate.py` التسعة: `UNVERIFIED_ENV_LIMIT` (تتطلب `sudo -u postgres` غير المتاح من Windows).
 - التذبذب: **F-P3-34** (Test State Pollution). السبب في الكود: `test_stock_allocation.py` ~السطر 435 يعدّ `SELECT count(*) FROM outbox` لكل المستأجرين. أُدخل في اختبار P2.3 نفسه (Task 8ب).
 - الإخفاقات الـ11: أولوية قصوى؛ Task 13 مؤجَّلة حتى Task 21 خضراء. فرضية المعماري: قنبلة زمنية (`BASE` ثابت 2026-10-03 مقابل `now()` في SQL ضمن `repos_policy.py`). تُختبر في Task 16 قبل أي إصلاح.
+
+## T15 — جرد الإخفاقات الـ11 (منفردة، قاعدة نظيفة، بلا كود)
+
+كل الاختبارات الـ11 تعود `send=False` في **أول** صف (تسويق ومرافق معاً). الأخطاء الحرفية الأولى:
+
+1. `test_drip_db.py::test_drip_respects_cap_and_reprocess_is_idempotent` ⇒ `assert 0 == 7` (سطر 106)
+2. `test_frequency_cap_db.py::test_marketing_24h_cap_one_per_customer` ⇒ `assert False is True` (سطر 94)
+3. `test_frequency_cap_db.py::test_utility_24h_cap_three_per_customer` ⇒ `assert [False, False, False, False] == [True, True, True, False]` (سطر 132)
+4. `test_p3_consent_cli_db.py::test_rejoin_after_stop_restores_the_availability_notice` ⇒ `assert False is True` (سطر 104)
+5. `test_p3_consent_e2e_db.py::test_matrix_explicit_optin_sends_then_stop_suppresses_then_reoptin_sends` ⇒ `assert False is True` (سطر 168)
+6. `test_p3_consent_e2e_db.py::test_matrix_rls_same_wa_id_other_tenant_unaffected` ⇒ `assert False is True` (سطر 261)
+7. `test_p3_marketing_db.py::test_enabled_with_explicit_optin_reserves_and_stays_pending` ⇒ `assert False is True` (سطر 122)
+8. `test_p3_marketing_db.py::test_utility_is_unaffected_by_marketing_state` ⇒ `assert False is True` (سطر 161)
+9. `test_p3_marketing_db.py::test_canary_cap_defers_then_releases_after_the_window` ⇒ `assert [False, False, False] == [True, True, False]` (سطر 172)
+10. `test_p3_marketing_db.py::test_disable_drops_marketing_queue_gives_slots_back_and_leaves_utility` ⇒ `assert False is True` (سطر 247)
+11. `test_policy_gate_db.py::test_gate_reserves_eligible_stock_notice` ⇒ `assert False is True` (سطر 91)
+
+**سبب الرفض (مُستخرَج بسكربت تشخيصي خارج المستودع، دون تعديل الاختبارات):** `active_chat` (DEFER). مخرج السكربت على سيناريو الـdrip:
+```
+GateDecision: GateDecision(send=False, session_id=None, message_class='marketing')
+outbox status/policy_reason: ('pending', 'active_chat', ...)
+```
+
+**جدول التجميع:**
+
+| المجموعة | الاختبارات | السبب | سطر الكود |
+|---|---|---|---|
+| 1 (قنبلة زمنية) | الـ11 كلها | `active_chat` (DEFER) | `app/db/repos_policy.py:179` (`has_active_chat`: `m.created_at > now - make_interval(secs => cooldown_s)`). الجذر: `app/db/testsupport.py:569` (`seed_inbound_message` يزرع بـ`now() - age` الحقيقي) |
+
+## T16 — اختبار الفرضيتين (في worktree مؤقت على fee2296)
+
+**(أ) الانحدار؟** شغّلت الـ11 من الـworktree على `fee2296` (قبل القبور وcart_events) على قاعدة نظيفة: **`11 failed in 9.37s`** — نفس الإخفاقات الحرفية. أي **ليست انحداراً** من تغييرات الفرع.
+
+**(ب) الساعة (القنبلة الزمنية):** غيّرت `BASE` في `test_drip_db.py` (في الـworktree فقط) من `2026-10-03` إلى `2026-10-06` (اليوم) وشغّلت `test_drip_respects_cap_and_reprocess_is_idempotent` ⇒ **`1 passed in 5.90s`**.
+
+**الحسم:** الفرضية **مثبتة** — قنبلة زمنية: `seed_inbound_message` يزرع الرسالة بـ`now() - 2 يوم` (حقيقي)، و`has_active_chat` يقارن بـ`now` المحقون (`BASE=2026-10-03` ثابت). متى تجاوز `now()-2d` حدّ `BASE-30min` (≈ 2026-10-05) عاد `active_chat=True` خطأً. **لا إصلاح هنا — بانتظار قرار Task 17.**
+
+## T17 — قرار المعماري (2026-10-06): F-P3-35 قنبلة زمنية في أدوات الاختبار، لا في المنتج
+**التحقق:** `repos_policy.has_active_chat` يقارن `m.created_at > now - cooldown` بالـ`now` **المحقون** (لا `now()` في SQL) — المنتج متّسق. أما `testsupport.seed_inbound_message` فيزرع `created_at = now() - age` بساعة القاعدة **الحقيقية**، بينما الاختبارات تحقن `BASE = 2026-10-03`. بعد مرور ~يومين صارت الرسالة «في المستقبل» بالنسبة لـBASE، فاعتُبرت محادثة نشطة ⇒ `active_chat` DEFER لكل الـ11.
+**القرار:** الإصلاح في أدوات الاختبار. **مرفوض** إضافة حدّ أعلى `m.created_at <= now` في المنتج: في الإنتاج قد تسبق ساعة القاعدة ساعة التطبيق بثوانٍ، فيُستبعد وارد حديث فعلاً ويُرسَل تسويق أثناء محادثة نشطة (إضعاف H80).
+**الحل المعتمد:** `seed_inbound_message` يقبل وسيطاً صريحاً `created_at: datetime | None` (السلوك الافتراضي لا يتغير)، وتمرّر الاختبارات المتأثرة `created_at = BASE - <العمر نفسه>` فتصير حتمية ومستقلة عن تاريخ اليوم. أي استدعاء آخر يجمع `now` ثابتاً مع زرع بالساعة الحقيقية يُعالَج بالطريقة نفسها في Task 19.
+**ملاحظة مفتوحة (O-P3-1، لا تُصلَح الآن):** أسطر في `repos_policy.py` (~381، ~398، ~414) تستعمل `now()` لنوافذ 24 ساعة بخلاف بقية البوّابة؛ متّسقة في الإنتاج لكنها قنابل محتملة للاختبارات. تُراجَع في Task 19.
+
+## T18 — F-P3-35 الإصلاح في أدوات الاختبار (توقّف إجباري)
+
+**التعديل (ملفا كود فقط، بلا كود منتج):**
+- `core/app/db/testsupport.py` — `seed_inbound_message` يقبل `created_at: datetime | None = None`؛ إن مُرِّر يُدرج كما هو (عبر `%s`)، وإلا يبقى السلوك الحالي `now() - age` حرفياً.
+- `core/tests/test_drip_db.py` — الاستدعاء يمرّر `created_at=BASE - timedelta(days=2)`.
+
+**الإثبات:**
+- (أ) `test_drip_db.py` كاملاً على قاعدة نظيفة: `1 passed in 5.84s`.
+- (ب) فحص التحوّل: حذف `created_at` من الاستدعاء مؤقتاً ⇒ `assert 0 == 7` (1 failed in 5.69s)، ثم أُعيد وثُبت الاستعادة بـ`git diff`.
+- (ج) السلوك الافتراضي لم يتغيّر: `test_cart_e2e_db.py` + `test_dispatch_db.py` ⇒ `11 passed in 5.22s`.
+- (د) `python scripts/static_gate.py` ⇒ `STATIC GATE PASSED — 0 violations.` (EXIT=0)؛ `lint-imports` ⇒ **UNVERIFIED** (import-linter غير مثبَّت في بيئة التنفيذ).
+
+**git diff --stat (كود T18):** ملفان فقط — `core/app/db/testsupport.py` و`core/tests/test_drip_db.py`.
