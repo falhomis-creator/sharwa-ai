@@ -52,7 +52,8 @@ def _customer(w, *, consent=True, source="customer_message_optin"):
     conv = ts.seed_conversation(
         w.dsn, tenant_id=w.tid, channel_id=w.chid, customer_id=cid, bot_status="active", epoch=0,
     )
-    ts.seed_inbound_message(w.dsn, tenant_id=w.tid, conversation_id=conv, body="مرحبا")
+    ts.seed_inbound_message(w.dsn, tenant_id=w.tid, conversation_id=conv, body="مرحبا",
+                            created_at=PNOW - timedelta(days=2))
     if consent:
         ts.insert_consent(w.dsn, tenant_id=w.tid, customer_id=cid, scope="marketing", source=source)
     return SimpleNamespace(cid=cid, wa=wa, conv=conv)

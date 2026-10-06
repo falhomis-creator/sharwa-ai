@@ -138,3 +138,28 @@ outbox status/policy_reason: ('pending', 'active_chat', ...)
 - (د) `python scripts/static_gate.py` ⇒ `STATIC GATE PASSED — 0 violations.` (EXIT=0)؛ `lint-imports` ⇒ **UNVERIFIED** (import-linter غير مثبَّت في بيئة التنفيذ).
 
 **git diff --stat (كود T18):** ملفان فقط — `core/app/db/testsupport.py` و`core/tests/test_drip_db.py`.
+
+## T19 — F-P3-35b (age_inbound_messages) + بقية الملفات الخمسة
+
+**السبب الثاني (F-P3-35b):** `age_inbound_messages` كان يضبط `created_at = clock_timestamp() - age` بساعة القاعدة الحقيقية، بينما الاختبار يحقن `now = PNOW` ثابتاً ⇒ الرسالة المتقادمة تبقى «قريبة» من `now` المحقون ⇒ `active_chat`. الإصلاح في أدوات الاختبار (لا المنتج): أُضيف `as_of: datetime | None = None` — إن مُرِّر يُضبط `created_at = as_of - age`، وإلا يبقى `clock_timestamp() - age` حرفياً.
+
+**التعديلات:**
+- `core/app/db/testsupport.py` — `age_inbound_messages` يقبل `as_of`.
+- `core/tests/test_p3_consent_e2e_db.py` — الاستدعاء يمرّر `as_of=PNOW`.
+- الملفات الأربعة الأخرى كانت عُدِّلت بتمرير `created_at=<الوقت المحقون> - timedelta(days=2)` لـ`seed_inbound_message`.
+
+**الأدلة (ملفاً ملفاً، قاعدة نظيفة):**
+1. `test_frequency_cap_db.py` ⇒ `2 passed` (فحص تحوّل: حذف `created_at` ⇒ `assert False is True`).
+2. `test_policy_gate_db.py` ⇒ `4 passed`.
+3. `test_p3_marketing_db.py` ⇒ `31 passed`.
+4. `test_p3_consent_e2e_db.py` ⇒ `6 passed` (فحص تحوّل لـ`as_of`: حذفه ⇒ `AssertionError: active_chat`).
+5. `test_p3_consent_cli_db.py` ⇒ `3 passed`.
+
+**الختام:**
+- الملفات الستة معاً ⇒ `47 passed in 40.86s`.
+- `python scripts/static_gate.py` ⇒ `STATIC GATE PASSED — 0 violations.` (EXIT=0).
+- `git diff --stat`: 6 ملفات — `testsupport.py` + الخمسة (`test_drip_db.py` كان مُلتزَماً في T18).
+
+**19ب (جرد بلا تعديل):** دوال `testsupport.py` ذات الطوابع الزمنية:
+- بـ`now()`/`clock_timestamp()` **وبوسيط حقن**: `seed_inbound_message` (created_at ✓)، `age_inbound_messages` (as_of ✓)، `seed_number_health` (day/next_*/warmup/state ✓)، `insert_cart` (last_activity_at ✓)، `insert_scheduled_job` (run_at ✓)، `age_proactive_ledger` (reserved_at ✓)، `set_cart_last_activity` (last_activity_at ✓).
+- بـ`now()`/`clock_timestamp()` **بلا وسيط حقن**: `expire_job_lease` (locked_until، ~سطر 923)، `set_cart_status` (updated_at، ~سطر 963)، `insert_cart_tombstone` (occurred_at، ~سطر 975). هذه تُقارَن بساعة القاعدة الحقيقية (مسار الـclaim/engine) لا بالـ`now` المحقون في البوّابة ⇒ **ليست قنابل من نوع F-P3-35، ولا قنابل كامنة متبقية من هذا النوع.**

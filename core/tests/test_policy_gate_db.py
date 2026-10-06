@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -60,7 +60,8 @@ def _seed_eligible(dsn, tid, chid, cid, conv):
         dsn, tenant_id=tid, channel_id=chid, daily_cap=50, sent_today=0, day="2026-10-03",
     )
     db_testsupport.insert_consent(dsn, tenant_id=tid, customer_id=cid, scope="back_in_stock", granted=True)
-    db_testsupport.seed_inbound_message(dsn, tenant_id=tid, conversation_id=conv, body="مرحبا")
+    db_testsupport.seed_inbound_message(dsn, tenant_id=tid, conversation_id=conv, body="مرحبا",
+                                        created_at=PNOW - timedelta(days=2))
 
 
 def _row(oid, tid, chid, conv, payload, *, created_at=PNOW):
@@ -112,7 +113,8 @@ def test_gate_drops_no_consent(gated_ctx):
     db_testsupport.seed_number_health(
         dsn, tenant_id=tid, channel_id=chid, daily_cap=50, sent_today=0, day="2026-10-03",
     )
-    db_testsupport.seed_inbound_message(dsn, tenant_id=tid, conversation_id=conv, body="مرحبا")
+    db_testsupport.seed_inbound_message(dsn, tenant_id=tid, conversation_id=conv, body="مرحبا",
+                                        created_at=PNOW - timedelta(days=2))
     oid = _seed_notice(dsn, tid, chid, conv)
     decision = policy_gate.gate(
         _settings(), _row(oid, tid, chid, conv, {"template": "stock_available", "text": "x"}),
@@ -125,7 +127,8 @@ def test_gate_drops_no_consent(gated_ctx):
 def test_gate_defers_no_health_row(gated_ctx):
     dsn, tid, chid, cid, conv = gated_ctx
     db_testsupport.insert_consent(dsn, tenant_id=tid, customer_id=cid, scope="back_in_stock", granted=True)
-    db_testsupport.seed_inbound_message(dsn, tenant_id=tid, conversation_id=conv, body="مرحبا")
+    db_testsupport.seed_inbound_message(dsn, tenant_id=tid, conversation_id=conv, body="مرحبا",
+                                        created_at=PNOW - timedelta(days=2))
     oid = _seed_notice(dsn, tid, chid, conv)
     decision = policy_gate.gate(
         _settings(), _row(oid, tid, chid, conv, {"template": "stock_available", "text": "x"}),

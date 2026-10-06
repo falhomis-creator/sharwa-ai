@@ -833,20 +833,28 @@ def enable_marketing(dsn: str, *, tenant_id: uuid.UUID, cap: int = 5) -> None:
         )
 
 
-def age_inbound_messages(dsn: str, *, conversation_id: uuid.UUID, age: timedelta | None = None) -> None:
+def age_inbound_messages(dsn: str, *, conversation_id: uuid.UUID, age: timedelta | None = None,
+                         as_of: datetime | None = None) -> None:
     """Move a conversation's inbound messages `age` (default 2 days) into the
     past (clock_timestamp-based, no sleep). A test that ingests a REAL message
     (e.g. STOP through RealtimeWorker._commit) stamps it at the DB's now(); the
     gate under an INJECTED older `now` would then see 'the customer is talking
-    right now' (active_chat). Aging the message restores 'not talking now'."""
+    right now' (active_chat). Aging the message restores 'not talking now'.
+    F-P3-35b: `as_of`, when passed, ages from it (created_at = as_of - age) so a
+    deterministic test injects the same clock it passes to the gate; the default
+    stays clock_timestamp() - age."""
     if age is None:
         age = timedelta(days=2)
+    if as_of is not None:
+        sql = ("UPDATE messages SET created_at = %s - %s "
+               "WHERE conversation_id = %s AND direction = 'in'")
+        params = (as_of, age, conversation_id)
+    else:
+        sql = ("UPDATE messages SET created_at = clock_timestamp() - %s "
+               "WHERE conversation_id = %s AND direction = 'in'")
+        params = (age, conversation_id)
     with psycopg.connect(dsn, autocommit=True) as conn:
-        conn.execute(
-            "UPDATE messages SET created_at = clock_timestamp() - %s "
-            "WHERE conversation_id = %s AND direction = 'in'",
-            (age, conversation_id),
-        )
+        conn.execute(sql, params)
 
 
 def clear_marketing_activation(dsn: str, *, tenant_id: uuid.UUID) -> None:

@@ -72,7 +72,8 @@ def test_marketing_24h_cap_one_per_customer(monkeypatch):
         )
         db_testsupport.seed_number_health(dsn, tenant_id=tid, channel_id=chid, daily_cap=50, sent_today=0)
         db_testsupport.insert_consent(dsn, tenant_id=tid, customer_id=cid, scope="marketing", granted=True)
-        db_testsupport.seed_inbound_message(dsn, tenant_id=tid, conversation_id=conv, body="مرحبا")
+        db_testsupport.seed_inbound_message(dsn, tenant_id=tid, conversation_id=conv, body="مرحبا",
+                                           created_at=BASE - timedelta(days=2))
         oid1 = db_testsupport.seed_outbox_row(
             dsn, tenant_id=tid, channel_id=chid, conversation_id=conv,
             origin="automation", message_class="marketing", to_wa_id="967700000004",
@@ -117,7 +118,8 @@ def test_utility_24h_cap_three_per_customer():
             utility_daily_cap=100, utility_sent_today=0,
         )
         db_testsupport.insert_consent(dsn, tenant_id=tid, customer_id=cid, scope="back_in_stock", granted=True)
-        db_testsupport.seed_inbound_message(dsn, tenant_id=tid, conversation_id=conv, body="مرحبا")
+        db_testsupport.seed_inbound_message(dsn, tenant_id=tid, conversation_id=conv, body="مرحبا",
+                                           created_at=BASE - timedelta(days=2))
         decisions = []
         for i in range(4):
             oid = db_testsupport.seed_outbox_row(

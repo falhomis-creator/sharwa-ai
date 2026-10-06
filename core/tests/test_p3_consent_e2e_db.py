@@ -83,7 +83,8 @@ def _eligible_world(dsn, tid, chid, cid, conv):
     db_testsupport.seed_number_health(
         dsn, tenant_id=tid, channel_id=chid, daily_cap=50, sent_today=0,
     )
-    db_testsupport.seed_inbound_message(dsn, tenant_id=tid, conversation_id=conv, body="مرحبا")
+    db_testsupport.seed_inbound_message(dsn, tenant_id=tid, conversation_id=conv, body="مرحبا",
+                                        created_at=PNOW - timedelta(days=2))
 
 
 def _gate(dsn, tid, chid, conv, wa, *, now=PNOW):
@@ -218,7 +219,7 @@ def test_matrix_explicit_optin_sends_then_stop_suppresses_then_reoptin_sends(e2e
     # the DB's now() - under the gate's injected older `now` that reads as "the
     # customer is talking right now" (active_chat). Age it: the customer has been
     # quiet for days, which is the scenario this step means to prove.
-    db_testsupport.age_inbound_messages(dsn, conversation_id=conv)
+    db_testsupport.age_inbound_messages(dsn, conversation_id=conv, as_of=PNOW)
     # The first reservation also set the number's spacing window (next_marketing_at
     # = PNOW + gap); a gate at the SAME instant would defer `spacing` (H79). The
     # injected clock simply moves forward 5 minutes - well inside the row's TTL
