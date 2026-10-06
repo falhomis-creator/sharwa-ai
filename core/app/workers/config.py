@@ -363,11 +363,10 @@ class WorkerSettings:
     dedupe_done_ttl_s: int
     metrics_token: str
     env: str
-    # P1.4 catalog reconciliation (PROMPT §5.4/§5.5). commerce_base_url is OPTIONAL
-    # (empty => the worker boots but skips catalog reconciliation with a warning);
-    # outbound commerce is not an H5 "refuse-boot" secret and the platform is not
-    # implemented yet.
+    # P1.4 catalog reconciliation (PROMPT §5.4/§5.5). commerce_base_url is OPTIONAL;
+    # when set it requires commerce_api_secret (OQ-P4-03, H60).
     commerce_base_url: str = ""
+    commerce_api_secret: str = ""
     commerce_timeout_s: float = 3.0
     catalog_reconcile_interval_s: int = 900
     catalog_reconcile_max_tenants: int = 100
@@ -647,6 +646,13 @@ class WorkerSettings:
         if sched_backoff_cap < sched_backoff_base:
             raise ConfigError("SCHEDULER_BACKOFF_CAP_S must be >= SCHEDULER_BACKOFF_BASE_S")
 
+        commerce_base_url = _optional("COMMERCE_BASE_URL", "")
+        commerce_api_secret = _optional("COMMERCE_API_SECRET", "")
+        if commerce_base_url and not commerce_api_secret:
+            raise ConfigError(
+                "COMMERCE_API_SECRET is required when COMMERCE_BASE_URL is set (see .env)"
+            )
+
         return WorkerSettings(
             db=db,
             system_pool_max=system_pool_max,
@@ -701,7 +707,8 @@ class WorkerSettings:
             ),
             dedupe_done_ttl_s=_int("DEDUPE_DONE_TTL_S", 172800),
             metrics_token=metrics_token,
-            commerce_base_url=_optional("COMMERCE_BASE_URL", ""),
+            commerce_base_url=commerce_base_url,
+            commerce_api_secret=commerce_api_secret,
             commerce_timeout_s=float(_optional("COMMERCE_TIMEOUT_S", "3.0")),
             catalog_reconcile_interval_s=_int("CATALOG_RECONCILE_INTERVAL_S", 900),
             catalog_reconcile_max_tenants=_int("CATALOG_RECONCILE_MAX_TENANTS", 100),

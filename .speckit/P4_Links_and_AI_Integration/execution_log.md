@@ -359,3 +359,48 @@ class CommerceClient:
 
 ### الملف الجديد
 `core/tests/test_commerce_client.py` (4 اختبارات): خادم HTTP حقيقي على 127.0.0.1 في خيط (لا نقل وهمي) يعيد حساب التوقيع نفسه (HMAC-SHA256 + طابع زمني + نافذة 300ث) ويرفض عدم التطابق بـ401.
+
+## T4ب — السرّ والإقلاع
+
+### التعديلات
+- `config.py`: أضيف `commerce_api_secret: str = ""` بعد `commerce_base_url` (سطر 369) وحدّث التعليق (366–367). الحارس في `load()` (649–654) وتمرير القيم (710–711).
+- `realtime.py:188–192`: `CommerceClient(self.settings.commerce_base_url, secret=self.settings.commerce_api_secret, timeout_s=...)`.
+- `conftest.py:26`: `os.environ.setdefault("COMMERCE_API_SECRET", "test-commerce-api-secret")`.
+- `.env.example:100`: `# COMMERCE_API_SECRET=   (required when COMMERCE_BASE_URL is set; shared HMAC secret with Sharwa, OQ-P4-03)`.
+
+### diff الحارس (config.py) حرفياً:
+```
++        commerce_base_url = _optional("COMMERCE_BASE_URL", "")
++        commerce_api_secret = _optional("COMMERCE_API_SECRET", "")
++        if commerce_base_url and not commerce_api_secret:
++            raise ConfigError(
++                "COMMERCE_API_SECRET is required when COMMERCE_BASE_URL is set (see .env)"
++            )
+```
+
+### سطر realtime حرفياً:
+```
+190:                    secret=self.settings.commerce_api_secret,
+```
+
+### المخرجات الحرفية (VERIFIED)
+- `pytest tests/test_commerce_config.py tests/test_commerce_client.py tests/test_workers_config.py -q` → `16 passed in 2.15s` (3+4+9).
+- الحزمة النقية الكاملة → `388 passed, 473 deselected in 9.93s`.
+- `python ..\scripts\static_gate.py` → `STATIC GATE PASSED — 0 violations.`
+- `lint-imports` → `Contracts: 4 kept, 0 broken.`
+- `findstr /n "commerce_api_secret" app\workers\realtime.py` → `190: secret=self.settings.commerce_api_secret,`
+
+### فحص التحوّل (VERIFIED)
+- حذف سطري الحارس مؤقتاً ⇒ `test_base_url_without_secret_refuses_boot` فشل بـ`Failed: DID NOT RAISE ConfigError` (1 failed, 2 passed).
+- استعادة الحارس (مُثبتة بـ`git diff`) ⇒ `3 passed`.
+
+### الملف الجديد
+`core/tests/test_commerce_config.py` (3 اختبارات): رفض الإقلاع بـbase_url بلا سرّ، قبول بلا base_url، تمرير السرّ عند ضبطهما معاً.
+
+
+## T4ب — حكم المعماري (converge)
+VERIFIED: الحارس يرفض الإقلاع بلا سرّ (فحص التحوّل: DID NOT RAISE)؛ realtime.py:188 يمرّر السرّ؛ الحزمة النقية 388 passed؛ lint-imports 4 kept 0 broken؛ البوّابة 0. Task 4 مكتملة.
+
+## قرارات المعماري قبل Task 5/6 (2026-10-07)
+- **F-P4-01 (محسوم):** `/changes` بلا `since` يبدأ من أول التاريخ: يعيد الكتالوج الحالي كاملاً كأحداث upsert مُقسَّمة صفحات بـ`next_cursor`. `/snapshot` محجوز في العقد ولا يُطلب من شروه تنفيذه الآن (لا ندّاء له في المحرك).
+- **F-P4-03 (جديد، فقدان بيانات صامت محتمل):** `workers/catalog.py:56–74` يقصّ الأحداث إلى `catalog_reconcile_max_events_per_tenant` (500) ثم يحفظ `next_cursor` القادم من المنصة كما هو، فإن أعادت المنصة أكثر من 500 حدث في صفحة ضاعت البقية إلى الأبد. العلاج مزدوج: (أ) العقد يُلزم شروه بصفحة ≤ 500 حدث و`next_cursor` يشير بعد آخر حدث مُعاد؛ (ب) حارس في المحرك (Task 4ج): صفحة أكبر من الحدّ لا تُطبَّق ولا يتقدّم المؤشر، وتُسجَّل خطأ عقد.
