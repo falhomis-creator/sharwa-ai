@@ -172,6 +172,15 @@ def create_app() -> FastAPI:
     # points at a real directory - absent by default, so nothing is served unasked.
     static_dir = os.environ.get("CONSOLE_STATIC_DIR", "").strip()
     if static_dir and Path(static_dir).is_dir():
+        # P4 Task 6b: the console reads which platform origins may hand it a token
+        # (postMessage). Public by design - origins are not secrets. Registered
+        # BEFORE the mount so the static files never shadow it.
+        sso_origins = list(settings.console_sso_platform_origins)
+
+        @app.get("/console/sso-config.json", include_in_schema=False)
+        async def console_sso_config() -> dict[str, list[str]]:
+            return {"platform_origins": sso_origins}
+
         app.mount("/console", StaticFiles(directory=static_dir, html=True), name="console")
 
     return app

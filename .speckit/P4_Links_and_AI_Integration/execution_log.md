@@ -486,3 +486,34 @@ UNVERIFIED: اختبارات Django (`python manage.py test products.test_sharwa
 - VERIFIED: `python manage.py test products.test_sharwa_ai_commerce_api -v 2` في venv شروه بتشغيل المالك → Ran 16 tests, OK (System check: 0 issues).
 - VERIFIED: `git diff config/urls_public.py config/urls_tenant.py` لا يحوي إلا أسطر T7.
 - الفرع `feature/sharwa-ai-commerce-api` أُنشئ في sharwa_saas؛ الـcommit والدمج بيد المالك.
+
+## T6ب — استقبال الدخول الموحد في لوحة المحرك
+
+### التعديلات
+- `core/app/config.py`: `import re`؛ `_PLATFORM_ORIGIN_RES` + `parse_platform_origins` (بعد `_csv`)؛ حقل `console_sso_platform_origins: tuple[str, ...] = ()` في Settings؛ وقراءته في `load()` من `CONSOLE_SSO_PLATFORM_ORIGINS`.
+- `core/app/main.py`: مسار `/console/sso-config.json` (يُرجع `{"platform_origins": [...]}`) يُسجَّل قبل الـmount، فقط عند وجود `CONSOLE_STATIC_DIR`.
+- `frontend/js/sso.js` (جديد): `READY`/`TOKEN`/`MAX_TOKEN_LEN`/`isValidPattern`/`originAllowed`/`acceptTokenMessage`/`startSsoHandoff`.
+- `frontend/js/app.js`: استيراد `startSsoHandoff` + دالة `boot()` بدل `render();` الأخيرة.
+- `.env.example`: `CONSOLE_SSO_PLATFORM_ORIGINS` (فارغ = تعطيل).
+- `docs/PLATFORM_COMMERCE_CONTRACT.md` §8: استبدال «لم يُبنَ بعد» بوصف جهة اللوحة.
+- `frontend/README.md`: قسم «الدخول الموحد من شروه (P4)».
+
+### المخرجات الحرفية (§9)
+- `pytest tests/test_console_sso_config.py -q` → `6 passed in 1.67s`.
+- `pytest -q` → `396 passed, 473 deselected in 18.14s`.
+- `python ..\scripts\static_gate.py` → `STATIC GATE PASSED — 0 violations.`
+- `lint-imports` → `Contracts: 4 kept, 0 broken.`
+- `node --test --test-reporter=spec core/tests/js/console_sso.test.mjs` → `ℹ tests 9 · ℹ pass 9 · ℹ fail 0`.
+
+### فحص التحوّل (M1–M3، كلها VERIFIED مع `fc` لا فروق)
+- **M1 (المصدر):** `if (!ev || !opener || ev.source !== opener)` → `if (!ev)` ⇒ `ℹ fail 2` (rejects a sender that is not the opener + hand-off sends…). استعادة ⇒ `FC: no differences encountered` ⇒ `ℹ pass 9`.
+- **M2 (العلامة الواحدة):** `if (LABEL.test(...)) return true;` → `return true;` ⇒ `ℹ fail 1` (wildcard allows exactly one label under the parent). استعادة ⇒ لا فروق ⇒ `ℹ pass 9`.
+- **M3 (Python):** `raise ConfigError(...)` → `pass` ⇒ `1 failed, 5 passed` (test_origins_reject_unsafe_values: DID NOT RAISE). استعادة ⇒ لا فروق ⇒ `6 passed`.
+
+### UNVERIFIED
+- اختبار متصفح حقيقي (نافذتان، أصلان) لم يُطلب وغير ممكن هنا ⇒ UNVERIFIED_ENV_LIMIT.
+
+## T6ب — حكم المعماري (converge، 2026-10-07)
+**معتمد.** طابقتُ الشجرة بالتقرير: `git diff --stat` = 7 ملفات المتوقعة + 3 جديدة؛ `config.py`/`main.py`/`app.js` حرفياً كما في الأمر؛ `sso.js` يحوي حارس المصدر (`ev.source !== opener`) وحارس العلامة الواحدة وREADY إلى `"*"` بلا بيانات. الأدلة VERIFIED بالمخرج الحرفي: 396 pure، 6/6 Python، 9/9 Node، البوابة 0، العقود 4/0، وM1–M3 بالفشل المتنبَّأ به حرفياً.
+ملاحظة: Node على مضيف المنفّذ v24.20.0 (الأمر اشترط ≥22.7). UNVERIFIED_ENV_LIMIT: تجربة متصفح حقيقية بأصلين — تُغلق في Task 18 (بعد الدومين).
+يُلتزم في الخطوة 0 من أمر Task 8.
