@@ -305,3 +305,57 @@ VERIFIED: جداول المقاسات بلا كاتب منتج وتنقصها و
 - OQ-P4-06: مسار في شروه ينشئ جلسة دفع للهدايا ويعيد رابطاً (ضمن حزمة شروه)؛ الحلّال يُبنى الآن.
 - OQ-P4-02: مزوّد التضمين مؤجَّل؛ البحث المعجمي الحالي باقٍ.
 - OQ-P4-01: بروكسي عكسي بشهادة TLS تلقائية؛ الاسم والشراء من المالك (لم يُحدَّد بعد).
+
+## T4أ — توقيع عميل التجارة
+
+### التعديل (core/app/channels/commerce_client.py)
+- استيراد `hashlib` و`hmac` بجانب `import time` (سطر 13–14).
+- سطر docstring جديد (سطر 10): «Every outbound request is HMAC-signed with a shared secret and timestamp (OQ-P4-03).»
+
+صنف `_HmacAuth` (الأسطر 54–66) حرفياً:
+```
+class _HmacAuth(httpx.Auth):
+    """Signs every request (OQ-P4-03): HMAC-SHA256 over
+    b"<ts>." + METHOD + b" " + raw request target (path + '?' + query, exactly as sent)."""
+
+    def __init__(self, secret: bytes) -> None:
+        self._secret = secret
+
+    def auth_flow(self, request):
+        ts = str(int(time.time()))
+        msg = ts.encode() + b"." + request.method.encode() + b" " + request.url.raw_path
+        request.headers["X-Sharwa-AI-Timestamp"] = ts
+        request.headers["X-Sharwa-AI-Signature"] = hmac.new(self._secret, msg, hashlib.sha256).hexdigest()
+        yield request
+```
+
+المُنشئ `__init__` (الأسطر 69–74) حرفياً:
+```
+class CommerceClient:
+    def __init__(self, base_url: str, *, secret: str, timeout_s: float = 3.0):
+        if not secret or not secret.strip():
+            raise ValueError("commerce API secret is required and must be non-empty")
+        self._breaker = _Breaker(fail_threshold=5, reset_s=30.0)
+        self._client = httpx.Client(base_url=base_url, timeout=timeout_s, auth=_HmacAuth(secret.strip().encode()))
+```
+
+### المخرجات الحرفية (VERIFIED)
+- `pytest tests/test_commerce_client.py -q` → `4 passed` (إعادة بعد الاستعادة).
+- `pytest tests/test_orders.py tests/test_catalog.py -q` → `30 passed in 1.40s`.
+- `python ..\scripts\static_gate.py` → `STATIC GATE PASSED — 0 violations.`
+- `lint-imports` → `Contracts: 4 kept, 0 broken.`
+- تحقق httpx: `0.28.1`، `request.url.raw_path` نوعه `bytes` = `b'/a/b?phones=a%2Cb%2Cc&tenant_ref=t1'` (يشمل الاستعلام المُرمَّز — يطابق `self.path` في الخادم).
+
+### فحص التحوّل (VERIFIED)
+- حذف `auth=_HmacAuth(...)` مؤقتاً ⇒ `test_signed_request_is_accepted` و`test_signature_covers_raw_query` فشلا بـ`CommerceClientError: commerce API returned 401` (2 failed, 2 passed).
+- استعادة السطر ⇒ `4 passed`.
+
+### الثغرة الانتقالية المعلنة (تُصلح في Task 4ب)
+`findstr /n "CommerceClient(" core\app\workers\realtime.py`:
+```
+188:                CommerceClient(self.settings.commerce_base_url, timeout_s=self.settings.commerce_timeout_s)
+```
+السطر 188 يبقى **بلا secret** عمداً (يُصلح في Task 4ب). لا أثر ما دام `COMMERCE_BASE_URL` فارغاً (لا يُنشأ العميل أصلاً).
+
+### الملف الجديد
+`core/tests/test_commerce_client.py` (4 اختبارات): خادم HTTP حقيقي على 127.0.0.1 في خيط (لا نقل وهمي) يعيد حساب التوقيع نفسه (HMAC-SHA256 + طابع زمني + نافذة 300ث) ويرفض عدم التطابق بـ401.

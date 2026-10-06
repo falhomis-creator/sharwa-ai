@@ -7,9 +7,12 @@ classification. 5xx / timeout / connection errors raise CommerceUnavailableError
 (transient - the breaker opens and the reconcile loop backs off); a non-2xx that
 is NOT a 5xx raises CommerceClientError (permanent - no retry makes sense). The
 adapter in app/commerce/ uses this client; nothing else in core/ imports httpx.
+Every outbound request is HMAC-signed with a shared secret and timestamp (OQ-P4-03).
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import time
 from typing import Any
 
@@ -48,10 +51,27 @@ class _Breaker:
             self._opened_at = time.monotonic()
 
 
+class _HmacAuth(httpx.Auth):
+    """Signs every request (OQ-P4-03): HMAC-SHA256 over
+    b"<ts>." + METHOD + b" " + raw request target (path + '?' + query, exactly as sent)."""
+
+    def __init__(self, secret: bytes) -> None:
+        self._secret = secret
+
+    def auth_flow(self, request):
+        ts = str(int(time.time()))
+        msg = ts.encode() + b"." + request.method.encode() + b" " + request.url.raw_path
+        request.headers["X-Sharwa-AI-Timestamp"] = ts
+        request.headers["X-Sharwa-AI-Signature"] = hmac.new(self._secret, msg, hashlib.sha256).hexdigest()
+        yield request
+
+
 class CommerceClient:
-    def __init__(self, base_url: str, *, timeout_s: float = 3.0):
+    def __init__(self, base_url: str, *, secret: str, timeout_s: float = 3.0):
+        if not secret or not secret.strip():
+            raise ValueError("commerce API secret is required and must be non-empty")
         self._breaker = _Breaker(fail_threshold=5, reset_s=30.0)
-        self._client = httpx.Client(base_url=base_url, timeout=timeout_s)
+        self._client = httpx.Client(base_url=base_url, timeout=timeout_s, auth=_HmacAuth(secret.strip().encode()))
 
     def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
         self._breaker.before_call()
