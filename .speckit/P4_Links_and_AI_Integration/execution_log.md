@@ -437,3 +437,52 @@ VERIFIED: الحارس يرفض الإقلاع بلا سرّ (فحص التحو�
 | issuer/audience | `config.py:167–168` |
 
 `python scripts\static_gate.py` ⇒ `STATIC GATE PASSED — 0 violations.` (لم يُمَسّ أي كود).
+
+## T4ج — حارس صفحة الكتالوج (F-P4-03)
+
+### التعديل (core/app/workers/catalog.py)
+- docstring (سطر 35): «A page larger than the limit is a contract violation: not applied, cursor not advanced (F-P4-03).»
+- الحارس داخل `reconcile_once` (الأسطر 67–80): صفحة أكبر من `catalog_reconcile_max_events_per_tenant` لا تُطبَّق، ولا يتقدّم مؤشرها، وتُعدّ إخفاقاً للمستأجر، وتُسجَّل `catalog.reconcile.contract_violation`.
+
+diff الحارس حرفياً:
+```
++        limit = settings.catalog_reconcile_max_events_per_tenant
++        if len(events) > limit:
++            # F-P4-03: a page larger than the contract allows is NOT applied and its
++            # cursor is NOT advanced - truncating and advancing would silently drop
++            # every event past the limit (docs/PLATFORM_COMMERCE_CONTRACT.md §5).
++            failed_tenants += 1
++            obs_logging.log_event(
++                _log, event="catalog.reconcile.contract_violation", component="catalog",
++                tenant_id=str(tenant_id), level=logging.ERROR,
++                page_events=len(events), limit=limit,
++            )
++            if last_ok is not None and last_ok < now:
++                max_staleness = max(max_staleness, (now - last_ok).total_seconds())
++            continue
+```
+
+### المخرجات الحرفية (VERIFIED)
+- `pytest tests/test_catalog_page_guard.py tests/test_catalog.py -q` → `15 passed in 0.84s`.
+- الحزمة النقية الكاملة → `390 passed, 473 deselected in 9.93s` (= 388 + 2).
+- `python ..\scripts\static_gate.py` → `STATIC GATE PASSED — 0 violations.`
+- `lint-imports` → `Contracts: 4 kept, 0 broken.`
+
+### فحص التحوّل (VERIFIED)
+- حذف كتلة الحارس مؤقتاً ⇒ `test_oversized_page_is_not_applied_and_cursor_not_advanced` فشل بـ`assert 'ok' == 'failed'` (1 failed, 1 passed).
+- استعادة الكتلة (مُثبتة بـ`git diff`) ⇒ `2 passed`.
+
+### الملف الجديد
+`core/tests/test_catalog_page_guard.py` (نقي، بلا علامة db): 2 اختباران بـmonkeypatch لطبقة القاعدة (`system_tx`/`tenant_tx` = nullcontext، و`apply_catalog_events`/`set_catalog_sync_cursor` تسجّلان استدعاءاتهما بـ`**kwargs`).
+
+
+## T7 — تنفيذ جانب شروه (المعماري، بطلب المالك 2026-10-07)
+الفرع: `feature/sharwa-ai-commerce-api` في `sharwa_saas` (لم يُلتزم بعد — بيد المالك).
+ملفات جديدة: `products/services/sharwa_ai_commerce_api.py`، `tenants/sharwa_ai_commerce_views.py`، `products/services/sharwa_ai_sso.py`، `products/views/sharwa_ai_sso.py`، `products/templates/products/sharwa_ai_console_launch.html`، `products/test_sharwa_ai_commerce_api.py`، `docs/SHARWA_AI_COMMERCE_API.md`. تعديل: `config/urls_public.py` (4 مسارات)، `config/urls_tenant.py` (مسار الإطلاق).
+VERIFIED (المعماري): `py_compile` لكل الملفات؛ **تشغيل بيني حقيقي**: `CommerceClient` الحقيقي من المحرك ضد `verify_signature` الحقيقية من شروه على خادم HTTP محلي ⇒ `/changes` بلا مؤشر وبمؤشر و`/order_lookup` بهواتف مُرمَّزة (`%2C`, `%2B`) كلها True، والسرّ الخاطئ ⇒ `commerce API returned 401`.
+UNVERIFIED: اختبارات Django (`python manage.py test products.test_sharwa_ai_commerce_api`) لم تُشغَّل — بيئة المعماري بلا Django ولا قاعدة شروه. أي تشغيل حيّ ضد الـVPS لم يحدث.
+
+### T7 — تحديث التحقق (2026-10-07)
+- VERIFIED: `python manage.py test products.test_sharwa_ai_commerce_api -v 2` في venv شروه بتشغيل المالك → Ran 16 tests, OK (System check: 0 issues).
+- VERIFIED: `git diff config/urls_public.py config/urls_tenant.py` لا يحوي إلا أسطر T7.
+- الفرع `feature/sharwa-ai-commerce-api` أُنشئ في sharwa_saas؛ الـcommit والدمج بيد المالك.

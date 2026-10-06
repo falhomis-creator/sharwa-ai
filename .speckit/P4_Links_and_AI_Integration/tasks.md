@@ -14,12 +14,13 @@
 - [x] **Task 4أ [المنفّذ، كود منتج] — توقيع الطلبات داخل `CommerceClient`:** وسيط سرّ إلزامي غير فارغ، توقيع HMAC-SHA256 لكل طلب على الطلب المُرسَل حرفياً، اختبارات نقية بنقل وهمي (`httpx.MockTransport`) تتحقق من التوقيع وترفض غير الموقَّع، وفحص تحوّل.
 - [x] **Task 4ب [المنفّذ، كود منتج] — الإعداد والإقلاع:** `COMMERCE_API_SECRET` في `WorkerSettings`، رفض الإقلاع إن ضُبط `COMMERCE_BASE_URL` بلا سرّ (H60)، وتمريره في `realtime.py`، مع اختبار. `COMMERCE_BASE_URL` يبقى غير ممرَّر.
 
-- [ ] **Task 4ج [المنفّذ، كود منتج] — حارس F-P4-03:** في `workers/catalog.py`، صفحة `/changes` أكبر من `catalog_reconcile_max_events_per_tenant` لا تُطبَّق ولا يتقدّم مؤشرها، وتُسجَّل `catalog.reconcile.contract_violation`؛ اختبار + فحص تحوّل.
+- [x] **Task 4ج [المنفّذ، كود منتج] — حارس F-P4-03:** في `workers/catalog.py`، صفحة `/changes` أكبر من `catalog_reconcile_max_events_per_tenant` لا تُطبَّق ولا يتقدّم مؤشرها، وتُسجَّل `catalog.reconcile.contract_violation`؛ اختبار + فحص تحوّل.
 
 ## D — العقود (وثائق)
 - [x] **Task 5 [المنفّذ] — `docs/PLATFORM_COMMERCE_CONTRACT.md`** من الكود الفعلي (لا اختراع): المسارات الأربعة، المعاملات، الاستجابات، الأخطاء، التوقيع، الترقيم.
 - [x] **Task 6 [المنفّذ] — قسم SSO في العقد:** المطالبات التي يتحقق منها `jwt.py` حرفياً، `kid`، JWKS، التدوير.
-- [ ] **Task 7 [المالك] — فتح حزمة Speckit في `sharwa_saas`** لتنفيذ العقد (OQ-P4-04).
+- [x] **Task 7 [المعماري بطلب المالك] — تنفيذ جانب شروه مباشرة** (بدل حزمة Speckit منفصلة): الواجهة الموقَّعة الثلاثية + JWKS + صفحة الإطلاق، على فرع `feature/sharwa-ai-commerce-api` في `sharwa_saas`. اختبارات Django: 16/16 OK بتشغيل المالك (انظر T7 في السجل).
+- [ ] **Task 6ب [المنفّذ، كود منتج] — استقبال الدخول الموحد في لوحة المحرك:** إعداد جديد `CONSOLE_SSO_PLATFORM_ORIGINS` (أصول دقيقة أو `https://*.<نطاق-أب>` بعلامة واحدة فقط؛ `*` العارية وأي مسار مرفوضة ⇒ رفض الإقلاع)، يُقدَّم للوحة عبر `/console/sso-config.json`؛ `frontend/js/sso.js` يرسل `{type:"sharwa-console-ready"}` (بلا بيانات) إلى `window.opener` ويقبل `{type:"sharwa-console-token"}` مرة واحدة فقط من `window.opener` وبأصل مطابق، ثم sessionStorage كما اليوم؛ اختبارات Python + Node (`node:test`) مع فحص تحوّل. **قرار المعماري (2026-10-07):** أصل شروه ليس واحداً — صفحة الإطلاق على نطاق فرعي لكل متجر (`<schema>.<domain>`، و`Referrer-Policy: no-referrer`)، لذا يُقبل نمط العلامة الواحدة، ويُرسَل READY إلى `"*"` لأنه لا يحمل بيانات؛ الأمان في القبول (المصدر = النافذة الفاتحة + الأصل) وفي إرسال شروه التوكن لأصل اللوحة الدقيق وحده.
 
 ## E — SizeAdvisor
 - [ ] **Task 8 [المنفّذ، كود منتج] — الخوارزمية النقية** حسب §5.1 (بلا قاعدة ولا شبكة ولا نموذج)، وناتج منظّم `{size, alt_size, confidence, reasons, out_of_range}`.

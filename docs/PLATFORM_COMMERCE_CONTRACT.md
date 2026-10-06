@@ -131,3 +131,16 @@ class _HmacAuth(httpx.Auth):
   3. تدوير المفاتيح بإبقاء المفتاح القديم في JWKS حتى انتهاء أقصى `exp` لم يتأثر.
   4. **المفتاح الخاص لا يغادر شروه أبداً.**
 
+
+
+## 8. التنفيذ في شروه (P4 Task 7، 2026-10-07)
+
+> نُفِّذ في مستودع `sharwa_saas` على الفرع `feature/sharwa-ai-commerce-api`. حالة التحقق في `.speckit/P4_Links_and_AI_Integration/execution_log.md` (T7).
+
+- **الأساس:** `COMMERCE_BASE_URL = https://<platform-host>/sharwa-ai/commerce` (نطاق المنصة العام، بلا شرطة أخيرة). المسارات: `/changes` و`/order_lookup` و`/stock_observation`. `/snapshot` غير منفَّذ (محجوز).
+- **السرّ:** `SHARWA_AI_COMMERCE_API_SECRET` في شروه = `COMMERCE_API_SECRET` في المحرك. سرّ فارغ ⇒ 503 لكل الطلبات.
+- **المتجر:** `tenant_ref` يُقبل فقط إن كان `schema_name` لمتجر موجود و`is_active`؛ وإلا 404.
+- **تغذية الكتالوج:** مسح دوري كامل مقسَّم صفحات (لا إشارات، لأن منتجات شروه بلا `updated_at` وبعض تحديثات المخزون تمرّ بـ`QuerySet.update()`). المؤشر `v1:<scan_ts>:<last_product_id>` أو `v1:<scan_ts>:done`؛ مؤشر غائب أو `done` أو تالف ⇒ مسحة جديدة. `version` = `scan_ts` لكل أحداث المسحة (يتزايد رتيباً). ترتيب أحداث كل منتج: `product.upserted` ثم لكل متغيّر `variant.upserted` و`variant.stock`. المنتج بلا متغيّرات يُرسَل له متغيّر أساسي `p<product_id>`؛ المتغيّرات الحقيقية `v<variant_id>`. `active` = ظهور المنتج للزبون (`Product.objects.visible()`). العملات الداخلية `YER_OLD/YER_NEW` تُرسل `YER`. المخزون الكسري يُقرَّب للأسفل.
+- **حدّ معروف:** المنتج المحذوف حذفاً نهائياً (لا مؤرشفاً) لا يصدر له `product.deleted`؛ يبقى نشطاً في المحرك حتى يُعالَج (الأرشفة تعمل لأنها تجعل `active=false`).
+- **حالة الطلب ⇒ مفردات المحرك:** `cancelled|refunded ⇒ cancelled`، `completed ⇒ delivered`، وجود `shipped_at ⇒ shipped`، `payment_status ∈ {paid, partial} ⇒ confirmed`، وغير ذلك `pending`. `ref` = رقم الطلب؛ `updated_at` = الأحدث من `created_at` و`shipped_at`. المطابقة على `clean_phone_number` لهاتف الزبون حرفياً؛ رقم غير موجود وهاتف غير مطابق يعطيان 404 بالجسم نفسه.
+- **الدخول الموحد:** JWKS على `https://<platform-host>/.well-known/sharwa-ai-jwks.json` (هو `JWKS_URL` عند المحرك). صفحة الإطلاق `dashboard/apps/sharwa-ai/console/` في نطاق المتجر تصدر توكن RS256 (`sub = merchant:<schema>`، `role = merchant_admin`، عمر 900 ثانية افتراضياً) وتسلّمه للوحة عبر `postMessage`: اللوحة ترسل `{type:"sharwa-console-ready"}` إلى النافذة الفاتحة، فتردّ شروه `{type:"sharwa-console-token", token}` إلى أصل اللوحة وحده. **استقبال هذه الرسالة في لوحة المحرك (frontend) لم يُبنَ بعد — Task 6ب.**

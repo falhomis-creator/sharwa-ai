@@ -32,6 +32,7 @@ def reconcile_once(
 
     Bounded (H4): at most CATALOG_RECONCILE_MAX_TENANTS tenants and at most
     CATALOG_RECONCILE_MAX_EVENTS_PER_TENANT events are processed per cycle.
+    A page larger than the limit is a contract violation: not applied, cursor not advanced (F-P4-03).
     """
     started = time.monotonic()
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -59,6 +60,20 @@ def reconcile_once(
             obs_logging.log_event(
                 _log, event="catalog.reconcile.tenant_failed", component="catalog",
                 tenant_id=str(tenant_id), level=logging.WARNING, error=str(exc),
+            )
+            if last_ok is not None and last_ok < now:
+                max_staleness = max(max_staleness, (now - last_ok).total_seconds())
+            continue
+        limit = settings.catalog_reconcile_max_events_per_tenant
+        if len(events) > limit:
+            # F-P4-03: a page larger than the contract allows is NOT applied and its
+            # cursor is NOT advanced - truncating and advancing would silently drop
+            # every event past the limit (docs/PLATFORM_COMMERCE_CONTRACT.md §5).
+            failed_tenants += 1
+            obs_logging.log_event(
+                _log, event="catalog.reconcile.contract_violation", component="catalog",
+                tenant_id=str(tenant_id), level=logging.ERROR,
+                page_events=len(events), limit=limit,
             )
             if last_ok is not None and last_ok < now:
                 max_staleness = max(max_staleness, (now - last_ok).total_seconds())
