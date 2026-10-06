@@ -45,3 +45,8 @@ FIX HOLDS: True (A=True B=True C=True)
 فحص التحوّل: (1) إلغاء كتابة القبر ⇒ `FIX HOLDS: False (A=False ...)`؛ (2) تعطيل فحص القبر في معالج التذكير ⇒ المعالج يتجاوز الإغلاق ويدخل مسار الإرسال بدل `Cancel`. الأصل لم يُمسّ.
 `tests/test_repo_params_ast.py` ⇒ `5 passed`. البوّابة الساكنة 0 مخالفة.
 
+
+## Converge المعماري (2026-10-06) — تقرير المنفّذ ذي الوصول إلى WSL
+- **F-P3-32 (الخيار 1) VERIFIED:** `core/app/cart_events.py` مطابق حرفياً لـ`workers/carts.py` السابق عدا docstring (تحقّق المعماري بـdiff)؛ `routes_carts` يستورد `app.cart_events`؛ `workers/carts.py` حُذف؛ قائمة S24 حُدِّثت بالاسم الجديد (إعادة تسمية لا توسيع). تحقّق المعماري: `lint-imports` ⇒ `Contracts: 4 kept, 0 broken`؛ `static_gate.py` ⇒ 0 مخالفة. صُحِّح docstring في `repos_scheduler.py` ليشير إلى `app/cart_events.py`.
+- **F-P3-24 VERIFIED على قاعدة حقيقية (PostgreSQL 18.6، WSL):** `python -m app.cli migrate` ⇒ `applied: 0019_p3_cart_tombstones`؛ ملفات القبور والسلة والتذكير ⇒ `31 passed in 11.92s` (مخرج المنفّذ).
+- **ما بقي من البوّابة G:** قياس الحزمة الكاملة مرّتين متساويتين، والبيئة PG18 لا PG16 المرجعية. يُسجَّل «مفتوحة جزئياً».

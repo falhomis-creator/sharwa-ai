@@ -27,7 +27,7 @@ from app.api.errors import ApiError
 from app.api.routes_catalog import verify_platform_signature, verify_webhook_timestamp
 from app.db import repos
 from app.obs import metrics
-from app.workers import carts as carts_worker
+from app import cart_events
 
 router = APIRouter()
 
@@ -161,13 +161,13 @@ async def platform_cart_webhook(request: Request) -> dict[str, Any]:
         if etype not in CART_EVENT_TYPES:
             if etype not in _SEEN_UNKNOWN_TYPES:
                 _SEEN_UNKNOWN_TYPES.add(etype)
-                carts_worker.log_unknown_cart_type(etype)
+                cart_events.log_unknown_cart_type(etype)
             outcome = "unknown_type"
         else:
             enriched = dict(event)
             enriched["occurred_at"] = _parse_occurred_at(event.get("occurred_at"))
             with core_db.tenant_tx(tenant_id) as conn:  # one tenant tx PER event
-                outcome = carts_worker.apply_cart_event(
+                outcome = cart_events.apply_cart_event(
                     conn, tenant_id=tenant_id, event=enriched,
                     delay_h=settings.cart_reminder_delay_h,
                     max_late_s=settings.cart_reminder_max_late_h * 3600,

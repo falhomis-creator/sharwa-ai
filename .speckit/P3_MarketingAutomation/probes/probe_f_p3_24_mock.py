@@ -14,7 +14,7 @@ from unittest import mock
 for name in ("psycopg", "psycopg.types", "psycopg.types.json", "psycopg.rows", "psycopg_pool"):
     sys.modules.setdefault(name, mock.MagicMock(name=name))
 
-from app.workers import carts  # noqa: E402
+from app import cart_events as carts  # noqa: E402
 
 carts_db = {}          # platform_cart_id -> status
 jobs = {}              # dedupe_key -> status

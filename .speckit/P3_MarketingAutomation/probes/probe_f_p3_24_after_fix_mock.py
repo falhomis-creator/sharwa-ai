@@ -11,7 +11,8 @@ from unittest import mock
 for name in ("psycopg", "psycopg.types", "psycopg.types.json", "psycopg.rows", "psycopg_pool"):
     sys.modules.setdefault(name, mock.MagicMock(name=name))
 
-from app.workers import carts, cart_reminder  # noqa: E402
+from app import cart_events as carts  # noqa: E402
+from app.workers import cart_reminder  # noqa: E402
 
 DB = {"carts": {}, "tomb": {}, "jobs": {}}
 NOW = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)

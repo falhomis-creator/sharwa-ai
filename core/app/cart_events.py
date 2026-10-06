@@ -1,10 +1,11 @@
-"""core/app/workers/carts.py - P3.2 cart-event application (H91/H92).
+"""core/app/cart_events.py - P3.2 cart-event application (H91/H92).
 
-The worker layer the webhook route calls INSIDE its per-event tenant
-transaction. It owns the scheduled_jobs writes for carts (schedule /
-reschedule / cancel in the SAME transaction as the cart change - H92), which
-keeps the S24 rule intact: only app/workers/ modules (and tests) call the
-repos_scheduler writers.
+The DOMAIN module the cart webhook route calls INSIDE its per-event tenant
+transaction (moved out of app.workers for F-P3-32, so the API layer no longer
+depends on the worker layer). It owns the scheduled_jobs writes for carts
+(schedule / reschedule / cancel in the SAME transaction as the cart change -
+H92), which keeps the S24 rule intact: only the S24 allowlist (engine /
+handlers / cart_events) and tests call the repos_scheduler writers.
 
 Outcome vocabulary (closed, feeds cart_events_total{type,outcome}):
   applied | ignored_no_customer | already_final | already_reminded
@@ -15,7 +16,6 @@ import logging
 import uuid
 from datetime import timedelta
 from typing import Any
-
 
 from app.db import repos_carts, repos_scheduler
 from app.obs import logging as obs_logging
