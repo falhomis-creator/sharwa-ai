@@ -186,3 +186,15 @@ outbox status/policy_reason: ('pending', 'active_chat', ...)
 - جولتان متساويتان (`462 passed, 9 errors` في كلتيهما) ✅.
 
 **الخلاصة:** الحزمة استقرّت عند `462 passed` بلا أي إخفاق؛ شرط البوّابة G العملي تحقّق (صفر إخفاق خارج أخطاء migrate البيئية، وجولتان متساويتان). `python scripts/static_gate.py` ⇒ `STATIC GATE PASSED — 0 violations.` (EXIT=0).
+
+## T13 — بروفة التفعيل الأول (قسم 8 من MARKETING_RUNBOOK)
+
+**التعديل (توثيق فقط، بلا تشغيل):** أُضيف قسم `## 8. بروفة التفعيل الأول (P3 — قائمة المالك)` إلى `docs/MARKETING_RUNBOOK.md` (شروط مسبقة بمن يملكها + خطوات بروفة تُحيل إلى القسمين 2 و3 + دليل نجاح/تراجع يُحيل إلى القسمين 4 و5)، بسطر علوي صريح «هذا القسم لا يفعّل شيئاً؛ التفعيل فعل المالك وحده (H100/H104)». وحُدِّث `tasks.md`: Task 20 و21 و13 = `[x]` **VERIFIED** (أزيلت عبارة التأجيل من Task 13).
+
+**الأسماء الحرفية (تحقّق منها في `core/app/cli.py`):** `marketing status` (378) · `marketing preview` (379) · `marketing enable` (384) · `marketing disable` (391) · `marketing set-cap` (396) · `policy status` (345). الوسائط: `--tenant-ref` · `--cap` · `--actor` · `--reason` · `--confirm` · `--channel` — كلها موجودة حرفياً.
+
+**التحقق:**
+- `python scripts/static_gate.py` ⇒ `STATIC GATE PASSED — 0 violations.` (EXIT=0).
+- `git diff --stat` ⇒ ثلاثة ملفات فقط: `docs/MARKETING_RUNBOOK.md` + `tasks.md` + `execution_log.md`.
+
+**فحص التحوّل:** لا ينطبق (توثيق، بلا كود).
