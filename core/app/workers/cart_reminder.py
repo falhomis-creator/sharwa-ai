@@ -19,8 +19,7 @@ independent verdict (H76: two verdicts, not one).
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-
-import psycopg
+from typing import Any
 
 from app.db import repos_carts, repos_marketing
 from app.obs import metrics
@@ -68,12 +67,23 @@ def items_phrase(title: str, item_count: int) -> str:
 
 
 def handle_cart_reminder(
-    settings: WorkerSettings, conn: psycopg.Connection, *,
+    settings: WorkerSettings, conn: Any, *,
     tenant_id, payload: dict, now: datetime,
 ):
     platform_cart_id = str(payload.get("cart_id", ""))
     cart = repos_carts.lock_cart(conn, tenant_id=tenant_id, platform_cart_id=platform_cart_id)
     if cart is None or cart["status"] != "open":
+        return Cancel("cart_closed")
+    tombstoned = repos_carts.cart_tombstone_status(
+        conn, tenant_id=tenant_id, platform_cart_id=platform_cart_id,
+    )
+    if tombstoned is not None:
+        # F-P3-24 (H89): a terminal event for this cart committed while it was
+        # being opened; the cart row lock makes this read final. Close the cart
+        # in the same transaction and never send.
+        repos_carts.finalize_cart(
+            conn, tenant_id=tenant_id, platform_cart_id=platform_cart_id, status=tombstoned,
+        )
         return Cancel("cart_closed")
 
     due_at = cart["last_activity_at"] + timedelta(hours=settings.cart_reminder_delay_h)

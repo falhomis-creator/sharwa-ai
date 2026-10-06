@@ -159,6 +159,7 @@ def delete_tenant_full(dsn: str, tenant_id: uuid.UUID) -> None:
             "DELETE FROM scheduled_jobs WHERE tenant_id = %s",
             # carts references customers (P3.2), so it MUST precede customers.
             "DELETE FROM carts WHERE tenant_id = %s",
+            "DELETE FROM cart_tombstones WHERE tenant_id = %s",
             "DELETE FROM tenant_counters WHERE tenant_id = %s",
             "DELETE FROM tenant_budgets WHERE tenant_id = %s",
             "DELETE FROM staff_members WHERE tenant_id = %s",
@@ -955,6 +956,30 @@ def set_cart_status(
             "WHERE tenant_id = %s AND platform_cart_id = %s",
             (status, tenant_id, platform_cart_id),
         )
+
+
+def insert_cart_tombstone(
+    dsn: str, *, tenant_id: uuid.UUID, platform_cart_id: str, status: str,
+) -> None:
+    """F-P3-24: simulate a terminal event that committed for a cart while a
+    concurrent cart.updated was opening it (the reminder must still not send)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO cart_tombstones (tenant_id, platform_cart_id, status, occurred_at) "
+            "VALUES (%s, %s, %s, now())",
+            (tenant_id, platform_cart_id, status),
+        )
+
+
+def fetch_cart_tombstone(
+    dsn: str, tenant_id: uuid.UUID, platform_cart_id: str,
+) -> str | None:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT status FROM cart_tombstones WHERE tenant_id = %s AND platform_cart_id = %s",
+            (tenant_id, platform_cart_id),
+        ).fetchone()
+    return row[0] if row is not None else None
 
 
 def count_outbox_rows(dsn: str, *, tenant_id: uuid.UUID) -> int:

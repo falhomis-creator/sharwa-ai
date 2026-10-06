@@ -14,8 +14,8 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import timedelta
+from typing import Any
 
-import psycopg
 
 from app.db import repos_carts, repos_scheduler
 from app.obs import logging as obs_logging
@@ -30,7 +30,7 @@ def _dedupe_key(platform_cart_id: str) -> str:
 
 
 def apply_cart_event(
-    conn: psycopg.Connection, *, tenant_id: uuid.UUID, event: dict,
+    conn: Any, *, tenant_id: uuid.UUID, event: dict,
     delay_h: int, max_late_s: int, title_max: int, default_country_code: str,
 ) -> str:
     """Apply ONE already-schema-validated cart event inside the caller's open
@@ -45,6 +45,13 @@ def apply_cart_event(
         finalized = repos_carts.finalize_cart(
             conn, tenant_id=tenant_id, platform_cart_id=platform_cart_id, status=final_status,
         )
+        if not finalized:
+            # F-P3-24: a terminal event for a cart never seen yet is remembered,
+            # so a late cart.updated can never open it (no-op if a row exists).
+            repos_carts.tombstone_unseen_cart(
+                conn, tenant_id=tenant_id, platform_cart_id=platform_cart_id,
+                status=final_status, occurred_at=occurred_at,
+            )
         # H92: finality beats execution - the cancel rides the SAME transaction
         # (even for an already-final cart, a straggling pending job must die).
         repos_scheduler.cancel(
@@ -53,6 +60,12 @@ def apply_cart_event(
         return "applied" if finalized else "already_final"
 
     # cart.updated
+    if repos_carts.cart_tombstone_status(
+        conn, tenant_id=tenant_id, platform_cart_id=platform_cart_id,
+    ) is not None:
+        # F-P3-24: the store already reported this cart as bought/cleared.
+        return "already_final"
+
     customer = event.get("customer") or {}
     customer_id = repos_carts.customer_for_identity(
         conn, tenant_id=tenant_id,

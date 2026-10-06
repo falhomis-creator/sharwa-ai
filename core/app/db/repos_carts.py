@@ -156,3 +156,32 @@ def finalize_cart(
         (status, tenant_id, platform_cart_id),
     )
     return cur.rowcount > 0
+
+
+def tombstone_unseen_cart(
+    conn: psycopg.Connection, *, tenant_id: uuid.UUID, platform_cart_id: str,
+    status: str, occurred_at,
+) -> bool:
+    """F-P3-24 (0019): a terminal event for a cart that has NO row yet is
+    remembered, so a late cart.updated can never open it. Written only when no
+    carts row exists; idempotent (first terminal event wins). Returns True when
+    a tombstone was written."""
+    cur = conn.execute(
+        "INSERT INTO cart_tombstones (tenant_id, platform_cart_id, status, occurred_at) "
+        "SELECT %s, %s, %s, %s "
+        "WHERE NOT EXISTS (SELECT 1 FROM carts WHERE tenant_id = %s AND platform_cart_id = %s) "
+        "ON CONFLICT (tenant_id, platform_cart_id) DO NOTHING",
+        (tenant_id, platform_cart_id, status, occurred_at, tenant_id, platform_cart_id),
+    )
+    return cur.rowcount > 0
+
+
+def cart_tombstone_status(
+    conn: psycopg.Connection, *, tenant_id: uuid.UUID, platform_cart_id: str,
+) -> str | None:
+    """The tombstoned terminal status of a cart ('recovered'/'cleared'), or None."""
+    row = conn.execute(
+        "SELECT status FROM cart_tombstones WHERE tenant_id = %s AND platform_cart_id = %s",
+        (tenant_id, platform_cart_id),
+    ).fetchone()
+    return row[0] if row is not None else None
