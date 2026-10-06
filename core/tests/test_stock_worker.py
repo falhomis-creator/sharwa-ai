@@ -122,3 +122,38 @@ def test_sweep_allocates_and_notifies_in_one_transaction(monkeypatch):
     assert len(notifs) == 1
     assert notifs[0]["template_id"] == "stock_available"
     assert notifs[0]["merge"]["title"] == "قميص"
+
+
+def test_duplicate_metric_delta_exactly_one(monkeypatch):
+    """The 'duplicate' action counter: a FIRST join does not move it (delta 0);
+    a duplicate join for the same customer+product moves it by EXACTLY 1. Read
+    as a delta (before/after), never an absolute value (other tests move it)."""
+    from app.obs import metrics
+
+    def dup() -> float:
+        return metrics.waitlist_entries_total.labels("duplicate")._value.get()
+
+    customer_id = uuid.uuid4()
+    monkeypatch.setattr(stock.repos_outbox, "customer_id_for_conversation", lambda conn, cid: customer_id)
+    monkeypatch.setattr(
+        stock.repos_stock, "read_conversation_slots",
+        lambda conn, **kw: {"last_shown_product_ids": ["VAR-X"]},
+    )
+    monkeypatch.setattr(stock.repos_stock, "count_active_waitlists", lambda conn, **kw: 0)
+    monkeypatch.setattr(stock.repos_stock, "insert_waitlist_entry", lambda conn, **kw: uuid.uuid4())
+    monkeypatch.setattr(stock.repos_consent, "record_waitlist_join", lambda conn, **kw: "noop")
+
+    # FIRST join (not a duplicate) => 'duplicate' delta must be 0.
+    monkeypatch.setattr(stock.repos_stock, "has_active_waitlist", lambda conn, **kw: False)
+    before = dup()
+    d = stock.join_waitlist(None, _settings(), tenant_id=uuid.uuid4(), conversation_id=uuid.uuid4(), bodies=("سجّلني",))
+    assert d.kind == "joined"
+    assert dup() - before == 0
+
+    # DUPLICATE join => 'duplicate' delta must be EXACTLY 1.
+    monkeypatch.setattr(stock.repos_stock, "has_active_waitlist", lambda conn, **kw: True)
+    before = dup()
+    d = stock.join_waitlist(None, _settings(), tenant_id=uuid.uuid4(), conversation_id=uuid.uuid4(), bodies=("سجّلني",))
+    assert d.kind == "already_waiting"
+    assert dup() - before == 1
+

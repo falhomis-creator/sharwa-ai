@@ -66,4 +66,4 @@
 
 | الميزة | المجلد | الحالة |
 |---|---|---|
-| P2.3 Back-in-Stock (تحصين وإغلاق) | `.speckit/P2_3_BackInStock/` | جارٍ: Task 1–6 معتمدة، Task 7 التالي |
+| P2.3 Back-in-Stock (تحصين وإغلاق) | `.speckit/P2_3_BackInStock/` | تحصين مكتمل جزئياً: Task 1–8 و10 معتمدة، Task 9 جزئي (F-P2-11 ⇒ P2.4) |
