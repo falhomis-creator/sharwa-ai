@@ -163,3 +163,26 @@ outbox status/policy_reason: ('pending', 'active_chat', ...)
 **19ب (جرد بلا تعديل):** دوال `testsupport.py` ذات الطوابع الزمنية:
 - بـ`now()`/`clock_timestamp()` **وبوسيط حقن**: `seed_inbound_message` (created_at ✓)، `age_inbound_messages` (as_of ✓)، `seed_number_health` (day/next_*/warmup/state ✓)، `insert_cart` (last_activity_at ✓)، `insert_scheduled_job` (run_at ✓)، `age_proactive_ledger` (reserved_at ✓)، `set_cart_last_activity` (last_activity_at ✓).
 - بـ`now()`/`clock_timestamp()` **بلا وسيط حقن**: `expire_job_lease` (locked_until، ~سطر 923)، `set_cart_status` (updated_at، ~سطر 963)، `insert_cart_tombstone` (occurred_at، ~سطر 975). هذه تُقارَن بساعة القاعدة الحقيقية (مسار الـclaim/engine) لا بالـ`now` المحقون في البوّابة ⇒ **ليست قنابل من نوع F-P3-35، ولا قنابل كامنة متبقية من هذا النوع.**
+
+## T20 — F-P3-34 (تلوّث حالة الاختبار: عدّ outbox لكل المستأجرين)
+
+**التعديل (اختبار واحد فقط):** `core/tests/test_stock_allocation.py`، اختبار `test_sweep_once_with_none_commerce_allocates_nothing`: العدّ صار مقيّداً بالمستأجر `SELECT count(*) FROM outbox WHERE tenant_id = %s` (بمعامل `TENANT_A`) بدل العدّ على كل المستأجرين.
+
+**الأدلة:**
+- (أ) الاختبار وحده على قاعدة نظيفة ⇒ `1 passed in 1.17s`.
+- (ب) مناعة التلوّث: أُدرج صفّ outbox لمستأجر ثالث (بأداة testsupport) ⇒ الاختبار `PASS` (`1 passed in 2.19s`).
+- (ج) ما زال يمسك الخلل: أُدرج صفّ outbox لـ`TENANT_A` قبل التوكيد ⇒ `assert 1 == 0` (يفشل)، ثم أُعيد وثُبت الاستعادة بـ`git diff`.
+
+## T21 — إعادة قياس الحزمة الكاملة مرّتين (بعد F-P3-35/35b/34)
+
+**lint-imports:** ثُبِّت `import-linter 2.15` (أداة تطوير) ثم شُغِّل من core/ ⇒ `Contracts: 4 kept, 0 broken.` (Analyzed 149 files, 763 dependencies).
+
+**الجولة 1 (قاعدة نظيفة حتى 0019، في الخلفية):** `462 passed, 383 deselected, 9 errors in 942.72s (0:15:42)`
+**الجولة 2 (قاعدة نظيفة):** `462 passed, 383 deselected, 9 errors in 1064.51s (0:17:44)`
+
+**المطلوب تحقّق:**
+- صفر إخفاق (`FAILED` = 0 في الجولتين) ✅ — الإخفاقات الـ11 الحتمية (F-P3-35/35b) والتذبذب (F-P3-34) أُصلحت كلها.
+- الأخطاء التسعة كلها `test_migrate.py` (UNVERIFIED_ENV_LIMIT: تتطلب `sudo -u postgres psql` غير المتاح من Windows) ✅.
+- جولتان متساويتان (`462 passed, 9 errors` في كلتيهما) ✅.
+
+**الخلاصة:** الحزمة استقرّت عند `462 passed` بلا أي إخفاق؛ شرط البوّابة G العملي تحقّق (صفر إخفاق خارج أخطاء migrate البيئية، وجولتان متساويتان). `python scripts/static_gate.py` ⇒ `STATIC GATE PASSED — 0 violations.` (EXIT=0).

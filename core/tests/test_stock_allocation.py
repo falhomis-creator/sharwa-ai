@@ -432,6 +432,6 @@ def test_sweep_once_with_none_commerce_allocates_nothing(stock_tenants):
     held, _ = db_testsupport.stock_held_count_and_qty(dsn, tenant_id=TENANT_A, variant=VARIANT)
     assert held == 0
     with psycopg.connect(dsn) as conn:
-        assert conn.execute("SELECT count(*) FROM outbox").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM outbox WHERE tenant_id = %s", (TENANT_A,)).fetchone()[0] == 0
 
 
