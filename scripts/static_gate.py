@@ -658,10 +658,10 @@ _SCHEDULER_WRITERS = frozenset({
     "fail_attempt", "defer", "finish_failed",
 })
 # H87: the ONLY non-test modules that may CALL the scheduled_jobs writers: the
-# engine itself, the handler modules it registers, and the cart-event worker
+# engine itself, the handler modules it registers, and the cart-event module
 # (the webhook's same-transaction cancel, H92).
 _S24_WRITER_CALLER_ALLOWLIST = frozenset({
-    "app.workers.scheduler", "app.workers.cart_reminder", "app.workers.carts",
+    "app.workers.scheduler", "app.workers.cart_reminder", "app.cart_events",
 })
 _S24_WRITE_SQL_RE = re.compile(r"(?i)(insert\s+into|update|delete\s+from)\s+scheduled_jobs")
 

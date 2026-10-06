@@ -67,3 +67,4 @@
 | الميزة | المجلد | الحالة |
 |---|---|---|
 | P2.3 Back-in-Stock (تحصين وإغلاق) | `.speckit/P2_3_BackInStock/` | تحصين مكتمل جزئياً: Task 1–8 و10 معتمدة، Task 9 جزئي (F-P2-11 ⇒ P2.4) |
+| P3 Marketing Automation (إغلاق النواقص) | `.speckit/P3_MarketingAutomation/` | مُغلَق هندسياً: T1–T21 عدا بنود المالك؛ 462 passed ×2 (PG18)؛ التفعيل للمالك |

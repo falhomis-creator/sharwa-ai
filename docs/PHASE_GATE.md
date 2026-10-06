@@ -145,7 +145,7 @@ P3.5: BUILT — قيد التدقيق المستقل (2026-10-04، docs/P3_05_RE
 P2.4: APPROVED
 P2: CLOSED — الشرطان تحقّقا على قاعدة حقيقية (2026-10-03، docs/P3_01_FINAL_AUDIT.md): F-P2-07 (البذر + الاختبار الذهبي) وF-P1-12 (dispatch_cycle يُرسل صفوف bot/human/automation على القاعدة).
 P2.3 (تحصين وإغلاق): HARDENED — إغلاق جزئي (لا CLOSED) — انظر docs/P2_03_AUDIT.md «ملحق التحصين (Speckit P2.3، 2026-10)»: تفعيل الكنس على الـVPS مرهون بتمرير COMMERCE_BASE_URL إلى worker-realtime (ارتباط P2.3↔P4.3)؛ الخيط موجود لكنه خامل، ولا يُعدَّل docker-compose.yml. قرار المالك OQ-P2-08: لا تكرارات حيّة محلياً، القيد الجزئي waitlist_active_uq قائم، لا ترحيل؛ OQ-P2-08b مفتوح والافتراضي «لا». الشرط المتبقي للإغلاق الكامل: قياس الحزمة الكاملة في البيئة المرجعية وحسم خلل dispatch (F-P2-11، P2.4).
-P3: OPEN (P3.4 مبنيّ، بانتظار تدقيق مستقل وقرارات المالك)
+P3: BUILT & DARK — مُغلَق هندسياً بحزمة Speckit (2026-10-06، docs/P3_SPECKIT_CLOSEOUT.md): F-P3-24 (قبور، ترحيل 0019) · F-P3-32 (app.cart_events؛ lint-imports 4 kept 0 broken) · F-P3-34 · F-P3-35/35b مُغلَقة؛ الحزمة -m db ⇒ 462 passed ×2 متساويتين على PostgreSQL 18.6 (9 أخطاء test_migrate بيئية UNVERIFIED_ENV_LIMIT)؛ البوّابة الساكنة 0. **غير مُفعَّل ولا إرسال حيّ.** مفتوح: التدقيق المستقل لـP3.4/P3.5 على PostgreSQL 16 المرجعي · F-P2-11 لم يتكرر 3/3 لكن سببه غير مشخَّص · O-P3-1 (now() في نوافذ 24س بـrepos_policy) · بنود المالك G1/G2/G3 (OQ-P3-14/15/16/18، رقم واتساب حقيقي، عميل store1، شراء غير COD لـcart.recovered). التفعيل بدليل docs/MARKETING_RUNBOOK.md §8 وحده.
 P4: LOCKED
 P5: LOCKED
 

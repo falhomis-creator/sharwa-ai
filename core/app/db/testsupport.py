@@ -159,6 +159,7 @@ def delete_tenant_full(dsn: str, tenant_id: uuid.UUID) -> None:
             "DELETE FROM scheduled_jobs WHERE tenant_id = %s",
             # carts references customers (P3.2), so it MUST precede customers.
             "DELETE FROM carts WHERE tenant_id = %s",
+            "DELETE FROM cart_tombstones WHERE tenant_id = %s",
             "DELETE FROM tenant_counters WHERE tenant_id = %s",
             "DELETE FROM tenant_budgets WHERE tenant_id = %s",
             "DELETE FROM staff_members WHERE tenant_id = %s",
@@ -555,19 +556,25 @@ def seed_conversation(
 
 def seed_inbound_message(
     dsn: str, *, tenant_id: uuid.UUID, conversation_id: uuid.UUID, body: str = "مرحبا",
-    age: timedelta | None = None,
+    age: timedelta | None = None, created_at: datetime | None = None,
 ) -> uuid.UUID:
     """Insert one inbound messages row (prior-interaction / active-chat signal).
     F-P3-19: `age` defaults to 2 days so the customer is NOT "talking now";
-    pass age=timedelta(0) for an active-chat fixture."""
+    pass age=timedelta(0) for an active-chat fixture.
+    F-P3-35: `created_at`, when passed, is inserted verbatim (deterministic tests
+    that inject a fixed clock pass BASE - age); the default stays now() - age."""
     if age is None:
         age = timedelta(days=2)
+    if created_at is not None:
+        sql = ("INSERT INTO messages (tenant_id, conversation_id, direction, sent_by, type, body, status, created_at) "
+               "VALUES (%s, %s, 'in', 'customer', 'text', %s, 'received', %s) RETURNING id")
+        params = (tenant_id, conversation_id, body, created_at)
+    else:
+        sql = ("INSERT INTO messages (tenant_id, conversation_id, direction, sent_by, type, body, status, created_at) "
+               "VALUES (%s, %s, 'in', 'customer', 'text', %s, 'received', now() - %s) RETURNING id")
+        params = (tenant_id, conversation_id, body, age)
     with psycopg.connect(dsn, autocommit=True) as conn:
-        row = conn.execute(
-            "INSERT INTO messages (tenant_id, conversation_id, direction, sent_by, type, body, status, created_at) "
-            "VALUES (%s, %s, 'in', 'customer', 'text', %s, 'received', now() - %s) RETURNING id",
-            (tenant_id, conversation_id, body, age),
-        ).fetchone()
+        row = conn.execute(sql, params).fetchone()
     if row is None:
         raise RuntimeError("INSERT ... RETURNING id produced no row")
     return row[0]
@@ -826,20 +833,28 @@ def enable_marketing(dsn: str, *, tenant_id: uuid.UUID, cap: int = 5) -> None:
         )
 
 
-def age_inbound_messages(dsn: str, *, conversation_id: uuid.UUID, age: timedelta | None = None) -> None:
+def age_inbound_messages(dsn: str, *, conversation_id: uuid.UUID, age: timedelta | None = None,
+                         as_of: datetime | None = None) -> None:
     """Move a conversation's inbound messages `age` (default 2 days) into the
     past (clock_timestamp-based, no sleep). A test that ingests a REAL message
     (e.g. STOP through RealtimeWorker._commit) stamps it at the DB's now(); the
     gate under an INJECTED older `now` would then see 'the customer is talking
-    right now' (active_chat). Aging the message restores 'not talking now'."""
+    right now' (active_chat). Aging the message restores 'not talking now'.
+    F-P3-35b: `as_of`, when passed, ages from it (created_at = as_of - age) so a
+    deterministic test injects the same clock it passes to the gate; the default
+    stays clock_timestamp() - age."""
     if age is None:
         age = timedelta(days=2)
+    if as_of is not None:
+        sql = ("UPDATE messages SET created_at = %s - %s "
+               "WHERE conversation_id = %s AND direction = 'in'")
+        params = (as_of, age, conversation_id)
+    else:
+        sql = ("UPDATE messages SET created_at = clock_timestamp() - %s "
+               "WHERE conversation_id = %s AND direction = 'in'")
+        params = (age, conversation_id)
     with psycopg.connect(dsn, autocommit=True) as conn:
-        conn.execute(
-            "UPDATE messages SET created_at = clock_timestamp() - %s "
-            "WHERE conversation_id = %s AND direction = 'in'",
-            (age, conversation_id),
-        )
+        conn.execute(sql, params)
 
 
 def clear_marketing_activation(dsn: str, *, tenant_id: uuid.UUID) -> None:
@@ -955,6 +970,30 @@ def set_cart_status(
             "WHERE tenant_id = %s AND platform_cart_id = %s",
             (status, tenant_id, platform_cart_id),
         )
+
+
+def insert_cart_tombstone(
+    dsn: str, *, tenant_id: uuid.UUID, platform_cart_id: str, status: str,
+) -> None:
+    """F-P3-24: simulate a terminal event that committed for a cart while a
+    concurrent cart.updated was opening it (the reminder must still not send)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO cart_tombstones (tenant_id, platform_cart_id, status, occurred_at) "
+            "VALUES (%s, %s, %s, now())",
+            (tenant_id, platform_cart_id, status),
+        )
+
+
+def fetch_cart_tombstone(
+    dsn: str, tenant_id: uuid.UUID, platform_cart_id: str,
+) -> str | None:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT status FROM cart_tombstones WHERE tenant_id = %s AND platform_cart_id = %s",
+            (tenant_id, platform_cart_id),
+        ).fetchone()
+    return row[0] if row is not None else None
 
 
 def count_outbox_rows(dsn: str, *, tenant_id: uuid.UUID) -> int:

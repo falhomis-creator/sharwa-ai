@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -79,7 +79,8 @@ def test_rejoin_after_stop_restores_the_availability_notice(c_ctx):
     db_testsupport.seed_number_health(
         dsn, tenant_id=tid, channel_id=chid, daily_cap=50, sent_today=0,
     )
-    db_testsupport.seed_inbound_message(dsn, tenant_id=tid, conversation_id=conv, body="مرحبا")
+    db_testsupport.seed_inbound_message(dsn, tenant_id=tid, conversation_id=conv, body="مرحبا",
+                                        created_at=PNOW - timedelta(days=2))
     oid = db_testsupport.seed_outbox_row(
         dsn, tenant_id=tid, channel_id=chid, conversation_id=conv,
         origin="automation", message_class="utility", to_wa_id=wa,

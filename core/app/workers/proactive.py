@@ -9,8 +9,8 @@ fields from a CLOSED whitelist + the verifier (H83). A single INSERT, no network
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
-import psycopg
 
 from app.db import repos_outbox
 from app.obs import metrics
@@ -34,7 +34,7 @@ def render_text(template_id: str, merge: dict[str, str]) -> tuple[str, config.Te
 
 
 def enqueue_proactive(
-    conn: psycopg.Connection,
+    conn: Any,
     *,
     settings: WorkerSettings,
     rules: verify_rules.BlocklistSet,

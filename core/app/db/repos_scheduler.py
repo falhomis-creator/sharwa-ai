@@ -2,7 +2,7 @@
 
 Every SQL string that writes scheduled_jobs lives here and ONLY here; the only
 callers of the writing functions are app/workers/scheduler.py, its handler
-modules under app/workers/, and app/workers/carts.py (the webhook's same-tx
+modules under app/workers/, and app/cart_events.py (the webhook's same-tx
 cancel, H92) - plus tests (the S24 static gate enforces exactly that).
 
 Reading/claiming crosses tenants only through the frozen app.claim_due_jobs

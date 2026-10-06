@@ -78,7 +78,8 @@ def test_drip_respects_cap_and_reprocess_is_idempotent(monkeypatch):
                 dsn, tenant_id=tid, channel_id=chid, customer_id=cid, bot_status="active", epoch=0,
             )
             db_testsupport.insert_consent(dsn, tenant_id=tid, customer_id=cid, scope="marketing", granted=True)
-            db_testsupport.seed_inbound_message(dsn, tenant_id=tid, conversation_id=conv, body="مرحبا")
+            db_testsupport.seed_inbound_message(dsn, tenant_id=tid, conversation_id=conv, body="مرحبا",
+                                               created_at=BASE - timedelta(days=2))
             oid = db_testsupport.seed_outbox_row(
                 dsn, tenant_id=tid, channel_id=chid, conversation_id=conv,
                 origin="automation", message_class="marketing", to_wa_id=f"9677{i:07d}",
