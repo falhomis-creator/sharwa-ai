@@ -50,3 +50,35 @@ FIX HOLDS: True (A=True B=True C=True)
 - **F-P3-32 (الخيار 1) VERIFIED:** `core/app/cart_events.py` مطابق حرفياً لـ`workers/carts.py` السابق عدا docstring (تحقّق المعماري بـdiff)؛ `routes_carts` يستورد `app.cart_events`؛ `workers/carts.py` حُذف؛ قائمة S24 حُدِّثت بالاسم الجديد (إعادة تسمية لا توسيع). تحقّق المعماري: `lint-imports` ⇒ `Contracts: 4 kept, 0 broken`؛ `static_gate.py` ⇒ 0 مخالفة. صُحِّح docstring في `repos_scheduler.py` ليشير إلى `app/cart_events.py`.
 - **F-P3-24 VERIFIED على قاعدة حقيقية (PostgreSQL 18.6، WSL):** `python -m app.cli migrate` ⇒ `applied: 0019_p3_cart_tombstones`؛ ملفات القبور والسلة والتذكير ⇒ `31 passed in 11.92s` (مخرج المنفّذ).
 - **ما بقي من البوّابة G:** قياس الحزمة الكاملة مرّتين متساويتين، والبيئة PG18 لا PG16 المرجعية. يُسجَّل «مفتوحة جزئياً».
+
+## T5ب — قياس الحزمة الكاملة (بلا كود)
+
+**البيئة الفعلية:** PostgreSQL 18.6 (Ubuntu 18.6-0ubuntu0.26.04.1) · PostGIS 3.6 · pgvector 0.8.1 · Python 3.13.15 (تشغيل من Windows ضد قاعدة WSL عبر localhost-forwarding إلى 5433) · Redis 6390 (`PONG`) · الترحيلات حتى 0019 (`schema_migrations`=19) · قاعدة نظيفة قبل كل جولة (tenants=0). ملاحظة: التشغيل من Windows يفسّر أخطاء `test_migrate.py` أدناه (تتطلب `sudo -u postgres psql`).
+
+**الجولة 1 (مهلة 900s، لم تتجمّد):** `12 failed, 450 passed, 383 deselected, 9 errors in 402.31s (0:06:42)`
+**الجولة 2 (مهلة 900s، لم تتجمّد):** `11 failed, 451 passed, 383 deselected, 9 errors in 426.53s (0:07:06)`
+
+**المقارنة بين الجولتين (غير متساويتين):** الفارق اختبار واحد — `test_stock_allocation.py::test_sweep_once_with_none_commerce_allocates_nothing`: فشل في الجولة 1 (`assert 15 == 0`)، نجح في الجولة 2. أي تلوّث/ترتيب بين الاختبارات (نمط F-P2-06)، لا حتمية. مقابل خط الأساس **460** (P3_05_REPORT، PostgreSQL 16): تراجع ظاهر (450–451 ناجحاً)، والإخفاقات/الأخطاء خارج نطاق F-P3-24.
+
+**عزل F-P2-11 (`test_burst_production_batch20_all_sent` منفرداً ×3، قاعدة نظيفة):**
+```
+run 1: 1 passed in 11.59s
+run 2: 1 passed in 8.53s
+run 3: 1 passed in 8.32s
+```
+**F-P2-11 لم يتكرّر (3/3 ناجح).**
+
+**خلوّ الأثر (`test_cart_tombstone_db.py` وحده على قاعدة نظيفة):** `6 passed in 2.73s`، وبعده: tenants=0 · carts=0 · cart_tombstones=0 · scheduled_jobs=0 · outbox=0.
+
+**تصنيف الإخفاقات (بلا إصلاح، وبلا تعديل اختبار/ترحيل):**
+- **داخل نطاق F-P3-24 (سلة/تذكير/قبور):** صفر إخفاق/خطأ.
+- **داخل المخزون:** 1 إخفاق غير حتمي — `test_sweep_once_with_none_commerce_allocates_nothing`؛ أول خطأ: `assert 15 == 0` (tests\test_stock_allocation.py:435).
+- **خارج النطاق (تسويق/موافقة/سياسة/تقطير/سقوف، P3.4):** 11 إخفاقاً حتمياً؛ أول خطأ: `assert 0 == 7` (tests\test_drip_db.py:106، `test_drip_respects_cap_and_reprocess_is_idempotent`).
+- **خارج النطاق (test_migrate.py، بيئي UNVERIFIED):** 9 أخطاء؛ أول خطأ: `subprocess.CalledProcessError: Command '['sudo', '-u', 'postgres', 'psql', '-c', 'DROP DATABASE IF EXISTS sharwa_ai_p07_migtest']' returned non-zero exit status 2.` (لا `sudo`/superuser على Windows).
+
+**الخلاصة:** البوّابة G تبقى **جزئية**: F-P3-24 سليم على قاعدة حقيقية، لكن الحزمة الكاملة غير مستقرة (11≠12) ولا تُكافئ خط الأساس 460، والإخفاقات الـ11+9 خارج نطاق القبور/السلة/التذكير. F-P2-11 لم يتكرّر (3/3). لا تفعيل ولا إرسال حيّ.
+
+## قرارات المالك بعد T5ب (2026-10-06)
+- أخطاء `test_migrate.py` التسعة: `UNVERIFIED_ENV_LIMIT` (تتطلب `sudo -u postgres` غير المتاح من Windows).
+- التذبذب: **F-P3-34** (Test State Pollution). السبب في الكود: `test_stock_allocation.py` ~السطر 435 يعدّ `SELECT count(*) FROM outbox` لكل المستأجرين. أُدخل في اختبار P2.3 نفسه (Task 8ب).
+- الإخفاقات الـ11: أولوية قصوى؛ Task 13 مؤجَّلة حتى Task 21 خضراء. فرضية المعماري: قنبلة زمنية (`BASE` ثابت 2026-10-03 مقابل `now()` في SQL ضمن `repos_policy.py`). تُختبر في Task 16 قبل أي إصلاح.
