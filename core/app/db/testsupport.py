@@ -1041,6 +1041,48 @@ def count_rows_for_tenant(dsn: str, *, table: str, tenant_id: uuid.UUID) -> int:
     return int(row[0])
 
 
+def seed_catalog_product(
+    dsn: str, *, tenant_id: uuid.UUID, platform_product_id: str, category: str | None,
+) -> None:
+    """P4 Task 10: one catalog product (the category link a category-scoped
+    size chart is found through)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO catalog_products (tenant_id, platform_product_id, title, category, source_version) "
+            "VALUES (%s, %s, 'size test product', %s, 1)",
+            (tenant_id, platform_product_id, category),
+        )
+
+
+def seed_size_chart(
+    dsn: str, *, tenant_id: uuid.UUID, scope_type: str, scope_ref: str,
+    rows: list[dict[str, object]], fit_type: str = "regular", stretch_pct: str = "0",
+) -> uuid.UUID:
+    """P4 Task 10: one size chart and its rows. Each row dict carries
+    size_label, sort_order and optional numrange LITERALS ('[165,175]') for
+    height_cm / weight_kg / chest_cm / waist_cm / hips_cm (absent => NULL)."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        head = conn.execute(
+            "INSERT INTO size_charts (tenant_id, name, scope_type, scope_ref, fit_type, stretch_pct) "
+            "VALUES (%s, 'size test chart', %s, %s, %s, %s::numeric) RETURNING id",
+            (tenant_id, scope_type, scope_ref, fit_type, stretch_pct),
+        ).fetchone()
+        if head is None:
+            raise RuntimeError("INSERT ... RETURNING id produced no row")
+        chart_id: uuid.UUID = head[0]
+        for row in rows:
+            conn.execute(
+                "INSERT INTO size_chart_rows (tenant_id, chart_id, size_label, sort_order, "
+                "height_cm, weight_kg, chest_cm, waist_cm, hips_cm) "
+                "VALUES (%s, %s, %s, %s, "
+                "%s::numrange, %s::numrange, %s::numrange, %s::numrange, %s::numrange)",
+                (tenant_id, chart_id, row["size_label"], row["sort_order"],
+                 row.get("height_cm"), row.get("weight_kg"), row.get("chest_cm"),
+                 row.get("waist_cm"), row.get("hips_cm")),
+            )
+    return chart_id
+
+
 __all__: Sequence[str] = (
     "allocate_holds_race",
     "channel_account_exists_by_session",
@@ -1104,6 +1146,8 @@ __all__: Sequence[str] = (
     "insert_idempotency_record",
     "insert_tenant_returning_id",
     "count_rows_for_tenant",
+    "seed_catalog_product",
+    "seed_size_chart",
     "delete_gazetteer_row",
     "seed_gazetteer_governorate",
     "seed_kill_switch",

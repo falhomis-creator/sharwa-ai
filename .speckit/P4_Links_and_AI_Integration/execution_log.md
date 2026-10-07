@@ -634,3 +634,16 @@ UNVERIFIED: اختبارات Django (`python manage.py test products.test_sharwa
 - **البوابات (المرحلة 2، مرة واحدة من core/):** الحزمة النقية **460 passed**, 475 deselected · `-m tools` **4 passed** · static_gate **PASSED — 0 violations** · lint-imports **7 kept, 0 broken** — مطابقة للمتوقع كله.
 - **F-P4-02:** أخطاء test_migrate التسعة (sudo -u postgres على Windows) قيد بيئة ويندوز يمكن تجاهله — المرجع 471 على Linux.
 - **الإيداعان:** (1) R9 + التوثيق؛ (2) scripts/run_db_suite.py (تعديل -rfE + طباعة المعرّفات). ثم الدمج في p4-links-ai بدمجين --no-ff (p4-task11-size ثم p3-f-p3-24-tombstone).
+
+## T10 — مستودع قراءة جداول المقاسات تحت RLS (2026-10-07)
+**F-P4-04: tenants=1 عند البدء.** التعريف (قراءة واحدة): `e9825a8a-41fa-4bd0-be7f-024058d9e870` (Burst Tenant، platform_ref `burst-5f1e8aec-…`، created_at 2026-10-07 02:41 +03) مع 1 channel_account و30 conversations و30 customers و30 outbox. ليس من مستأجري الاختبار الثابتين (1111…/2222…) ⇒ الحالة (ب) HALT. قرار المعماري: الصف من fixture `burst_ctx` (test_dispatch_burst_db.py:87) — teardown لم يُنفَّذ؛ حُذف بـ`delete_tenant_full` (أمر واحد) ⇒ **tenants 0** حرفياً. الدرس: fixtures ذات uuid4 لا تُنظَّف ذاتياً في الجولة التالية بخلاف مستأجري 1111…/2222….
+- الملفات المُسلَّمة (المعماري، Linux PG16 @ cdd9312): sha256 (مقطع 16): `8ee9ebdaa43a96d7` repos_size.py · `705bb6def8c68974` test_size_charts_db.py · `ce54fdb7b5318736` testsupport.patch — مطابقة قبل التطبيق.
+- التطبيق: `M core/app/db/testsupport.py` + `?? core/app/db/repos_size.py` + `?? core/tests/test_size_charts_db.py`؛ diff --stat: testsupport.py | 44 +++.
+- **(3) اختبارات الملف الجديد، جولتان:** الجولة 1: `11 passed in 8.25s`؛ الجولة 2 (`-rfE`): `11 passed in 6.67s`. (6 اختبارات + 5 parametrize.)
+- **(4) البوابات بلا قاعدة:** الحزمة النقية **460 passed, 486 deselected** · `-m tools` **4 passed** · static_gate **STATIC GATE PASSED — 0 violations** · lint-imports **Contracts: 7 kept, 0 broken**.
+- **(8) الحزمة -m db الكاملة (PG18، 5433، مرة واحدة، 20:04):** `473 passed, 464 deselected, 9 errors in 1204.44s` و**EXIT=1**. الأخطاء التسعة كلها `tests/test_migrate.py` (9 أسطر ERROR منه، 0 خارجها) — F-P4-02 قيد بيئة ويندوز، تنجح على Linux.
+- **(10) التحوّلات (استعادة cp+cmp بعد كل منها):** M1 (عكس الأولوية) ⇒ `FAILED …::test_product_chart_beats_category_chart — 1 failed, 10 passed` ⇒ RESTORED_M1؛ M2 (قبول نصف مغلقة) ⇒ `FAILED [[150,165)` + `FAILED [(150,165]] — 2 failed, 9 passed` ⇒ RESTORED_M2؛ M3 (حذف حارس الجدول الفارغ) ⇒ `FAILED …::test_chart_without_rows_is_none — 1 failed, 10 passed` ⇒ RESTORED_M3. الهاش النهائي: `8ee9ebdaa43a96d7` (مطابق للمُسلَّم).
+- **RLS:** test_rls_isolates_charts_between_tenants يثبت العزل بالاتجاهين بالبيانات — VERIFIED بالاتجاهين، بلا تحوّل سياسة (الترحيلات ممنوعة التعديل).
+- **OQ-P4-18:** لا عمود في size_charts لإعفاء التاجر من حارس الوزن؛ allow_under_weight=False دائماً حتى ترحيل لاحق بقرار المالك.
+- **قرار:** SizeChartDataError لا تُترجَم إلى invalid_chart هنا؛ الترجمة مسؤولية مهمة الأسلاك (OQ-P4-13).
+- **UNVERIFIED_ENV_LIMIT:** ruff/mypy (لا شبكة) — المرجع: المعماري 303/103 على بيئته.
