@@ -647,3 +647,13 @@ UNVERIFIED: اختبارات Django (`python manage.py test products.test_sharwa
 - **OQ-P4-18:** لا عمود في size_charts لإعفاء التاجر من حارس الوزن؛ allow_under_weight=False دائماً حتى ترحيل لاحق بقرار المالك.
 - **قرار:** SizeChartDataError لا تُترجَم إلى invalid_chart هنا؛ الترجمة مسؤولية مهمة الأسلاك (OQ-P4-13).
 - **UNVERIFIED_ENV_LIMIT:** ruff/mypy (لا شبكة) — المرجع: المعماري 303/103 على بيئته.
+
+## T12 — الحلّال النقي GiftCurator (2026-10-07)
+الملفات المُسلَّمة (المعماري، Linux فوق cdd9312): sha256 (مقطع 16) `5037514cef2c692c` curator.py · `205ee7a8b00b2f76` gift_init.py · `78d820fc9fe726b3` importlinter.patch · `1d2a7a5f0e87b38a` test_gift_curator.py — مطابقة ×4 قبل التطبيق.
+- التطبيق: `M core/.importlinter` (+16: عقد gift-is-pure) + `?? core/app/gift/` + `?? core/tests/test_gift_curator.py`.
+- **(3) اختبارات الحلّال:** `22 passed in 0.21s`.
+- **(4) البوابات بلا قاعدة:** الحزمة النقية **482 passed, 486 deselected** (= 460 + 22) · `-m tools` **4 passed** · static_gate **PASSED — 0 violations** · lint-imports **8 kept, 0 broken** (العقد الثامن gift-is-pure KEPT).
+- **(10) التحوّلات (استعادة cp+cmp بعد كل منها):** M1 (حدّ النافذة الأدنى بالتقريب لأسفل) ⇒ `FAILED …::test_window_low_edge_rounds_up_without_floats — 1 failed, 21 passed`؛ M2 (خمسة عناصر) ⇒ `FAILED …::test_at_most_four_items — 1 failed, 21 passed`؛ M3 (تجاهل نفاد الخطوات) ⇒ `FAILED …::test_step_budget_exhaustion_falls_back_to_greedy` + `FAILED …::test_exhaustion_with_no_greedy_basket — 2 failed, 20 passed`؛ M4 (حذف مكافأة التنويع) ⇒ 3 failed (`test_best_three_ranked_score_then_total_then_ids`، `test_diversity_bonus_breaks_equal_relevance`، `test_step_budget_exhaustion_falls_back_to_greedy`)، 19 passed؛ M5 (استيراد psycopg) ⇒ `app.gift is pure … BROKEN — Contracts: 7 kept, 1 broken`؛ M6 (إلغاء سقف K) ⇒ `FAILED …::test_more_than_k_candidates_are_truncated_by_relevance — 1 failed, 21 passed`. بعد الستة: **22 passed · 8 kept, 0 broken · sha256 `5037514cef2c692c`** (مطابق للمُسلَّم).
+- **OQ-P4-19:** «البحث تعداد دقيق محدود بميزانية خطوات حتمية MAX_STEPS=40_000 (≈80ms على Linux) بدل DP مكمَّم ومهلة بالساعة — للحفاظ على دقة النافذة وعدم جمعية مكافأة التنويع والحتمية H45؛ المهلة بالساعة وprocess pool في المستدعي (Task 14)؛ قياس الأداء الرسمي في Task 13.»
+- **OQ-P4-20:** «ثوابت التقييم (DIVERSITY_BONUS=50، SHORTFALL_PENALTY=10 لكل نقطة نسبة، relevance عدد صحيح غير سالب) افتراضات مكتوبة؛ مقياس relevance يحدّده مسار الاسترجاع في Task 14.»
+- **UNVERIFIED_ENV_LIMIT:** ruff/mypy (لا شبكة) — المرجع: المعماري 303/103.

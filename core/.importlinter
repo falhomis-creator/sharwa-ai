@@ -85,3 +85,19 @@ forbidden_modules =
     app.fit
     app.tools
 allow_indirect_imports = False
+
+[importlinter:contract:gift-is-pure]
+name = app.gift is pure (no DB, network, model or HTTP layers)
+type = forbidden
+source_modules =
+    app.gift
+forbidden_modules =
+    psycopg
+    httpx
+    redis
+    app.db
+    app.llm
+    app.api
+    app.workers
+    app.channels
+allow_indirect_imports = False
