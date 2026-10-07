@@ -513,6 +513,54 @@ UNVERIFIED: اختبارات Django (`python manage.py test products.test_sharwa
 ### UNVERIFIED
 - اختبار متصفح حقيقي (نافذتان، أصلان) لم يُطلب وغير ممكن هنا ⇒ UNVERIFIED_ENV_LIMIT.
 
+## T8 — SizeAdvisor (خوارزمية المقاسات النقية)
+
+### الملفات
+- `core/app/fit/__init__.py` (جديد): سطر واحد.
+- `core/app/fit/size_advisor.py` (جديد): خوارزمية حتمية نقية (§5.1) — `SizeRow`/`SizeChart`/`SizeAdvice`، تحقق الجدول (رتيب)، الحارس الصلب للوزن، مسارا الطول/الوزن والقياسات، ease افتراضية مكتوبة، ناتج `{size, alt_size, confidence, reasons, out_of_range}`.
+- `core/tests/test_size_advisor.py` (جديد): 15 اختباراً (فرع لكل مسار).
+- `core/.importlinter` (إلحاق): عقد `fit-is-pure`.
+
+### المخرجات الحرفية (§9)
+- `pytest tests/test_size_advisor.py -q` → `15 passed in 0.16s`.
+- `pytest -q` → `411 passed, 473 deselected in 22.46s`.
+- `python ..\scripts\static_gate.py` → `STATIC GATE PASSED — 0 violations.`
+- `lint-imports --no-cache` → `Contracts: 5 kept, 0 broken.`
+- `ruff check app/fit tests/test_size_advisor.py` → UNVERIFIED_ENV_LIMIT: `No module named ruff` (غير مثبَّت؛ لم يُثبَّت).
+- `mypy app/fit` → UNVERIFIED_ENV_LIMIT: `No module named mypy` (غير مثبَّت؛ لم يُثبَّت).
+
+### فحص التحوّل (M1–M4، كلها VERIFIED مع `fc` لا فروق)
+- **M1 (حارس الوزن):** `if weight_kg is not None and not chart.allow_under_weight:` → `if False:` ⇒ `1 failed, 14 passed` (test_95kg_never_gets_m). استعادة ⇒ لا فروق ⇒ `15 passed`.
+- **M2 (علم خارج المدى):** `..., ("nearest_out_of_range",), True)` → `..., False)` ⇒ `2 failed, 13 passed` (test_outside_every_range_is_flagged_not_guessed + test_merchant_can_opt_out_of_the_weight_guard). استعادة ⇒ لا فروق ⇒ `15 passed`.
+- **M3 (المرونة):** `stretch = Decimal("1") + chart.stretch_pct / Decimal("100")` → `stretch = Decimal("1")` ⇒ `1 failed, 14 passed` (test_stretch_lets_a_smaller_size_fit). استعادة ⇒ لا فروق ⇒ `15 passed`.
+- **M4 (عقد النقاء):** إضافة `import httpx  # mutation` ⇒ `Contracts: 4 kept, 1 broken` (`app.fit.size_advisor -> httpx (l.19)`). استعادة ⇒ لا فروق ⇒ `Contracts: 5 kept, 0 broken`.
+
+### UNVERIFIED
+- `ruff` و`mypy` غير مثبَّتين في هذه البيئة ⇒ UNVERIFIED_ENV_LIMIT (المخرج الحرفي: `No module named ruff` / `No module named mypy`). قيم ease الافتراضية قرار مكتوب لا قياس.
+
+## T8 — تدقيق المالك (استجابة + أسئلة مفتوحة)
+
+### مخرج الحزمة الموسومة مرّتين (run_db_suite.py، DSN على 5433)
+- `[run 1] 3 failed, 459 passed, 413 deselected, 9 errors in 885.88s (0:14:45)`
+- `[run 2] 4 failed, 458 passed, 413 deselected, 9 errors in 936.38s (0:15:36)`
+- `DB SUITE: FAILED (a run errored)` — **غير مستقرة** (3≠4 إخفاقاً) وبها 9 أخطاء في كل شوط.
+- **لا علاقة بـTask 8:** الحزمة `-m db` لا تجمع أي كود من Task 8 (كله نقي بلا علامة db)، فالإخفاقات/الأخطاء سابقة الوجود. ملاحظة بيئة: `conftest.py` يضع `CORE_DATABASE_URL` افتراضياً على 5432 بينما القاعدة الفعلية على 5433 (تحقق: 5432 = password authentication failed، 5433 = OK)؛ شُغِّلت بـ5433 صراحة.
+
+### أسئلة مفتوحة
+- **OQ-P4-08 (`allow_under_weight`):** حقل `allow_under_weight` في `SizeChart` (dataclass نقية) **غير موجود** في `0001_baseline.sql` (جدول `size_charts` فيه `fit_type`/`stretch_pct`/`version` فقط). قرار الربط لاحقاً مطلوب: عمود جديد (ترحيل) أم إعداد على مستوى التاجر (مكان آخر)؟ — سؤال مفتوح للمالك.
+- **OQ-P4-09 (ease + confidence):** قيم ease الافتراضية قرار مكتوب لا قياس وتحتاج مراجعة المالك قبل عميل حقيقي (مثل OQ-P2-12). اشتقاق `confidence` دالة نقية من الإشارات المعدودة (high = قياسات متوافقة مع طول/وزن في المدى؛ medium = مصدر واحد أو تعدّد أو تعارض؛ low = لا توصية أو خارج المدى) بلا ثابت سحري (H65).
+
+### dump.rdb
+- `git ls-files dump.rdb` ⇒ فارغ (غير مُتتبَّع، لم يدخل أي commit).
+- أُضيف `dump.rdb` إلى `.gitignore` (المصدر: تشغيل redis-server من داخل مجلد المستودع فيكتب لقطة RDB في cwd).
+
+### جولة إصلاح Task 8
+- **OQ-P4-10 (`الجدول الرتيب لأبعاد الجسم`):** `_chart_is_valid` يتحقق من رتابة `height_cm` و`weight_kg` فقط، **لا** أبعاد الجسم (`chest_cm`/`waist_cm`/`hips_cm`). سؤال مفتوح: هل تُضاف رتابة أبعاد الجسم لاحقاً (مثل بندي الطول/الوزن)؟
+- `.gitignore` عُدِّل (إضافة `dump.rdb`) — انظر أعلاه.
+- **بند 1 (الحدّ الأدنى في مسار القياسات) — مُنفَّذ:** بعد اختيار `chosen` في مسار القياسات، إن وُجد بُعد يكون فيه `chosen.dim(d)[0] − need[d] > SLACK_CM` (مقارنة بـ`need` = القياس + ease، لا بالقياس الخام؛ `>` صارمة فالتساوي لا يرفع العلم) ⇒ `SizeAdvice(chosen.label, alt, "low", ("nearest_out_of_range",), True)`. لا تغيير على ease/_fits/_score/REASONS، ولا سبب جديد. 4 اختبارات جديدة + M5 (`if False:` ⇒ `2 failed, 18 passed` ثم fc لا فروق ⇒ `20 passed`).
+
+- **OQ-P4-11 (`فجوة الجدول بين مقاسين`):** مدخلات العميل الواقعة في فجوة بين مدى مقاسين متجاورين (لا تقع في أيٍّ منهما) تنتج `nearest_out_of_range` — والتسمية «nearest» فضفاضة (لا تحدّد اتجاه «الأقرب» ولا تميّز الفجوة عن «أصغر/أكبر من كل المقاسات»). القرار للمالك: اعتماد التسمية الحالية أم تفصيلها (مثل `between_sizes`/`gap_between_sizes`).
+
 ## T6ب — حكم المعماري (converge، 2026-10-07)
 **معتمد.** طابقتُ الشجرة بالتقرير: `git diff --stat` = 7 ملفات المتوقعة + 3 جديدة؛ `config.py`/`main.py`/`app.js` حرفياً كما في الأمر؛ `sso.js` يحوي حارس المصدر (`ev.source !== opener`) وحارس العلامة الواحدة وREADY إلى `"*"` بلا بيانات. الأدلة VERIFIED بالمخرج الحرفي: 396 pure، 6/6 Python، 9/9 Node، البوابة 0، العقود 4/0، وM1–M3 بالفشل المتنبَّأ به حرفياً.
 ملاحظة: Node على مضيف المنفّذ v24.20.0 (الأمر اشترط ≥22.7). UNVERIFIED_ENV_LIMIT: تجربة متصفح حقيقية بأصلين — تُغلق في Task 18 (بعد الدومين).

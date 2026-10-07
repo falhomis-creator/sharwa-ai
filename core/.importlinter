@@ -45,3 +45,18 @@ source_modules =
 forbidden_modules =
     httpx
 allow_indirect_imports = True
+
+[importlinter:contract:fit-is-pure]
+name = app.fit is pure (no DB, network, model or HTTP layers)
+type = forbidden
+source_modules =
+    app.fit
+forbidden_modules =
+    psycopg
+    httpx
+    app.db
+    app.llm
+    app.api
+    app.workers
+    app.channels
+allow_indirect_imports = False
