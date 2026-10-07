@@ -178,6 +178,19 @@ def _compound_ft_in(tokens: list[str], i: int) -> tuple[Decimal, Decimal, int] |
     return None
 
 
+def _has_own_unit(tokens: list[str], j: int) -> bool:
+    """R8: the number at j is followed by a unit that genuinely applies to it;
+    the m/M shorthand counts only when the value passes the shorthand gate."""
+    if j + 1 >= len(tokens):
+        return False
+    found = _unit(tokens[j + 1])
+    if found is None:
+        return False
+    if found[2] and not _is_meter_shorthand_value(_number_value(tokens[j])):
+        return False
+    return True
+
+
 def _ambiguous_feet(tokens: list[str], i: int, value: Decimal) -> bool:
     """R3: a feet number that is fractional ("5.7 قدم" = 5'7"), or that is
     followed (after an optional connector) by a trailing number with no known
@@ -195,8 +208,8 @@ def _ambiguous_feet(tokens: list[str], i: int, value: Decimal) -> bool:
         # R6: the trailing number is a bare inches reading ONLY when it has no
         # known unit of its own - "6 قدم 80 كيلو"/"6 feet 180 lbs" are two
         # quantities, not a silent feet+inches guess.
-        followed_by_known_unit = j + 1 < n and _unit(tokens[j + 1]) is not None
-        return not followed_by_known_unit
+        # R8: the m/M shorthand is a unit only if THIS number passes its gate.
+        return not _has_own_unit(tokens, j)
     return False
 
 

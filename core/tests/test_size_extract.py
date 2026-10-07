@@ -90,6 +90,20 @@ def test_feet_followed_by_own_unit_number_is_not_ambiguous():
     assert _w(("6 feet 180 lbs",)) == D("180") * D("0.45359237")
 
 
+def test_feet_ambiguity_does_not_trust_meter_shorthand_as_unit():
+    # R8: the trailing number after feet counts as "having its own unit" via
+    # the m/M shorthand ONLY when the number itself passes the shorthand gate.
+    # "5 قدم و7 M": 7 is an integer, so M is not a meter => bare inches guess
+    # => ambiguous => no height.
+    assert _h(("5 قدم و7 M",)) is None
+    assert _h(("5 قدم 7 م",)) is None
+    assert _h(("5 قدم و7 انش",)) == D("170.18")
+    assert _h(("6 قدم 80 كيلو",)) == D("182.88")
+    assert _w(("6 قدم 80 كيلو",)) == D("80")
+    # a valid shorthand value is a real second quantity: 182.88 vs 175 conflict
+    assert _h(("6 قدم 1.75 م",)) is None
+
+
 def test_meter_shorthand_excludes_integers():
     # R7: m/م read as meters only for a NON-integer value in [1.00, 2.50]
     # (a body height like 1.75) - "ابغى 2 M" is a quantity, never 200 cm.
