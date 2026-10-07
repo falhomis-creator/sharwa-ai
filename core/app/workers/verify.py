@@ -102,9 +102,13 @@ def insert_verified_outbox(
     to_wa_id: str,
     template_id: str,
     text: str,
+    size_context: verify_rules.SizeContext | None = None,
 ) -> VerifyOutcome:
     """The single outbox write point for bot-originated text (H46). No `origin`
-    parameter: this writes origin="bot" itself."""
+    parameter: this writes origin="bot" itself. `size_context` (Task 11) hands
+    the SizeAdvice outcome to the size_mismatch rule as plain data; None - the
+    default, every legacy caller - keeps the verdict identical, and the
+    announced-disable path writes as-is without ever consulting it."""
     started = time.monotonic()
     try:
         if not settings.verify_enabled:
@@ -126,6 +130,7 @@ def insert_verified_outbox(
             result = verify_rules.approve(
                 text, rules=rules, max_chars=settings.verify_max_chars,
                 window_max=settings.verify_join_window_max,
+                size_context=size_context,
             )
         except Exception as exc:  # noqa: BLE001 - H47: fail closed on verifier error
             obs_logging.log_event(

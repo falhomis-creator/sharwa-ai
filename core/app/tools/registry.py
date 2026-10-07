@@ -44,10 +44,12 @@ class ToolSpec:
 # import ToolContext back) do not deadlock on a partially-initialised registry.
 from app.tools import join_waitlist  # noqa: E402
 from app.tools import resolve_address  # noqa: E402
+from app.tools import size_advise  # noqa: E402
 from app.tools import track_order  # noqa: E402
 
 TOOLS: dict[str, ToolSpec] = {
     "track_order": ToolSpec("track_order", track_order.run),
     "resolve_address": ToolSpec("resolve_address", resolve_address.run),
     "join_waitlist": ToolSpec("join_waitlist", join_waitlist.run),
+    "size_advise": ToolSpec("size_advise", size_advise.run),
 }
