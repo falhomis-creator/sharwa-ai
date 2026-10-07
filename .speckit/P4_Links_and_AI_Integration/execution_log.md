@@ -657,3 +657,20 @@ UNVERIFIED: اختبارات Django (`python manage.py test products.test_sharwa
 - **OQ-P4-19:** «البحث تعداد دقيق محدود بميزانية خطوات حتمية MAX_STEPS=40_000 (≈80ms على Linux) بدل DP مكمَّم ومهلة بالساعة — للحفاظ على دقة النافذة وعدم جمعية مكافأة التنويع والحتمية H45؛ المهلة بالساعة وprocess pool في المستدعي (Task 14)؛ قياس الأداء الرسمي في Task 13.»
 - **OQ-P4-20:** «ثوابت التقييم (DIVERSITY_BONUS=50، SHORTFALL_PENALTY=10 لكل نقطة نسبة، relevance عدد صحيح غير سالب) افتراضات مكتوبة؛ مقياس relevance يحدّده مسار الاسترجاع في Task 14.»
 - **UNVERIFIED_ENV_LIMIT:** ruff/mypy (لا شبكة) — المرجع: المعماري 303/103.
+
+## T13 — اختبارات حدود وأداء الحلّال (2026-10-07)
+- **الالتزام (Step 0):** `ecadef6f4bce7a85720ffe8f1703655dadd28de1` (Task 12، الرأس الحالي؛ tasks.md Task 12 = `[x]` VERIFIED).
+- **(3) الملف الجديد:** `18 passed in 0.66s`؛ الأبطأ `test_greedy_quality_floor_on_the_seeded_corpus` (0.18s) — لا اختبار يتجاوز 3 ثوانٍ.
+- **(4) البوابات (بلا قاعدة، من core/):** الحزمة النقية **500 passed, 486 deselected** (= 482 + 18) · `-m tools` **4 passed, 982 deselected** · static_gate **STATIC GATE PASSED — 0 violations** · lint-imports **Contracts: 8 kept, 0 broken**.
+- **(5) القياس الزمني:** `worst_case_ms median=109.2 max=226.2 reasons=('search_budget_exhausted', 'greedy_fallback')` — reasons حرفي مطابق؛ الوسيط 109.2ms (< 200ms ⇒ لا F-P4-05)؛ أعلى من مرجع Linux (≈80–93ms) وهو متوقع على Windows.
+- **(10) التحوّلات (استعادة cp+cmp بعد كل منها):**
+  - N1 (الجشع يقبل سلة تحت النافذة) ⇒ `3 failed, 15 passed` (test_greedy_is_always_well_formed_and_labelled · test_greedy_never_beats_the_exhaustive_optimum · test_greedy_quality_floor_on_the_seeded_corpus) ⇒ RESTORED.
+  - N2 (الجشع يأخذ 5 عناصر) ⇒ `2 failed, 16 passed` (test_greedy_is_always_well_formed_and_labelled · test_greedy_never_beats_the_exhaustive_optimum) ⇒ RESTORED.
+  - N3 (إلغاء تقليم النافذة) ⇒ `1 failed, 17 passed` (test_unreachable_window_is_pruned_without_exhausting_the_budget) ⇒ RESTORED.
+  - N4 (إلغاء ميزانية الخطوات) ⇒ `1 failed, 17 passed` (test_dense_k60_case_hits_the_step_budget_and_falls_back) ⇒ RESTORED.
+  - N5 (الأرخص أولاً بدل الأعلى relevance) ⇒ `2 failed, 16 passed` (test_greedy_quality_floor_on_the_seeded_corpus · test_dense_k60_case_hits_the_step_budget_and_falls_back) ⇒ RESTORED.
+  - بعد الخمسة: **18 passed** · sha256 `5037514cef2c692c` (curator.py غير معدَّل).
+- **القرار:** زمن الساعة يُقاس ولا يُؤكَّد في الاختبارات (H7)؛ الضمان البنيوي = ميزانية الخطوات الحتمية (اختبار الحالة الكثيفة) + سقف K؛ المهلة الصلبة بالساعة في المستدعي (Task 14، OQ-P4-19).
+- **أرضية الجودة المقاسة:** 181 / 163 / 65 على seed 2026.
+- **UNVERIFIED_ENV_LIMIT:** ruff/mypy (لا شبكة) — المرجع: المعماري 303/103.
+
