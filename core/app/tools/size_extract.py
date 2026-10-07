@@ -156,9 +156,9 @@ def _keyword_at(tokens: list[str], i: int, value: Decimal) -> tuple[str, Decimal
     if unit is not None:
         return unit
     if left is not None:
-        field = _field(left)
-        if field is not None:
-            return (field, _FIELD_DEFAULT_CONV[field])
+        left_field = _field(left)
+        if left_field is not None:
+            return (left_field, _FIELD_DEFAULT_CONV[left_field])
     return None
 
 
@@ -186,9 +186,7 @@ def _has_own_unit(tokens: list[str], j: int) -> bool:
     found = _unit(tokens[j + 1])
     if found is None:
         return False
-    if found[2] and not _is_meter_shorthand_value(_number_value(tokens[j])):
-        return False
-    return True
+    return not (found[2] and not _is_meter_shorthand_value(_number_value(tokens[j])))
 
 
 def _ambiguous_feet(tokens: list[str], i: int, value: Decimal) -> bool:

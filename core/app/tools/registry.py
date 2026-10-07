@@ -3,6 +3,8 @@
 ToolContext carries only pre-read values + the injected port; ToolSpec binds a
 name to a run callable. TOOLS is a literal dict - no register(), no dynamic
 import, no globals(). Adding a tool means editing this literal and passing review.
+Two calling conventions: ctx tools run(ToolContext); explicit-arg tools
+(H51: code extracts args) run(**kwargs) - e.g. resolve_address, size_advise.
 """
 from __future__ import annotations
 
@@ -37,7 +39,7 @@ class ToolContext:
 @dataclass(frozen=True)
 class ToolSpec:
     name: str
-    run: Callable[[ToolContext], Any]
+    run: Callable[..., Any]
 
 
 # Imported AFTER ToolContext/ToolSpec so track_order / resolve_address (which

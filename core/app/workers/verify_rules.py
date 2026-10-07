@@ -260,8 +260,8 @@ def _captured_size_tokens(tokens: list[str], labels: set[str]) -> set[str]:
     consumes its two tokens, so its head word is not ALSO read as a standalone
     mention ("لارج" -> "l")."""
     words = [t for t in tokens if t]
-    word_labels = {l for l in labels if l and not l.isdigit()}
-    numeric_labels = {l for l in labels if l.isdigit()}
+    word_labels = {label for label in labels if label and not label.isdigit()}
+    numeric_labels = {label for label in labels if label.isdigit()}
     consumed: set[int] = set()
     captured: set[str] = set()
     for i in range(len(words) - 1):
@@ -274,10 +274,10 @@ def _captured_size_tokens(tokens: list[str], labels: set[str]) -> set[str]:
         if i in consumed:
             continue
         canon = _canon(token)
-        if canon in word_labels or canon in _SIZE_GENERAL:
-            captured.add(canon)
-        elif canon in numeric_labels and any(
-            _is_size_word(words[j]) for j in (i - 1, i - 2) if j >= 0
+        if (canon in word_labels or canon in _SIZE_GENERAL) or (
+            canon in numeric_labels and any(
+                _is_size_word(words[j]) for j in (i - 1, i - 2) if j >= 0
+            )
         ):
             captured.add(canon)
     return captured
@@ -292,9 +292,9 @@ def _check_size_mismatch(tokens: list[str], sc: SizeContext) -> RuleVerdict:
     if (sc.size is not None and not isinstance(sc.size, str)) \
             or (sc.alt_size is not None and not isinstance(sc.alt_size, str)) \
             or not isinstance(sc.all_labels, tuple) \
-            or any(not isinstance(l, str) for l in sc.all_labels):
+            or any(not isinstance(label, str) for label in sc.all_labels):
         return _violation("size_mismatch", "size")
-    captured = _captured_size_tokens(tokens, {_canon(l) for l in sc.all_labels})
+    captured = _captured_size_tokens(tokens, {_canon(label) for label in sc.all_labels})
     if not captured:
         return RuleVerdict(ok=True, rule_id=None, category=None)
     if sc.size is None:

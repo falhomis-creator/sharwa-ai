@@ -626,3 +626,11 @@ UNVERIFIED: اختبارات Django (`python manage.py test products.test_sharwa
 
 ## Task 9 — [DEFERRED - TO BE EXECUTED LAST] (قرار المالك، 2026-10-07)
 - تأجيل Task 9 (اختبارات ذهبية وخاصية للمستشار) إلى آخر المهام؛ لا يُصدَر له توجيه الآن. الاختبارات الفرعية لكل فرع موجودة من Task 8.
+
+## T11 — R9 (دين lint) + الإغلاق والدمج (2026-10-07)
+- **UNVERIFIED_ENV_LIMIT:** لا شبكة على مضيف المنفّذ (pip: from versions: none حتى بلا تثبيت نسخة، ولا ثنائيات عامة) — تعذّر تثبيت ruff==0.14.10/mypy==1.18.2، فتعذّر قياس 303/103 محلياً؛ المعماري يتحقق على Linux. التعديلات نُفِّذت حرفياً بتوجيه R9.
+- **R9 (a–e):** (a) `ToolSpec.run: Callable[..., Any]` + سطر العهدين في docstring السجلّ (ملفوف سطرين — النص الحرفي 148 حرفاً كان سيولّد E501 جديداً يخالف هدف الجولة). (b) `left_field` في `_keyword_at` (mypy :159). (c) `_has_own_unit` ⇒ `return not (found[2] and not _is_meter_shorthand_value(_number_value(tokens[j])))` (SIM103، مكافئ منطقياً). (d) أربعة E741: `l` ⇒ `label` في `_captured_size_tokens`/`_check_size_mismatch`؛ وSIM114 بدمج فرعَي `captured.add(canon)` بـor دون تغيير المعنى. (e) ثلاثة E501 ملفوفة + SIM300 معكوسة. لم تُمس UP035/I001 القديمة ولا B905.
+- **قرار ToolSpec:** `Callable[..., Any]` — الأدوات ذات الوسائط الصريحة (resolve_address، size_advise؛ H51: الكود يستخرج الوسائط) لا تستقبل ToolContext، والسجلّ الحرفي لا يفرض توقيعاً واحداً؛ التوثيق الجديد يكتب العهدين صراحةً.
+- **البوابات (المرحلة 2، مرة واحدة من core/):** الحزمة النقية **460 passed**, 475 deselected · `-m tools` **4 passed** · static_gate **PASSED — 0 violations** · lint-imports **7 kept, 0 broken** — مطابقة للمتوقع كله.
+- **F-P4-02:** أخطاء test_migrate التسعة (sudo -u postgres على Windows) قيد بيئة ويندوز يمكن تجاهله — المرجع 471 على Linux.
+- **الإيداعان:** (1) R9 + التوثيق؛ (2) scripts/run_db_suite.py (تعديل -rfE + طباعة المعرّفات). ثم الدمج في p4-links-ai بدمجين --no-ff (p4-task11-size ثم p3-f-p3-24-tombstone).

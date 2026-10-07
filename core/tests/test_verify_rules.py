@@ -183,11 +183,11 @@ def _size_check(text: str, sc: verify_rules.SizeContext | None) -> verify_rules.
 
 def test_size_mismatch_is_in_the_closed_rule_list():
     # The closed list gains EXACTLY one member in Task 11 (H20/H4).
-    assert verify_rules.CLOSED_RULE_IDS == frozenset({
+    assert frozenset({
         "empty", "oversize", "control_chars", "placeholder",
         "profanity", "competitor", "disclosure", "verifier_error",
         "size_mismatch",
-    })
+    }) == verify_rules.CLOSED_RULE_IDS
 
 
 def test_matching_size_passes():
@@ -207,12 +207,14 @@ def test_wrong_size_violates():
 def test_arabic_size_words_compare_canonically():
     assert _size_check("خذ المقاس لارج", verify_rules.SizeContext("L", None, LABELS)).ok
     assert _size_check("خذ المقاس اكسترا لارج", verify_rules.SizeContext("XL", None, LABELS)).ok
-    assert _size_check("خذ المقاس سمول", verify_rules.SizeContext("L", None, LABELS)).rule_id == "size_mismatch"
+    assert _size_check("خذ المقاس سمول", verify_rules.SizeContext("L", None, LABELS)) \
+        .rule_id == "size_mismatch"
 
 
 def test_case_insensitive_latin():
     assert _size_check("Size XL fits you", verify_rules.SizeContext("XL", None, LABELS)).ok
-    assert _size_check("size XXL fits you", verify_rules.SizeContext("XL", None, LABELS)).rule_id == "size_mismatch"
+    assert _size_check("size XXL fits you", verify_rules.SizeContext("XL", None, LABELS)) \
+        .rule_id == "size_mismatch"
 
 
 def test_any_size_violates_when_size_is_none():
@@ -281,7 +283,8 @@ def test_size_context_absent_keeps_legacy_behavior():
 def test_malformed_context_is_a_violation():
     assert _size_check("نص عادي جدا", "M").rule_id == "size_mismatch"  # type: ignore[arg-type]
     assert _size_check("نص عادي جدا", verify_rules.SizeContext(5, None, LABELS)).rule_id == "size_mismatch"  # type: ignore[arg-type]
-    assert _size_check("نص عادي جدا", verify_rules.SizeContext("M", None, ("M", 5))).rule_id == "size_mismatch"  # type: ignore[list-item]
+    assert _size_check("نص عادي جدا", verify_rules.SizeContext("M", None, ("M", 5))) \
+        .rule_id == "size_mismatch"  # type: ignore[list-item]
 
 
 def test_internal_failure_inside_the_rule_is_a_violation_h47():
