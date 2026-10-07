@@ -5,13 +5,15 @@ here, from exactly four allowed sources: approved templates (templates.py),
 product titles from catalog_products (the merchant's own text), kb_chunks content
 (the merchant's own policy text), and the closed order-status map (P1.7 §6, the
 ONLY authorised fourth function). Six functions - compose_address_options (P2.2)
-is the fifth and compose_stock_notice (P2.3) the sixth.
+is the fifth, compose_stock_notice (P2.3) the sixth and compose_size_reply
+(P4 Task 18b-1) the seventh.
 """
 from __future__ import annotations
 
 import datetime as _dt
 from typing import Any
 
+from app.fit.size_advisor import SizeAdvice
 from app.workers import templates
 
 # Fixed template: titles verbatim, then a human-handoff offer in the tail.
@@ -105,3 +107,37 @@ def compose_stock_notice(kind: str, title: str) -> str:
     if "«name»" in text:
         return text.replace("«name»", title)
     return text
+
+
+# P4 Task 18b-1: which size template answers which advice. Closed; anything not
+# covered here is a hand-off (fail closed), never an invented sentence.
+_SIZE_HANDOFF_REASONS = frozenset({"no_chart", "invalid_chart"})
+_SIZE_ASK_REASONS = frozenset({"missing_height_weight", "implausible_input"})
+
+
+def compose_size_reply(advice: SizeAdvice) -> tuple[str, str]:
+    """The seventh composition function: (template_id, text) for a SizeAdvice.
+    The ONLY variable parts are the advice's own size / alt_size labels (the
+    merchant's chart labels), filled after the word «مقاس» - so the Verifier's
+    size rule always sees them (OQ-P4-15). The model never writes this text."""
+    reasons = set(advice.reasons)
+    if advice.size is not None and advice.out_of_range:
+        template_id = "size_nearest_out_of_range"
+    elif advice.size is not None and advice.alt_size is not None:
+        template_id = "size_recommend_alt"
+    elif advice.size is not None:
+        template_id = "size_recommend"
+    elif advice.out_of_range:
+        template_id = "size_no_fit"
+    elif reasons & _SIZE_HANDOFF_REASONS:
+        template_id = "size_no_chart"
+    elif reasons & _SIZE_ASK_REASONS:
+        template_id = "size_need_inputs"
+    else:
+        template_id = "handoff_notice"
+    text = templates.template_text(template_id)
+    if advice.size is not None:
+        text = text.replace("«size»", advice.size)
+    if advice.alt_size is not None:
+        text = text.replace("«alt»", advice.alt_size)
+    return template_id, text

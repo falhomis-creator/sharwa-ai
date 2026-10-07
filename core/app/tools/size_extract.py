@@ -51,10 +51,13 @@ _FIELD_DEFAULT_CONV: dict[str, Decimal] = {"height": Decimal("1"), "weight": Dec
 
 @dataclass(frozen=True)
 class SizeInputs:
-    """The extracted inputs. None means "not stated, contradictory or ambiguous"
-    - the customer is asked, never guessed at (H52)."""
+    """The extracted inputs. None / absent means "not stated, contradictory or
+    ambiguous" - the customer is asked, never guessed at (H52). body_cm holds
+    (dimension, cm) pairs sorted by dimension name (chest / hips / waist)."""
     height_cm: Decimal | None
     weight_kg: Decimal | None
+    fit_pref: str | None = None
+    body_cm: tuple[tuple[str, Decimal], ...] = ()
 
 
 def _normed(words: tuple[str, ...]) -> frozenset[str]:
@@ -73,11 +76,29 @@ _KG_UNITS = _normed(("كيلو", "كيلوجرام", "كيلوغرام", "كجم
 _LB_UNITS = _normed(("رطل", "رطلا", "باوند", "باوندات", "pound", "pounds", "lb", "lbs"))
 _CONNECTORS = _normed(("و", "and"))
 
+# Task 18b-1 (OQ-P4-14): body measurements - a field word immediately LEFT of
+# the number; unit cm (default) or inch; any other unit drops the number.
+_BODY_FIELDS: dict[str, frozenset[str]] = {
+    "chest": _normed(("صدر", "صدري", "الصدر", "chest")),
+    "waist": _normed(("خصر", "خصري", "الخصر", "waist")),
+    "hips": _normed(("ورك", "وركي", "الورك", "اوراك", "الاوراك", "hip", "hips")),
+}
+# Fit preference: a closed vocabulary; a negation within the two tokens before a
+# preference word, or two different preferences, make the preference unknown.
+_FIT_WORDS: dict[str, frozenset[str]] = {
+    "fitted": _normed(("ضيق", "ضيقه", "الضيق", "محكم", "fitted", "tight")),
+    "regular": _normed(("عادي", "عاديه", "العادي", "regular", "normal")),
+    "loose": _normed(("واسع", "واسعه", "الواسع", "فضفاض", "فضفاضه", "loose", "baggy")),
+}
+_NEGATIONS = _normed(("ما", "لا", "مو", "مش", "مب", "not", "no", "dont"))
+
 # A number: digits with one optional decimal separator ('.' or the Arabic
-# decimal separator U+066B). A word: any digit-free run (punctuation is
-# end-stripped below, like the verifier's token discipline).
-_TOKEN_RE = re.compile(r"\d+(?:[.٫]\d+)?|[^\s\d]+")
-_NUMBER_FULL_RE = re.compile(r"\d+(?:[.٫]\d+)?")
+# decimal separator U+066B), or a Latin-comma decimal "1,75" / "80,5" (OQ-P4-14:
+# 1-2 digits, comma, 1-2 digits, no digit after - so "1,750" is NOT 1.750).
+# A word: any digit-free run (punctuation is end-stripped below, like the
+# verifier's token discipline).
+_TOKEN_RE = re.compile(r"\d{1,2},\d{1,2}(?!\d)|\d+(?:[.٫]\d+)?|[^\s\d]+")
+_NUMBER_FULL_RE = re.compile(r"\d{1,2},\d{1,2}|\d+(?:[.٫]\d+)?")
 _END_STRIP_RE = re.compile(r"^[\W_]+|[\W_]+$")
 
 
@@ -86,7 +107,7 @@ def _is_number(token: str) -> bool:
 
 
 def _number_value(token: str) -> Decimal:
-    return Decimal(token.replace("٫", "."))
+    return Decimal(token.replace("٫", ".").replace(",", "."))
 
 
 def _is_meter_shorthand_value(value: Decimal) -> bool:
@@ -211,10 +232,79 @@ def _ambiguous_feet(tokens: list[str], i: int, value: Decimal) -> bool:
     return False
 
 
-def _scan_tokens(tokens: list[str], heights: list[Decimal], weights: list[Decimal]) -> None:
+def _compound_m_cm(tokens: list[str], i: int) -> tuple[Decimal, int] | None:
+    """"متر و75" / "1 متر و75" / "1 متر و 75 سم" = 1 m + N cm (OQ-P4-14): the
+    meter word (alone, or after the number 1), a connector, then an INTEGER
+    0 < N < 100 with no unit or a cm unit. Returns (height_cm, index after)."""
+    n = len(tokens)
+    if _is_number(tokens[i]):
+        if _number_value(tokens[i]) != 1 or i + 1 >= n or not _vocab_hit(tokens[i + 1], _M_UNITS):
+            return None
+        j = i + 2
+    else:
+        if not _vocab_hit(tokens[i], _M_UNITS) or (i >= 1 and _is_number(tokens[i - 1])):
+            return None
+        j = i + 1
+    if j >= n or not _vocab_hit(tokens[j], _CONNECTORS):
+        return None
+    j += 1
+    if j >= n or not _is_number(tokens[j]):
+        return None
+    cm = _number_value(tokens[j])
+    if cm != cm.to_integral_value() or not (0 < cm < 100):
+        return None
+    end = j + 1
+    if end < n and _unit(tokens[end]) is not None:
+        if not _vocab_hit(tokens[end], _CM_UNITS):
+            return None
+        end += 1
+    return M_TO_CM + cm, end
+
+
+def _body_claims(tokens: list[str]) -> dict[int, tuple[str, Decimal | None]]:
+    """Index of every number a body field word claims -> (dimension, cm or None).
+    None = the number is claimed (never read as height/weight) but unusable
+    (a non-length unit after it)."""
+    claims: dict[int, tuple[str, Decimal | None]] = {}
+    for i in range(len(tokens) - 1):
+        dim = next((d for d, vocab in _BODY_FIELDS.items() if _vocab_hit(tokens[i], vocab)), None)
+        if dim is None or not _is_number(tokens[i + 1]):
+            continue
+        value = _number_value(tokens[i + 1])
+        after = _unit(tokens[i + 2]) if i + 2 < len(tokens) else None
+        if after is None or _vocab_hit(tokens[i + 2], _CM_UNITS):
+            claims[i + 1] = (dim, value)
+        elif _vocab_hit(tokens[i + 2], _IN_UNITS):
+            claims[i + 1] = (dim, value * IN_TO_CM)
+        else:
+            claims[i + 1] = (dim, None)
+    return claims
+
+
+def _fit_prefs(tokens: list[str]) -> set[str | None]:
+    """Every preference stated in the text; a negated one contributes None."""
+    found: set[str | None] = set()
+    for i, token in enumerate(tokens):
+        pref = next((p for p, vocab in _FIT_WORDS.items() if _vocab_hit(token, vocab)), None)
+        if pref is None:
+            continue
+        negated = any(_vocab_hit(tokens[k], _NEGATIONS) for k in (i - 1, i - 2) if k >= 0)
+        found.add(None if negated else pref)
+    return found
+
+
+def _scan_tokens(
+    tokens: list[str], heights: list[Decimal], weights: list[Decimal],
+    claimed: frozenset[int] = frozenset(),
+) -> None:
     i = 0
     while i < len(tokens):
-        if not _is_number(tokens[i]):
+        meter = _compound_m_cm(tokens, i)
+        if meter is not None:
+            heights.append(meter[0])
+            i = meter[1]
+            continue
+        if not _is_number(tokens[i]) or i in claimed:
             i += 1
             continue
         compound = _compound_ft_in(tokens, i)
@@ -249,10 +339,26 @@ def _resolve(values: list[Decimal]) -> Decimal | None:
 
 
 def extract_size_inputs(texts: tuple[str, ...]) -> SizeInputs:
-    """The deterministic height/weight extraction over one turn's texts (H51).
-    Values accumulate ACROSS the turn's texts; identical repeats stay one value."""
+    """The deterministic extraction over one turn's texts (H51): height, weight,
+    fit preference and body measurements. Values accumulate ACROSS the turn's
+    texts; identical repeats stay one value; contradictions become unknown."""
     heights: list[Decimal] = []
     weights: list[Decimal] = []
+    body: dict[str, list[Decimal | None]] = {}
+    prefs: set[str | None] = set()
     for text in texts:
-        _scan_tokens(_tokens(text), heights, weights)
-    return SizeInputs(height_cm=_resolve(heights), weight_kg=_resolve(weights))
+        tokens = _tokens(text)
+        claims = _body_claims(tokens)
+        for dim, value in claims.values():
+            body.setdefault(dim, []).append(value)
+        prefs |= _fit_prefs(tokens)
+        _scan_tokens(tokens, heights, weights, frozenset(claims))
+    body_cm = tuple(
+        (dim, values[0]) for dim, values in sorted(body.items())
+        if None not in values and len(set(values)) == 1 and values[0] is not None
+    )
+    fit_pref = next(iter(prefs)) if len(prefs) == 1 else None
+    return SizeInputs(
+        height_cm=_resolve(heights), weight_kg=_resolve(weights),
+        fit_pref=fit_pref, body_cm=body_cm,
+    )

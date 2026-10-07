@@ -674,3 +674,25 @@ UNVERIFIED: اختبارات Django (`python manage.py test products.test_sharwa
 - **أرضية الجودة المقاسة:** 181 / 163 / 65 على seed 2026.
 - **UNVERIFIED_ENV_LIMIT:** ruff/mypy (لا شبكة) — المرجع: المعماري 303/103.
 
+## T18ب-1 — امتدادات المستخرج وعقد قوالب المقاس (2026-10-07)
+- **(2) التطبيق:** M ×3 (`size_extract.py` · `compose.py` · `templates.py`) + ?? ×2 (`test_size_extract_ext.py` · `test_size_templates_contract.py`). diff --stat: size_extract.py 132 · compose.py 38 · templates.py 18 (= 174 إضافة، 14 حذف).
+- **(3)-أ الملفان الجديدان:** `49 passed in 0.35s`.
+- **(3)-ب الاختبارات المعتمدة:** `101 passed in 0.79s` (test_size_extract.py · test_size_advise_tool.py · test_size_advisor.py · test_verify_rules.py · test_verify.py) — 0 failed، لا انحدار.
+- **(4) البوابات (بلا قاعدة):** الحزمة النقية **549 passed, 486 deselected** (= 500 + 49) · `-m tools` **4 passed, 1031 deselected** · static_gate **STATIC GATE PASSED — 0 violations** · lint-imports **Contracts: 8 kept, 0 broken**.
+- **(8) الحزمة -m db:** `tenants 0` قبل التشغيل · **473 passed, 553 deselected, 9 errors in 833.58s (0:13:53)** · 9 ERROR كلها `tests/test_migrate.py` (F-P4-02) · 0 FAILED · EXIT=1 — مطابق للرقم بعد Task 10، لا انحدار (مرجع Linux: 482).
+- **(10) التحوّلات (استعادة cp+cmp بعد كل منها):**
+  - Q1 (حذف بديل الفاصلة من _TOKEN_RE) ⇒ `FAILED …::test_latin_comma_decimal — 1 failed, 69 passed` ⇒ RESTORED.
+  - Q2 (تعطيل المتر المركّب) ⇒ `FAILED …::test_compound_meter_reads_one_meter_plus_centimeters — 1 failed, 69 passed` ⇒ RESTORED.
+  - Q3 (لا تستثنِ أعداد الجسم من الطول/الوزن) ⇒ `2 failed, 68 passed` (test_body_measurement_is_never_read_as_height · test_body_measurement_with_a_wrong_unit_is_dropped_and_not_reused) ⇒ RESTORED.
+  - Q4 (تجاهل النفي) ⇒ `FAILED …::test_fit_preference_negated_or_conflicting_is_unknown — 1 failed, 69 passed` ⇒ RESTORED.
+  - Q5 (تسمية ليست بعد «مقاس») ⇒ `3 failed, 67 passed` (test_every_label_placeholder_follows_the_word_maqas · test_a_label_other_than_the_advice_is_caught[42-44] · test_the_advised_size_is_the_primary_one_in_the_text) ⇒ RESTORED. (التوجيه توقّع 2 failed؛ الثالث فشل مشروع إضافي — انظر F-P4-06.)
+  - Q6 (الشكل المجهول يسأل بدل التحويل) ⇒ `FAILED …::test_unknown_advice_shape_hands_off — 1 failed, 69 passed` ⇒ RESTORED.
+  - Q7 (تبديل المقاس الأساسي بالبديل) ⇒ `FAILED …::test_the_advised_size_is_the_primary_one_in_the_text — 1 failed, 69 passed` ⇒ RESTORED.
+  - بعد السبعة: **70 passed** · sha256 `b2f8157391349f5b` · `f8daa307073a7664` · `5c198375c1c1a1af` (مطابقة للمسلَّم).
+- **إصلاح ثلاث قراءات خاطئة قائمة:** "1 متر و75"⇒كان 100، "طولي 1,75 م"⇒كان 1، "صدري 100 سم"⇒كان طولاً 100.
+- **OQ-P4-21:** «نصوص قوالب المقاس الستة مقترحة وتبقى حرفية حتى اعتماد المالك أو تعديله؛ لا تُرسَل لعميل قبل ذلك (18ب-2 يوصل ولا يفعّل)».
+- **القرار:** «الـVerifier يقبل size وalt_size معاً فلا يميّز ترتيبهما؛ الترتيب مثبّت باختبار نصّ حرفي (Q7)».
+- **F-P4-06:** نتيجة Q5 تعطي 3 failed لا 2: `test_the_advised_size_is_the_primary_one_in_the_text` (حارس Q7) يفشل أيضاً تحت Q5، لأن نصّ قالب size_recommend مُثبَّت حرفياً في ذلك الاختبار وإزالة «مقاس» منه تكسره. لا يدلّ على عيب في الكود (الملفات بايتية التطابق مع المسلَّم، والحزم كلها خضراء)؛ إنه سدّ ثغرة إضافي في التوجيه وليس فشل تطبيق.
+- **UNVERIFIED_ENV_LIMIT:** ruff/mypy (لا شبكة) — المرجع: المعماري 303/103 (بلا زيادة).
+
+- **تصحيح المعماري:** F-P4-06 ليس Finding؛ التوقّع «2 failed» في Q5 قيس قبل إضافة اختبار النصّ الحرفي (سدّ Q7)، والنتيجة الصحيحة 3 failed كما سجّلها المنفّذ. لا تغيير في الكود.
