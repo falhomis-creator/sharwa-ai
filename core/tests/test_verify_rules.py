@@ -170,3 +170,127 @@ def test_squeeze_canonical_forms():
     assert verify_rules.squeeze("ك.ل.ب") == "كلب"
     assert verify_rules.squeeze("كلللب") == "كلب"
     assert verify_rules.squeeze("كـلـب") == "كلب"
+
+
+# --- size_mismatch (Task 11) ---------------------------------------------------
+
+LABELS = ("S", "M", "L", "XL")
+
+
+def _size_check(text: str, sc: verify_rules.SizeContext | None) -> verify_rules.RuleVerdict:
+    return verify_rules.check_text(text, rules=_rules(), max_chars=4000, size_context=sc)
+
+
+def test_size_mismatch_is_in_the_closed_rule_list():
+    # The closed list gains EXACTLY one member in Task 11 (H20/H4).
+    assert frozenset({
+        "empty", "oversize", "control_chars", "placeholder",
+        "profanity", "competitor", "disclosure", "verifier_error",
+        "size_mismatch",
+    }) == verify_rules.CLOSED_RULE_IDS
+
+
+def test_matching_size_passes():
+    assert _size_check("مقاسك هو M", verify_rules.SizeContext("M", "L", LABELS)).ok
+    assert _size_check("your size is m", verify_rules.SizeContext("M", None, LABELS)).ok
+
+
+def test_alt_size_passes():
+    assert _size_check("وإن أردت أوسع فجرّب L", verify_rules.SizeContext("M", "L", LABELS)).ok
+
+
+def test_wrong_size_violates():
+    verdict = _size_check("خذ مقاس XL", verify_rules.SizeContext("M", "L", LABELS))
+    assert (verdict.ok, verdict.rule_id, verdict.category) == (False, "size_mismatch", "size")
+
+
+def test_arabic_size_words_compare_canonically():
+    assert _size_check("خذ المقاس لارج", verify_rules.SizeContext("L", None, LABELS)).ok
+    assert _size_check("خذ المقاس اكسترا لارج", verify_rules.SizeContext("XL", None, LABELS)).ok
+    assert _size_check("خذ المقاس سمول", verify_rules.SizeContext("L", None, LABELS)) \
+        .rule_id == "size_mismatch"
+
+
+def test_case_insensitive_latin():
+    assert _size_check("Size XL fits you", verify_rules.SizeContext("XL", None, LABELS)).ok
+    assert _size_check("size XXL fits you", verify_rules.SizeContext("XL", None, LABELS)) \
+        .rule_id == "size_mismatch"
+
+
+def test_any_size_violates_when_size_is_none():
+    assert _size_check("مقاسك M", verify_rules.SizeContext(None, None, LABELS)).rule_id == "size_mismatch"
+    # alt_size cannot rescue a None advice
+    assert _size_check("مقاسك L", verify_rules.SizeContext(None, "L", LABELS)).rule_id == "size_mismatch"
+
+
+def test_no_size_token_passes_even_with_none():
+    assert _size_check("لا توجد توصية مقاس الآن", verify_rules.SizeContext(None, None, LABELS)).ok
+
+
+def test_numeric_label_needs_the_size_word():
+    labels = ("40", "42", "44")
+    assert _size_check("مقاس 42", verify_rules.SizeContext("40", None, labels)).rule_id == "size_mismatch"
+    # the same numeric token far from any size word never binds
+    assert _size_check("الصدر 42", verify_rules.SizeContext("40", None, labels)).ok
+    assert _size_check("الطول 175 سم", verify_rules.SizeContext("40", None, labels)).ok
+
+
+def test_numeric_label_across_size_word_clitics():
+    # R4: prefixes (و ف ب ل ال وال بال لل) and possessive suffixes are stripped
+    # before the size-word test, else a wrong numeric size slips through (H49).
+    labels = ("40", "42", "44")
+    sc = verify_rules.SizeContext("42", None, labels)
+    for text in ("بمقاس 44", "المقاس 44", "مقاسي 44", "ولمقاس 44", "مقاساتك 44"):
+        assert _size_check(text, sc).rule_id == "size_mismatch", text
+    assert _size_check("بمقاس 42", sc).ok
+    assert _size_check("175 سم", sc).ok
+
+
+def test_size_writing_variants():
+    sc_xl = verify_rules.SizeContext("XL", None, LABELS)
+    # R5: 2XL/3XL ARE XXL/XXXL, not XL - an XL advice must block them (H49).
+    assert _size_check("خذ مقاس 2XL", sc_xl).rule_id == "size_mismatch"
+    assert _size_check("خذ مقاس 3XL", sc_xl).rule_id == "size_mismatch"
+    assert _size_check("خذ مقاس XXL", sc_xl).rule_id == "size_mismatch"
+    # ...while the two names of the SAME size pass in both directions
+    assert _size_check("خذ مقاس 2XL", verify_rules.SizeContext("XXL", None, LABELS)).ok
+    assert _size_check("خذ المقاس XXL", verify_rules.SizeContext("2XL", None, LABELS)).ok
+    assert _size_check("خذ مقاس 3XL", verify_rules.SizeContext("XXXL", None, LABELS)).ok
+    # 4XL/5XL are standalone labels: captured anywhere, compared to themselves
+    assert _size_check("خذ مقاس 4XL", verify_rules.SizeContext("4XL", None, LABELS)).ok
+    assert _size_check("خذ مقاس 4XL", sc_xl).rule_id == "size_mismatch"
+    assert _size_check("خذ مقاس 5XL", verify_rules.SizeContext("5XL", None, LABELS)).ok
+    assert _size_check("خذ مقاس xl", sc_xl).ok
+    assert _size_check("خذ مقاس (L)", verify_rules.SizeContext("L", None, LABELS)).ok
+    assert _size_check("خذ المقاس اكس سمول", verify_rules.SizeContext("XS", None, LABELS)).ok
+    # the compound consumes its head word: "اكسترا لارج" is xl, NOT also l
+    assert _size_check("خذ المقاس اكسترا لارج", sc_xl).ok
+    # ...while a standalone لارج is still the letter l
+    assert _size_check("خذ المقاس لارج", verify_rules.SizeContext("L", None, LABELS)).ok
+    assert _size_check("خذ المقاس لارج", sc_xl).rule_id == "size_mismatch"
+
+
+def test_letter_inside_word_is_not_captured():
+    assert _size_check("متجرنا المميز", verify_rules.SizeContext("M", None, LABELS)).ok
+    assert _size_check("welcome to our mall", verify_rules.SizeContext("M", None, LABELS)).ok
+
+
+def test_size_context_absent_keeps_legacy_behavior():
+    # the default: no size rule runs at all - a size-laden text stays legal
+    assert _check("خذ مقاس XL واللارج كذلك").ok
+
+
+def test_malformed_context_is_a_violation():
+    assert _size_check("نص عادي جدا", "M").rule_id == "size_mismatch"  # type: ignore[arg-type]
+    assert _size_check("نص عادي جدا", verify_rules.SizeContext(5, None, LABELS)).rule_id == "size_mismatch"  # type: ignore[arg-type]
+    assert _size_check("نص عادي جدا", verify_rules.SizeContext("M", None, ("M", 5))) \
+        .rule_id == "size_mismatch"  # type: ignore[list-item]
+
+
+def test_internal_failure_inside_the_rule_is_a_violation_h47():
+    class Poison(str):
+        def strip(self, *args, **kwargs):
+            raise RuntimeError("boom")
+
+    verdict = _size_check("مقاسك M", verify_rules.SizeContext(Poison("M"), None, LABELS))
+    assert (verdict.ok, verdict.rule_id) == (False, "size_mismatch")

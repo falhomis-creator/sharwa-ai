@@ -54,11 +54,17 @@ def main() -> int:
     results: list[tuple[int, str]] = []
     for run in (1, 2):
         proc = subprocess.run(
-            [sys.executable, "-m", "pytest", "tests", "-q", "-m", "db"],
+            [sys.executable, "-m", "pytest", "tests", "-q", "-m", "db", "-rfE", "--tb=no"],
             cwd=str(CORE), capture_output=True, text=True,
         )
         tail = _last_line(proc.stdout) or _last_line(proc.stderr)
+        # F-P4-01-DB: print the failing/erroring test ids (not just the last line)
+        # so the two runs can be compared point-by-point.
+        ids = [ln.strip() for ln in proc.stdout.splitlines()
+               if ln.startswith(("FAILED ", "ERROR "))]
         print(f"[run {run}] {tail}")
+        for tid in ids:
+            print(f"    {tid}")
         results.append((proc.returncode, tail))
 
     (rc1, t1), (rc2, t2) = results

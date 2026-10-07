@@ -86,13 +86,14 @@ def _call(monkeypatch, text, **kw):
     log = Log()
     settings = kw.pop("settings", None) or Settings()
     expected_epoch = kw.pop("expected_epoch", 1)
+    size_context = kw.pop("size_context", None)
     _install(monkeypatch, log, **kw)
     outcome = verify.insert_verified_outbox(
         None, settings=settings, rules=_rules(),
         tenant_id=uuid.uuid4(), conversation_id=uuid.uuid4(),
         channel_account_id=uuid.uuid4(), idempotency_key="k",
         message_class="service", expected_epoch=expected_epoch, to_wa_id="wa",
-        template_id="handoff_notice", text=text,
+        template_id="handoff_notice", text=text, size_context=size_context,
     )
     return outcome, log
 
@@ -237,5 +238,40 @@ def test_polluted_template_fails_boot(monkeypatch):
     monkeypatch.setattr(verify.templates, "TEMPLATES", {"polluted": "هذا كلب في القالب"})
     with pytest.raises(ConfigError):
         verify.build_rules(Settings())
+
+
+# --- Task 11: size_context pass-through ----------------------------------------
+
+
+def test_size_context_reaches_the_size_rule(monkeypatch):
+    outcome, log = _call(
+        monkeypatch, "خذ مقاس XL",
+        size_context=verify_rules.SizeContext("M", None, ("S", "M", "XL")),
+    )
+    assert not outcome.ok
+    assert outcome.rule_id == "size_mismatch"
+    block = _named(log, "insert_verifier_block")[0][1]
+    assert block["reason"] == "verifier_size_mismatch"
+
+
+def test_size_context_advice_passes_through(monkeypatch):
+    outcome, log = _call(
+        monkeypatch, "خذ مقاس M",
+        size_context=verify_rules.SizeContext("M", None, ("S", "M", "XL")),
+    )
+    assert outcome.ok
+    assert not _named(log, "insert_verifier_block")
+
+
+def test_disabled_path_ignores_size_context(monkeypatch):
+    s = Settings()
+    s.verify_enabled = False
+    outcome, log = _call(
+        monkeypatch, "خذ مقاس XL", settings=s,
+        size_context=verify_rules.SizeContext("M", None, ("S", "M", "XL")),
+    )
+    assert outcome.ok
+    outs = _named(log, "insert_outbox")
+    assert outs[0][1]["text"] == "خذ مقاس XL"
 
 
