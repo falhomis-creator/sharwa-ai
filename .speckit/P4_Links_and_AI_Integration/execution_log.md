@@ -622,3 +622,7 @@ UNVERIFIED: اختبارات Django (`python manage.py test products.test_sharwa
 - **M12:** حذف فحص القيمة في `_has_own_unit` ⇒ 1 failed؛ الاستعادة مثبتة بمقارنة بايتية مع النسخة الجيدة (`cmp`: متطابق).
 - التشغيل على الـVM (بايثون 3.10، حزمة جزئية): ملفات size الثلاثة 46 passed. الحزمة الكاملة و`-m tools` و`static_gate` و`lint-imports` لم تُشغَّل هنا (تبعيات ناقصة) — تُشغَّل على ويندوز قبل الدمج.
 - **F-P4-01-DB (تشخيص):** السبب مؤكد — `fp401_runner.ps1` ضبط `CORE_DATABASE_URL` فقط (5433)، بينما `conftest` يُسقط `CORE_MIGRATION_DATABASE_URL`/`CORE_SYSTEM_DATABASE_URL` إلى 127.0.0.1:5432 ⇒ `password authentication failed for user p07_migration` في إعداد كل اختبار db (471 خطأ، ~35 ثانية، عدّادات الصفوف ثابتة). ليس تلوّث بيانات ولا عيب كود Task 8. العلاج: تمرير الروابط الثلاثة جميعاً على 5433 (أو ضبطها في `run_db_suite.py`)، ثم إعادة تشغيل واحدة.
+
+
+## Task 9 — [DEFERRED - TO BE EXECUTED LAST] (قرار المالك، 2026-10-07)
+- تأجيل Task 9 (اختبارات ذهبية وخاصية للمستشار) إلى آخر المهام؛ لا يُصدَر له توجيه الآن. الاختبارات الفرعية لكل فرع موجودة من Task 8.
