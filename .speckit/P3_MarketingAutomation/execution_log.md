@@ -214,3 +214,13 @@ outbox status/policy_reason: ('pending', 'active_chat', ...)
 - `git diff --stat` ⇒ ستة ملفات.
 
 **فحص التحوّل:** لا ينطبق (توثيق، بلا كود).
+
+## T18–T21 — إعادة تحقق مستقلة وفتح البوّابة G (المعماري، 2026-10-07)
+- **الحالة:** إصلاحات T18 (`f005749`)، T19 (`545eac1`)، T20 (`314715b`) كانت مُودَعة سابقاً؛ مربّعا T18/T19 في tasks.md لم يكونا مُعلَّمين — عُلِّما الآن. لا تغيير في الكود ولا الاختبارات في هذا الالتزام.
+- **البيئة:** Ubuntu 24.04، PostgreSQL 16.15 + pgvector 0.6.0 + PostGIS 3.4.2، Redis على 6390، Python 3.12 بالإصدارات المثبّتة في requirements*.txt (عدا pip-audit 2.9.1 غير المتاح في الفهرس). قاعدة جديدة بأدوار ops/postgres/init/10_roles.sh والروابط الافتراضية في conftest، والترحيلات 0001→0019 عبر `python -m app.cli migrate`.
+- **الجولة 1 (قاعدة نظيفة):** `471 passed, 383 deselected in 411.98s` — 0 failed، 0 errors.
+- **الجولة 2 (بلا أي تنظيف بين الجولتين):** `471 passed, 383 deselected in 389.93s` — 0 failed، 0 errors.
+- **test_migrate:** الأخطاء التسعة المصنّفة `UNVERIFIED_ENV_LIMIT` على ويندوز تنجح كلها على Linux (المثبّت يستعمل `sudo -u postgres psql`) ⇒ 462 + 9 = 471.
+- **البوّابات الأخرى:** الحزمة النقية 381 passed؛ `-m tools` 2 passed؛ `static_gate.py` PASSED 0 violations؛ `lint-imports --no-cache` 4 kept / 0 broken.
+- **الخلاصة: البوّابة G مفتوحة — 100% (471/471) في جولتين متطابقتين.** المتبقّي غير الحاجز: F-P4-02 (جعل مثبّت test_migrate يعمل على ويندوز) — قيد بيئة لا عيب.
+
