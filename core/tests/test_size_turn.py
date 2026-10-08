@@ -175,6 +175,7 @@ def test_write_phase_hands_the_size_context_to_the_verifier(monkeypatch):
     assert calls[0]["size_context"] is sc
 
 
-def test_flag_defaults_to_off():
+def test_flag_defaults_to_on():
+    # Owner decision 2026-10-09: the size advisor is ON by default.
     from app.workers.config import WorkerSettings
-    assert WorkerSettings.__dataclass_fields__["size_advice_enabled"].default is False
+    assert WorkerSettings.__dataclass_fields__["size_advice_enabled"].default is True

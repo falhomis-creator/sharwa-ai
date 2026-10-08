@@ -423,9 +423,10 @@ class WorkerSettings:
     # P1.7 order tracking (PROMPT §7). All defaults written (H4) except the HMAC
     # key (order_ref_hash_key), which is _required at load (H5/H54).
     tools_enabled: bool = True
-    # P4 Task 18b-2b: the size advisor in the conversation turn. DARK by default
-    # (owner decision): off => the turn behaves byte-for-byte as before.
-    size_advice_enabled: bool = False
+    # P4 Task 18b-2b: the size advisor in the conversation turn. ON by default
+    # (owner decision 2026-10-09, after F-P4-09 and F-P4-10); SIZE_ADVICE_ENABLED=false
+    # turns it off and the turn then behaves byte-for-byte as before.
+    size_advice_enabled: bool = True
     order_ref_pattern: Any = None  # compiled at load (re.Pattern) - no static default
     order_lookup_timeout_s: float = 4.0
     order_lookup_max_phone_candidates: int = 3
@@ -757,7 +758,7 @@ class WorkerSettings:
             verify_disclosure=_csv("VERIFY_DISCLOSURE", ",".join(DEFAULT_VERIFY_DISCLOSURE)),
             verify_join_window_max=_int("VERIFY_JOIN_WINDOW_MAX", 6),
             tools_enabled=_bool("TOOLS_ENABLED", True),
-            size_advice_enabled=_bool("SIZE_ADVICE_ENABLED", False),
+            size_advice_enabled=_bool("SIZE_ADVICE_ENABLED", True),
             order_ref_pattern=order_ref_pattern,
             order_lookup_timeout_s=_float("ORDER_LOOKUP_TIMEOUT_S", 4.0),
             order_lookup_max_phone_candidates=_int("ORDER_LOOKUP_MAX_PHONE_CANDIDATES", 3),

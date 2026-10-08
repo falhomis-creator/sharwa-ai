@@ -785,3 +785,12 @@ UNVERIFIED: اختبارات Django (`python manage.py test products.test_sharwa
 - **التطابق على جهاز المالك:** size.py `b3b1a44592d1a2c7` · test_size_turn.py `da2fb67e0b7c50f8` · test_size_turn_db.py `6ab7344418026278` · test_size_trigger_db.py `73bd5bf94aee011e` · config.py بلا تغيير `b63f3ab0f556b0ab`.
 - **UNVERIFIED_ENV_LIMIT:** PG18 لديك غير مُشغَّل. المتوقع: 498 passed + 9 errors (test_migrate، F-P4-02).
 - **أثر سلوكي مقصود:** «كم مقاسي؟» بلا أي قياس تذهب الآن للموجِّه (لا تتلقى قالب طلب الطول والوزن)؛ قالب size_need_inputs يصل حين يذكر العميل قياساً واحداً ناقصاً.
+
+## Size Advisor Default ON — تشغيل مستشار المقاس افتراضياً (المعماري منفّذاً، 2026-10-09)
+- **قرار المالك:** بعد إغلاق F-P4-09 وF-P4-10، مستشار المقاس مُشغَّل افتراضياً. `core/app/workers/config.py`: `size_advice_enabled: bool = True` و`_bool("SIZE_ADVICE_ENABLED", True)`؛ `SIZE_ADVICE_ENABLED=false` يعيد السلوك السابق حرفياً.
+- **تعديل اختبار معتمد بقرار المالك:** `tests/test_size_turn.py::test_flag_defaults_to_off` ⇒ `test_flag_defaults_to_on` (يثبت True).
+- **النتائج (Linux PG16 فوق 0f94936، العلم مُشغَّل افتراضياً):** النقية `590 passed, 511 deselected in 7.96s` · `-m tools` `4 passed, 1097 deselected` · static_gate `STATIC GATE PASSED — 0 violations` · lint-imports `Contracts: 8 kept, 0 broken` · ruff `Found 302 errors` (بلا زيادة) · mypy `Found 103 errors` (بلا زيادة).
+- **الحزمة -m db الكاملة (tenants=0):** `507 passed, 594 deselected in 277.06s (0:04:37)` — 0 failed، 0 errors.
+- **التطابق على جهاز المالك:** config.py `413afc2f41bbccf0` · test_size_turn.py `e7607b4cd5e64d8a`.
+- **UNVERIFIED_ENV_LIMIT:** PG18 لديك غير مُشغَّل. المتوقع: 498 passed + 9 errors (test_migrate، F-P4-02).
+- **أُودِع بتفويض المالك** برسالة `feat(p4): enable size advisor by default`.
