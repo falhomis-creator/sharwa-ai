@@ -301,6 +301,13 @@ services:
       GATEWAY_API_KEY: ${SHARWA_AI_GATEWAY_API_KEY:?SHARWA_AI_GATEWAY_API_KEY is required (see .env)}
       METRICS_TOKEN: ${METRICS_TOKEN:?METRICS_TOKEN is required - the api service refuses to start without it (see .env)}
       SSO_LOGIN_URL: ${SSO_LOGIN_URL:?SSO_LOGIN_URL is required (see .env)}
+      # P4 Task 17 (F-P4-11): passed through so the public domain works. Empty
+      # (the default) = exactly today's behaviour. CONSOLE_ALLOWED_ORIGINS is the
+      # console's own public origin (https://api.sharwa.app): the /v1/ws handshake
+      # checks the browser Origin against it (api/ws.py). CONSOLE_SSO_PLATFORM_ORIGINS
+      # = the Sharwa store origins allowed to hand the console a token (Task 6b).
+      CONSOLE_ALLOWED_ORIGINS: ${CONSOLE_ALLOWED_ORIGINS:-}
+      CONSOLE_SSO_PLATFORM_ORIGINS: ${CONSOLE_SSO_PLATFORM_ORIGINS:-}
       # P1.4 catalog webhook HMAC secret (app/config.py _required - empty refuses boot, H5).
       PLATFORM_WEBHOOK_SECRET: ${PLATFORM_WEBHOOK_SECRET:?PLATFORM_WEBHOOK_SECRET is required (see .env)}
     networks: [data, app]                  # data: postgres/pgbouncer/redis-cache. app: gateway + outbound (JWKS_URL)

@@ -794,3 +794,68 @@ UNVERIFIED: اختبارات Django (`python manage.py test products.test_sharwa
 - **التطابق على جهاز المالك:** config.py `413afc2f41bbccf0` · test_size_turn.py `e7607b4cd5e64d8a`.
 - **UNVERIFIED_ENV_LIMIT:** PG18 لديك غير مُشغَّل. المتوقع: 498 passed + 9 errors (test_migrate، F-P4-02).
 - **أُودِع بتفويض المالك** برسالة `feat(p4): enable size advisor by default`.
+
+## Task 17 — الدومين وTLS والبروكسي المحلي (المعماري منفّذاً، 2026-10-09)
+
+**قرار المالك:** النطاق الرسمي `sharwa.app`؛ المحرك على النطاق الفرعي المخصّص **`api.sharwa.app`** (لأن `sharwa.app` و`*.sharwa.app` لمتاجر شروه). لا SSH ولا VPS ولا DNS ولا commit في هذه الجولة.
+
+**الملفات:**
+- جديد `ops/proxy/Caddyfile` (الموصى به — شهادة Let's Encrypt تلقائية). قائمة سماح: `/console/*` `/v1/*` (ومنها `/v1/ws`) `/healthz` والـwebhookان (سقف 512 KB)؛ كل ما عداه 404 من البروكسي (ومنه `/metrics` `/readyz` `/docs` `/openapi.json`). HSTS سنة، لا ترويسة Server، سجل JSON يحذف `ticket` من الـquery.
+- جديد `ops/proxy/nginx-api.sharwa.app.conf` (بديل فقط إن كان nginx يملك 80/443). القائمة نفسها؛ certbot webroot؛ السجل بـ`$uri` (بلا query).
+- جديد `ops/proxy/check_proxy.sh` — فحص ما بعد التشغيل للمالك (GET/HEAD + POST كبير يرفضه البروكسي فقط؛ لا توكن ولا توقيع).
+- جديد `core/tests/test_proxy_config.py` — 5 اختبارات ثابتة (pure).
+- `docker-compose.yml` + `.env.example`: تمرير `CONSOLE_ALLOWED_ORIGINS` و`CONSOLE_SSO_PLATFORM_ORIGINS` إلى `api` (افتراضي فارغ = سلوك اليوم بالضبط) — F-P4-11.
+- `docs/VPS_DEPLOYMENT_PLAYBOOK.md`: §12 جديد (الدومين/TLS)، و§7 صار يحيل إليه بدل مقطع Caddy القديم (`console.<دومينك>` ⇐ 8000).
+- `tasks.md`: Task 17 ⇐ [x].
+
+**F-P4-11 (اكتُشف وأُصلح هنا):** compose لم يكن يمرّر `CONSOLE_ALLOWED_ORIGINS` ولا `CONSOLE_SSO_PLATFORM_ORIGINS` إلى `api`. الأثر عبر أي نطاق: `api/ws.py` يرفض مصافحة `/v1/ws` من المتصفح (Origin ليس في قائمة فارغة ⇒ 1008) فيفقد صندوق الوارد التحديث الحيّ، والدخول الموحد (Task 6ب) معطّل دائماً في الإنتاج. الإصلاح تمرير بافتراضي فارغ.
+
+**OQ-P4-22 (لشروه):** يجب حجز اسم المتجر/الـschema `api` في شروه — سجل DNS الصريح `api` يتقدّم على `*.sharwa.app`، فمتجر باسم `api` سيصبح غير قابل للوصول.
+
+**التحقق (حرفياً، الحاوية Linux):**
+```
+$ caddy version                         -> v2.10.2
+$ caddy fmt --diff Caddyfile            -> FMT_OK (لا فرق)
+$ caddy validate --config Caddyfile --adapter caddyfile -> Valid configuration
+$ nginx -v                              -> nginx/1.24.0 (Ubuntu)
+$ nginx -t (الملف كاملاً، شهادة ذاتية التوقيع، بلا listen [::] لأن الحاوية بلا IPv6)
+nginx: the configuration file /tmp/ngt/nginx.conf syntax is ok
+nginx: configuration file /tmp/ngt/nginx.conf test is successful
+$ nginx -t (المرحلة 1 من §12.3-ب: كتلة 80 فقط)  -> test is successful
+```
+اختبار توجيه حيّ: كل بروكسي يعمل على 80/443 أمام خادم بديل على `127.0.0.1:8100` يعيد المسار الواصل (+ WebSocket صدى):
+```
+Caddy  check_proxy.sh -> 20 passed, 0 failed   (SKIP شهادة: -k مع شهادة محلية)
+nginx  check_proxy.sh -> 20 passed, 0 failed
+كلاهما:
+forwarded: api.sharwa.app https /v1/me
+300KB webhook reached api: {'upstream_path': '/webhooks/platform/cart', 'body_len': 300000, 'xfp': 'https', 'host': 'api.sharwa.app'}
+ws through proxy: echo:hi:origin=https://api.sharwa.app
+ticket in access log: False | /v1/ws logged: True
+```
+أول تشغيل لـnginx كشف عيبين أُصلحا قبل الجولة الخضراء: `/v1` ⇐ 301 (أُضيف `location = /v1 { return 404; }`)، و`Server: nginx` لا يُحذف بلا وحدة إضافية (الفحص صار «لا رقم إصدار» — Caddy لا يرسل الترويسة أصلاً).
+
+**فحص التحوّل (mutation):**
+```
+Caddy: catch-all ⇐ reverse_proxy + حذف فلتر ticket  -> check_proxy 10 passed, 10 failed؛ ticket in access log: True
+nginx: catch-all ⇐ proxy_pass + $request_uri في السجل -> check_proxy 11 passed, 9 failed؛ ticket in access log: True
+test_proxy_config.py، 5 تحوّلات (حذف سطر compose، حذف delete ticket، catch-all Caddy، $request_uri، catch-all nginx) -> كل واحد: 1 failed, 4 passed
+بعد الاستعادة -> 5 passed
+```
+**الحزم (الحاوية على 0f94936 + ملفات الجهاز المعدّلة):**
+```
+pytest -q                      -> 595 passed, 511 deselected in 8.11s   (590 + 5 الجديدة)
+pytest -q -m tools             -> 4 passed, 1102 deselected
+static_gate.py                 -> STATIC GATE PASSED — 0 violations.
+lint-imports                   -> Contracts: 8 kept, 0 broken.
+ruff check .                   -> Found 302 errors.   (دون تغيير)
+mypy app                       -> Found 103 errors in 33 files   (دون تغيير)
+scripts/check_env.py (الجهاز) -> ENV CHECK PASSED — 0 required keys missing.
+```
+`-m db` لم يُعَد: لا كود منتج تغيّر (compose/env/وثائق/اختبار ثابت فقط)؛ آخر نتيجة خضراء 507 passed عند 3d67ef2.
+
+**UNVERIFIED:** كل شيء على الـVPS (DNS، إصدار الشهادة، من يملك 80/443، IPv6، إصدار Caddy/nginx هناك)؛ و`nginx -t` بسطري `listen [::]` (الحاوية بلا IPv6).
+
+**توقّف:** لا commit. بانتظار مراجعة المالك.
+
+**مراجعة المالك (2026-10-09):** Task 17 معتمدة، وإصلاح F-P4-11 معتمد. **قرار OQ-P4-22:** يُضاف `api` إلى قائمة أسماء المستأجرين/المتاجر المحجوزة — لا يُسمح لمتجر باستخدام نطاق فرعي للبنية التحتية. التنفيذ في مستودع شروه (Django، مُنشئ الـschema) لا في هذا المستودع؛ يبقى بنداً مفتوحاً هناك حتى يُنفَّذ. ضُمَّ `.env.example` و`tasks.md` إلى الـcommit لأنهما جزء من تغييرات Task 17 نفسها.
