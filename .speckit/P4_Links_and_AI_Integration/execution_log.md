@@ -757,3 +757,16 @@ UNVERIFIED: اختبارات Django (`python manage.py test products.test_sharwa
 - **UNVERIFIED_ENV_LIMIT:** لم تُشغَّل على PG18 لديك. المتوقع هناك: 493 passed + 9 errors (test_migrate، F-P4-02).
 - **ملاحظة:** تعليق «NOTE (F-P4-09, open)» في `test_size_turn_db.py` (اختبار معتمد) صار قديماً؛ لم يُعدَّل احتراماً لقاعدة عدم تعديل الاختبارات المعتمدة — يُحدَّث بقرار المالك إن رغب.
 - **أثر تشغيلي:** بعد النشر تعود الدورات الموجَّهة للرد فعلاً؛ تبقى SIZE_ADVICE_ENABLED=false حتى قرار المالك.
+
+## Size Advisor Activation — تشغيل مستشار المقاس افتراضياً (المعماري منفّذاً، 2026-10-09)
+- **قرار المالك:** `SIZE_ADVICE_ENABLED` مُشغَّل. التنفيذ: `WorkerSettings.size_advice_enabled = True` و`_bool("SIZE_ADVICE_ENABLED", True)` في `core/app/workers/config.py`؛ ضبط `SIZE_ADVICE_ENABLED=false` في البيئة يعيد السلوك السابق حرفياً.
+- **تعديل اختبار معتمد بقرار المالك:** `tests/test_size_turn.py::test_flag_defaults_to_off` ⇒ `test_flag_defaults_to_on` (يثبت الافتراضي True). وتحديث التعليق القديم «NOTE (F-P4-09, open)» في `tests/test_size_turn_db.py` إلى «fixed in f7eb5f1» — لم يكن قد حُدِّث في f7eb5f1 خلافاً لملاحظة الحالة (git show --stat f7eb5f1 لا يتضمن الملف).
+- **النتائج (Linux PG16 فوق f7eb5f1، العلم مُشغَّل):** النقية `584 passed, 506 deselected in 6.65s` · `-m tools` `4 passed` · static_gate `STATIC GATE PASSED — 0 violations` · lint-imports `Contracts: 8 kept, 0 broken` · ruff `Found 302 errors` (بلا زيادة) · mypy `Found 103 errors` (بلا زيادة).
+- **الحزمة -m db الكاملة (العلم مُشغَّل، tenants=0):** `502 passed, 588 deselected in 282.94s (0:04:42)` — 0 failed، 0 errors.
+- **F-P4-10 (مفتوح، انحدار سلوكي لا تكشفه الحزمة):** مع التشغيل، أي رسالة فيها كلمة «مقاس/مقاسي» تُحوَّل لمسار المقاس قبل الموجِّه، فطلب بحث يذكر مقاساً يفقد قائمة المنتجات ويُحوَّل لموظف. فحص طرفي مؤقت (process_turn + FakeLlmProvider + قواعد الـVerifier، نفس البذرة: منتج «منتج قميص قطني»، لا منتج معروض سابقاً):
+  - `'منتج قميص مقاس L'`: مُطفأ ⇒ `product_list` (router_calls=1) · مُشغَّل ⇒ `size_no_product` / `handoff_notice` (router_calls=0)
+  - `'عندكم القميص مقاس L؟'`: مُطفأ ⇒ `handoff` (router_calls=1) · مُشغَّل ⇒ `size_no_product` / `handoff_notice` (router_calls=0)
+  - `'ابي منتج قميص مقاسي 42'`: مُطفأ ⇒ `product_list` (router_calls=1) · مُشغَّل ⇒ `size_no_product` / `handoff_notice` (router_calls=0)
+  السبب: قاعدة الكشف في `size.is_size_question` تقبل كلمة المقاس وحدها. لا اختبار قائم يغطي «بحث منتج يذكر مقاساً». **توصية المعماري:** عدم النشر مُشغَّلاً قبل تضييق القاعدة (مثلاً: مسار المقاس فقط عند وجود طول/وزن/قياس جسم، أو كلمة مقاس مع منتج معروض واحد وبلا تسمية مقاس صريحة؛ وإلا يُترك للموجِّه) + اختبار طرفي يثبت بقاء بحث المنتج.
+- **التطابق على جهاز المالك:** config.py `37ac37a6a9123bc5` · test_size_turn.py `c1387958452500dc` · test_size_turn_db.py `305e2fb379d5a480`.
+- **UNVERIFIED_ENV_LIMIT:** لم تُشغَّل على PG18 لديك. المتوقع: 493 passed + 9 errors (test_migrate، F-P4-02).
