@@ -108,7 +108,9 @@ def test_flag_on_answers_with_the_verified_size(ctx):
 def test_flag_on_missing_inputs_asks_without_handoff(ctx):
     dsn, conv = ctx
     _show(conv, ["P-1"])
-    outcome, payload = _turn(dsn, conv, "كم مقاسي؟", enabled=True)
+    # F-P4-10: a size question now needs a plausible measurement; height alone
+    # (no weight) reaches the advisor, which asks for the missing input.
+    outcome, payload = _turn(dsn, conv, "طولي 170 ايش مقاسي", enabled=True)
     assert outcome == "size_need_inputs"
     assert payload["template"] == "size_need_inputs"
 
@@ -146,8 +148,6 @@ def test_size_turn_never_calls_the_model(ctx):
     outcome, _payload = _turn(dsn, conv, "طولي 170 ووزني 65 ايش مقاسي", enabled=True, router=router)
     assert outcome == "size_recommend"
     assert router.provider.calls == []
-    # NOTE (F-P4-09, open): a ROUTED turn currently crashes in turn._account
-    # (RouteResult.usage is an LlmJsonResult, read as LlmUsage) - reproduced on
-    # 50bdae0 without this task. The "non-size still routes" half of this test
-    # belongs to the F-P4-09 fix, not here.
+    # F-P4-09 (fixed in f7eb5f1): the "non-size message still routes" half of
+    # this check lives in test_router_turn_db.py.
 

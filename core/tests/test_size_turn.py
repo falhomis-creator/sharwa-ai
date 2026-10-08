@@ -19,14 +19,21 @@ D = Decimal
 
 # ---- the code rule ----------------------------------------------------------------
 
+# F-P4-10 (owner decision 2026-10-09): only a PLAUSIBLE body measurement makes a
+# size question; the size word alone no longer does (it hijacked product search).
 @pytest.mark.parametrize("text", [
-    "كم مقاسي؟", "ايش المقاس المناسب", "what size", "طولي 175 ووزني 80", "صدري 100 سم", "1 متر و75",
+    "طولي 175 ووزني 80", "صدري 100 سم", "1 متر و75", "وزني 70", "طولي 170 ايش مقاسي",
 ])
 def test_size_questions_are_detected(text):
     assert size.is_size_question((text,))
 
 
-@pytest.mark.parametrize("text", ["مرحبا", "كم سعر القميص", "ابي اطلب", "رقم طلبي 12345"])
+@pytest.mark.parametrize("text", [
+    "مرحبا", "كم سعر القميص", "ابي اطلب", "رقم طلبي 12345",
+    "كم مقاسي؟", "ايش المقاس المناسب", "what size",          # size word, no measurement
+    "منتج قميص مقاس L", "ابي منتج قميص مقاسي 42",            # product searches naming a size
+    "وزني 2 كيلو", "طولي 50",                                 # implausible measurements
+])
 def test_other_messages_are_not_size_questions(text):
     assert not size.is_size_question((text,))
 
