@@ -1043,15 +1043,26 @@ def count_rows_for_tenant(dsn: str, *, table: str, tenant_id: uuid.UUID) -> int:
 
 def seed_catalog_product(
     dsn: str, *, tenant_id: uuid.UUID, platform_product_id: str, category: str | None,
+    title: str = "size test product",
 ) -> None:
     """P4 Task 10: one catalog product (the category link a category-scoped
-    size chart is found through)."""
+    size chart is found through). F-P4-09: `title` lets a turn test find it."""
     with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute(
             "INSERT INTO catalog_products (tenant_id, platform_product_id, title, category, source_version) "
-            "VALUES (%s, %s, 'size test product', %s, 1)",
-            (tenant_id, platform_product_id, category),
+            "VALUES (%s, %s, %s, %s, 1)",
+            (tenant_id, platform_product_id, title, category),
         )
+
+
+def fetch_llm_calls(dsn: str, tenant_id: uuid.UUID) -> list[tuple[str, str, str]]:
+    """F-P4-09: (purpose, provider, status) of a tenant's accounted LLM calls."""
+    with psycopg.connect(dsn) as conn:
+        rows = conn.execute(
+            "SELECT purpose, provider, status FROM llm_calls WHERE tenant_id = %s ORDER BY id",
+            (tenant_id,),
+        ).fetchall()
+    return [(str(r[0]), str(r[1]), str(r[2])) for r in rows]
 
 
 def seed_catalog_variant(
@@ -1160,6 +1171,7 @@ __all__: Sequence[str] = (
     "insert_tenant_returning_id",
     "count_rows_for_tenant",
     "seed_catalog_product",
+    "fetch_llm_calls",
     "seed_catalog_variant",
     "seed_size_chart",
     "delete_gazetteer_row",
