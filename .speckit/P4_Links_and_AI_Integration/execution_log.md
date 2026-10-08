@@ -716,3 +716,16 @@ UNVERIFIED: اختبارات Django (`python manage.py test products.test_sharwa
 - **F-P4-08 (مفتوح، مهمة منفصلة لاحقة):** repos_summary.update_summary يمرّر 3 معاملات لـ4 علامات وبترتيب خاطئ ⇒ ProgrammingError في كل استدعاء ⇒ ملخّصات المحادثات لم تُحفظ قط (أثبته المعماري على PG16).
 - **القرار:** منتج متعدد المتغيّرات ⇒ no_variant (قالب stock_unavailable القائم)؛ اختيار المقاس/اللون للانتظار تحسين لاحق.
 - **UNVERIFIED_ENV_LIMIT:** ruff/mypy (لا شبكة) — المرجع: المعماري 302/103.
+
+## F-P4-08 — إصلاح update_summary (المعماري منفّذاً، 2026-10-08)
+- **السبب (مُثبَت):** `repos_summary.update_summary` مرّر 3 معاملات لـ4 علامات وبترتيب خاطئ `(tenant_id, Jsonb(slots), conversation_id)` ⇒ `psycopg.ProgrammingError: the query has 4 placeholders but 3 parameters were passed` في كل استدعاء ⇒ ملخّصات المحادثات لم تُحفظ قط. لم يكن هناك اختبار db يغطي الدالة.
+- **الإصلاح (سطر واحد):** `(summary, Jsonb(slots), tenant_id, conversation_id)`.
+- **اختبار جديد** `core/tests/test_summary_db.py` (4 اختبارات db، RLS): حفظ النص + دمج slots مع حفظ ذاكرة المنتج · ملخّص ثانٍ يستبدل النص وsummary_seq · مستأجر آخر لا يكتب · مفتاح slot مجهول يُرفض قبل أي كتابة.
+- **الفاشل أولاً (على الكود قبل الإصلاح، Linux PG16):** `3 failed, 1 passed` — الثلاثة بـ `ProgrammingError: the query has 4 placeholders but 3 parameters were passed` (الرابع: رفض المفتاح المجهول يسبق الكتابة).
+- **بعد الإصلاح:** `4 passed in 1.05s`.
+- **التحوّلات (استعادة cp+cmp بعد كلٍّ):** S1 تبديل tenant_id/conversation_id ⇒ `2 failed, 2 passed` · S2 نص الملخّص = tenant_id ⇒ `2 failed, 2 passed` · S3 استبدال slots بدل الدمج ⇒ `1 failed, 3 passed` (test_update_summary_stores_the_text_and_merges_slots) · S0 الخطأ الأصلي ⇒ `3 failed, 1 passed`. كلها RESTORED.
+- **البوابات (Linux PG16 فوق 9c6b2f9):** النقية `558 passed` · `-m tools` `4 passed` · static_gate `STATIC GATE PASSED — 0 violations` · lint-imports `Contracts: 8 kept, 0 broken` · ruff `Found 302 errors` (بلا زيادة) · mypy `Found 103 errors` (بلا زيادة).
+- **الحزمة -m db الكاملة (Linux PG16، قاعدة نظيفة tenants=0):** `491 passed, 562 deselected in 304.79s (0:05:04)` — 0 failed، 0 errors (= 487 + 4).
+- **UNVERIFIED_ENV_LIMIT:** لم تُشغَّل على PG18 لديك (قاعدة 5433 غير قابلة للوصول من بيئة المعماري). المتوقع هناك: 482 passed + 9 errors في test_migrate (F-P4-02).
+- **التطابق على جهاز المالك:** `repos_summary.py` = `9fa468924d2cc72e` · `test_summary_db.py` = `31b9e6b4569343c6` — مطابقان بايتياً لما اختُبر.
+- **أثر تشغيلي:** بعد الإيداع يبدأ عامل الملخّصات بحفظ الملخّصات فعلاً للمرة الأولى (كان يفشل بصمت في كل محاولة).

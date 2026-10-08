@@ -121,5 +121,5 @@ def update_summary(
         "UPDATE conversations SET summary = %s, "
         "slots = COALESCE(slots, '{}'::jsonb) || %s::jsonb "
         "WHERE tenant_id = %s AND id = %s",
-        (tenant_id, Jsonb(slots), conversation_id),
+        (summary, Jsonb(slots), tenant_id, conversation_id),
     )
