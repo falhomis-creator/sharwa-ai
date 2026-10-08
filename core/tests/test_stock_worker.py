@@ -23,7 +23,10 @@ def test_join_waitlist_registers_once(monkeypatch):
     customer_id = uuid.uuid4()
     inserts: list[dict] = []
     monkeypatch.setattr(stock.repos_outbox, "customer_id_for_conversation", lambda conn, cid: customer_id)
-    monkeypatch.setattr(stock.repos_stock, "read_conversation_slots", lambda conn, **kw: {"last_shown_product_ids": ["VAR-X"]})
+    # F-P4-07 (owner decision, Task 18b-2a): the slot holds PRODUCT ids; the
+    # coordinator resolves the product's single variant.
+    monkeypatch.setattr(stock.repos_stock, "read_conversation_slots", lambda conn, **kw: {"last_shown_product_ids": ["PROD-X"]})
+    monkeypatch.setattr(stock.repos_stock, "variant_ids_for_product", lambda conn, **kw: ["VAR-X"])
     monkeypatch.setattr(stock.repos_stock, "has_active_waitlist", lambda conn, **kw: False)
     monkeypatch.setattr(stock.repos_stock, "count_active_waitlists", lambda conn, **kw: 0)
     monkeypatch.setattr(
@@ -53,7 +56,10 @@ def test_join_waitlist_duplicate_rejected(monkeypatch):
     customer_id = uuid.uuid4()
     inserts: list[dict] = []
     monkeypatch.setattr(stock.repos_outbox, "customer_id_for_conversation", lambda conn, cid: customer_id)
-    monkeypatch.setattr(stock.repos_stock, "read_conversation_slots", lambda conn, **kw: {"last_shown_product_ids": ["VAR-X"]})
+    # F-P4-07 (owner decision, Task 18b-2a): the slot holds PRODUCT ids; the
+    # coordinator resolves the product's single variant.
+    monkeypatch.setattr(stock.repos_stock, "read_conversation_slots", lambda conn, **kw: {"last_shown_product_ids": ["PROD-X"]})
+    monkeypatch.setattr(stock.repos_stock, "variant_ids_for_product", lambda conn, **kw: ["VAR-X"])
     monkeypatch.setattr(stock.repos_stock, "has_active_waitlist", lambda conn, **kw: True)
     monkeypatch.setattr(
         stock.repos_stock, "insert_waitlist_entry",
@@ -137,8 +143,9 @@ def test_duplicate_metric_delta_exactly_one(monkeypatch):
     monkeypatch.setattr(stock.repos_outbox, "customer_id_for_conversation", lambda conn, cid: customer_id)
     monkeypatch.setattr(
         stock.repos_stock, "read_conversation_slots",
-        lambda conn, **kw: {"last_shown_product_ids": ["VAR-X"]},
+        lambda conn, **kw: {"last_shown_product_ids": ["PROD-X"]},
     )
+    monkeypatch.setattr(stock.repos_stock, "variant_ids_for_product", lambda conn, **kw: ["VAR-X"])
     monkeypatch.setattr(stock.repos_stock, "count_active_waitlists", lambda conn, **kw: 0)
     monkeypatch.setattr(stock.repos_stock, "insert_waitlist_entry", lambda conn, **kw: uuid.uuid4())
     monkeypatch.setattr(stock.repos_consent, "record_waitlist_join", lambda conn, **kw: "noop")

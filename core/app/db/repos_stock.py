@@ -24,6 +24,22 @@ def read_conversation_slots(conn: psycopg.Connection, *, conversation_id: uuid.U
     return row[0]
 
 
+def variant_ids_for_product(
+    conn: psycopg.Connection, *, tenant_id: uuid.UUID, platform_product_id: str,
+) -> list[str]:
+    """F-P4-07 (Task 18b-2a): the platform variant ids of ONE active product,
+    sorted. The waitlist coordinator joins only when this is exactly one variant;
+    the slot carries PRODUCT ids, never variant ids."""
+    rows = conn.execute(
+        "SELECT v.platform_variant_id FROM catalog_variants v "
+        "JOIN catalog_products p ON p.id = v.product_id "
+        "WHERE p.tenant_id = %s AND p.platform_product_id = %s AND p.active = true "
+        "ORDER BY v.platform_variant_id",
+        (tenant_id, platform_product_id),
+    ).fetchall()
+    return [str(r[0]) for r in rows]
+
+
 def has_active_waitlist(
     conn: psycopg.Connection, *, tenant_id: uuid.UUID, customer_id: uuid.UUID,
     platform_variant_id: str,

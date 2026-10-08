@@ -1054,6 +1054,19 @@ def seed_catalog_product(
         )
 
 
+def seed_catalog_variant(
+    dsn: str, *, tenant_id: uuid.UUID, platform_product_id: str, platform_variant_id: str,
+) -> None:
+    """P4 Task 18b-2a: one variant under an already-seeded catalog product."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO catalog_variants (tenant_id, product_id, platform_variant_id, source_version) "
+            "SELECT %s, id, %s, 1 FROM catalog_products "
+            "WHERE tenant_id = %s AND platform_product_id = %s",
+            (tenant_id, platform_variant_id, tenant_id, platform_product_id),
+        )
+
+
 def seed_size_chart(
     dsn: str, *, tenant_id: uuid.UUID, scope_type: str, scope_ref: str,
     rows: list[dict[str, object]], fit_type: str = "regular", stretch_pct: str = "0",
@@ -1147,6 +1160,7 @@ __all__: Sequence[str] = (
     "insert_tenant_returning_id",
     "count_rows_for_tenant",
     "seed_catalog_product",
+    "seed_catalog_variant",
     "seed_size_chart",
     "delete_gazetteer_row",
     "seed_gazetteer_governorate",

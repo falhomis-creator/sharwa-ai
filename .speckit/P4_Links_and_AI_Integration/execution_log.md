@@ -696,3 +696,23 @@ UNVERIFIED: اختبارات Django (`python manage.py test products.test_sharwa
 - **UNVERIFIED_ENV_LIMIT:** ruff/mypy (لا شبكة) — المرجع: المعماري 303/103 (بلا زيادة).
 
 - **تصحيح المعماري:** F-P4-06 ليس Finding؛ التوقّع «2 failed» في Q5 قيس قبل إضافة اختبار النصّ الحرفي (سدّ Q7)، والنتيجة الصحيحة 3 failed كما سجّلها المنفّذ. لا تغيير في الكود.
+
+## T18ب-2a — ذاكرة المنتج المعروض (F-P4-07) (2026-10-08)
+- **القاعدة:** الفرع `p4-links-ai` · HEAD `309971f` · الحالة نظيفة · تجزئات الملفات الثمانية في HEAD والمسلَّمات العشرة مطابقة.
+- **(2) التطبيق:** M ×8 + ?? ×2 (`test_shown_products.py` · `test_shown_products_db.py`). diff --stat: repos_stock 16 · repos_summary 19 · testsupport 14 · join_waitlist 24 · stock 20 · turn 15 · test_p3_consent_cli_db 10 · test_stock_worker 13 ⇒ **111 إضافة، 20 حذف** (مطابق للمعماري).
+- **(3) نظافة القاعدة:** `tenants 0`.
+- **(4) المستهدفة (نقية + db):** `24 passed in 2.67s`.
+- **(5) البوابات (بلا قاعدة):** الحزمة النقية **558 passed, 491 deselected in 6.76s** (= 549 + 9) · `-m tools` **4 passed, 1045 deselected** · static_gate **STATIC GATE PASSED — 0 violations.** · lint-imports **Contracts: 8 kept, 0 broken.**
+- **(8) الحزمة -m db:** `EXIT=1` · **478 passed, 562 deselected, 9 errors in 423.57s (0:07:03)** · `9 ERROR tests/test_migrate.py` (F-P4-02) · 0 FAILED (= 473 + 5؛ مرجع Linux: 487). ملاحظة بيئة: الإطلاق الأول بـ`nohup … &` من PowerShell→Git Bash لم يبدأ (لا ملف سجل)؛ أُعيد بنفس أمر pytest ونفس ملفي log/done كمهمة مقدّمة للأداة بإذن المالك.
+- **(10) التحوّلات (استعادة cp+cmp بعد كل منها):**
+  - W1 (`!= 1` ⇒ `== 0` في stock.py) ⇒ `2 failed, 22 passed` (test_multi_variant_product_never_guesses · test_shown_multi_variant_product_does_not_join) ⇒ RESTORED.
+  - W2 (joined بـplatform_variant_id في join_waitlist.py) ⇒ `7 failed, 17 passed` (test_tool_picks_the_last_shown_product · test_single_variant_product_joins_with_that_variant · test_shown_single_variant_product_joins_the_waitlist_end_to_end · test_join_waitlist_registers_once · test_join_waitlist_duplicate_rejected · test_duplicate_metric_delta_exactly_one · test_rejoin_after_stop_restores_the_availability_notice) ⇒ RESTORED.
+  - W3 (التسجيل بلا outcome.ok في turn.py) ⇒ `1 failed, 23 passed` (test_shown_products_are_recorded_only_after_the_reply_is_accepted) ⇒ RESTORED.
+  - W4 (بلا سقف 3 في repos_summary.py) ⇒ `1 failed, 23 passed` (test_record_shown_products_merges_and_caps_at_three) ⇒ RESTORED.
+  - W5 (بلا `p.active = true` في repos_stock.py) ⇒ `1 failed, 23 passed` (test_variant_ids_for_product_under_rls) ⇒ RESTORED.
+  - W6 (كل البطاقات بدل أول 3 في turn.py) ⇒ `1 failed, 23 passed` (test_product_list_action_carries_the_three_shown_product_ids) ⇒ RESTORED.
+  - بعد الستة: **24 passed** · sha256 `b10410761ee2027b` · `e1c98edf7a9c151f` · `cbd307a4ef57a1d6` · `b96d61c0b6db78ef` · `0aad11d615577437` (مطابقة للمسلَّم).
+- **F-P4-07 (مُغلق هنا):** slots.last_shown_product_ids لم يكتبه أي كود إنتاج، وقُرئ كـvariant؛ الآن يُكتب platform_product_id لأول 3 بطاقات بعد قبول الـVerifier، ويحلّ المنسّق المنتج إلى متغيّره الوحيد. قرار المالك 2026-10-08 أجاز تعديل test_stock_worker.py (3) وtest_p3_consent_cli_db.py (1) — القيمة فقط، التوقعات كما هي.
+- **F-P4-08 (مفتوح، مهمة منفصلة لاحقة):** repos_summary.update_summary يمرّر 3 معاملات لـ4 علامات وبترتيب خاطئ ⇒ ProgrammingError في كل استدعاء ⇒ ملخّصات المحادثات لم تُحفظ قط (أثبته المعماري على PG16).
+- **القرار:** منتج متعدد المتغيّرات ⇒ no_variant (قالب stock_unavailable القائم)؛ اختيار المقاس/اللون للانتظار تحسين لاحق.
+- **UNVERIFIED_ENV_LIMIT:** ruff/mypy (لا شبكة) — المرجع: المعماري 302/103.

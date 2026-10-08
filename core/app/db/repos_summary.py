@@ -33,6 +33,25 @@ def validate_slots(slots: dict[str, Any]) -> None:
         raise ValueError(f"slots has non-whitelisted keys: {sorted(disallowed)}")
 
 
+MAX_SHOWN_PRODUCTS = 3
+
+
+def record_shown_products(
+    conn: psycopg.Connection, *, tenant_id: uuid.UUID, conversation_id: uuid.UUID,
+    platform_product_ids: list[str],
+) -> None:
+    """F-P4-07 (Task 18b-2a): the turn records the platform_product_id of the
+    cards it just showed (display order, <= 3) - written by CODE, never by the
+    model. Merges into slots like update_summary (other keys are preserved)."""
+    slots = {"last_shown_product_ids": [str(p) for p in platform_product_ids[:MAX_SHOWN_PRODUCTS]]}
+    validate_slots(slots)
+    conn.execute(
+        "UPDATE conversations SET slots = COALESCE(slots, '{}'::jsonb) || %s::jsonb "
+        "WHERE tenant_id = %s AND id = %s",
+        (Jsonb(slots), tenant_id, conversation_id),
+    )
+
+
 def list_conversations_needing_summary(
     conn: psycopg.Connection, *, limit: int, trigger_messages: int,
     min_between: int, max_per_day: int,

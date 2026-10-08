@@ -52,7 +52,8 @@ def join_waitlist(
 ) -> join_waitlist_tool.JoinWaitlistDecision:
     """The join flow (§5.1), run on the CALLER's open connection (inside the turn
     write-phase transaction, like address.resolve_and_persist): read slots
-    (last_shown_product_ids) -> pure tool extracts the variant -> read-before-write
+    (last_shown_product_ids) -> pure tool picks the product -> its single variant
+    (F-P4-07) -> read-before-write
     dedupe + insert. A duplicate is recorded as a rejection, never a second live
     row (P2.3 §3); the per-customer ceiling is enforced, not just written (§7)."""
     customer_id = repos_outbox.customer_id_for_conversation(conn, conversation_id)
@@ -65,12 +66,23 @@ def join_waitlist(
         order_ref="", phone_candidates=(), path="other_number",
         last_shown_product_ids=last_shown,
     )
-    decision = join_waitlist_tool.run(ctx)
-    if decision.kind != "joined" or decision.platform_variant_id is None or customer_id is None:
+    picked = join_waitlist_tool.run(ctx)
+    if picked.kind != "joined" or picked.platform_product_id is None or customer_id is None:
+        metrics.waitlist_entries_total.labels("no_variant").inc()
+        return join_waitlist_tool.JoinWaitlistDecision(kind="no_variant")
+    # F-P4-07: the slot holds PRODUCT ids; a waitlist entry needs ONE variant.
+    # Zero or several variants => no_variant (never guess which size/colour).
+    variants = repos_stock.variant_ids_for_product(
+        conn, tenant_id=tenant_id, platform_product_id=picked.platform_product_id,
+    )
+    if len(variants) != 1:
         metrics.waitlist_entries_total.labels("no_variant").inc()
         return join_waitlist_tool.JoinWaitlistDecision(kind="no_variant")
 
-    variant = decision.platform_variant_id
+    variant = variants[0]
+    decision = join_waitlist_tool.JoinWaitlistDecision(
+        kind="joined", platform_variant_id=variant, platform_product_id=picked.platform_product_id,
+    )
     if repos_stock.has_active_waitlist(
         conn, tenant_id=tenant_id, customer_id=customer_id, platform_variant_id=variant,
     ):

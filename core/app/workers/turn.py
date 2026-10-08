@@ -23,6 +23,7 @@ from app import ws_publish
 from app.db import repos_catalog
 from app.db import repos_inbox
 from app.db import repos_outbox
+from app.db import repos_summary
 from app.obs import metrics
 from app.workers import address
 from app.workers import compose
@@ -148,6 +149,8 @@ class _Action:
     handoff_reason: str | None
     kind: str | None
     outcome: str
+    # F-P4-07: the platform_product_id of the cards a product_list reply shows.
+    shown_product_ids: tuple[str, ...] = ()
 
 
 def build_router(settings: WorkerSettings) -> LlmRouterHandle:
@@ -249,7 +252,11 @@ def _resolve_action(
             conn, tenant_id=plan.tenant_id, query=query, query_vector=query_vector,
         ) if query else []
         if cards:
-            return _Action("product_list", compose.compose_product_list(cards), False, None, "product_list", "product_list")
+            shown = tuple(str(c["platform_product_id"]) for c in cards[:repos_summary.MAX_SHOWN_PRODUCTS])
+            return _Action(
+                "product_list", compose.compose_product_list(cards), False, None,
+                "product_list", "product_list", shown_product_ids=shown,
+            )
         return _deterministic_action(plan.decision)
     if intent == "policy_question":
         question = router_result.decision.query if router_result is not None else ""
@@ -476,6 +483,12 @@ def _write_phase(
         conn, conversation_id=conv.id, last_processed_seq=conv.last_inbound_seq,
     )
     metrics.turn_processed_total.labels(action.outcome).inc()
+    if outcome.ok and action.shown_product_ids:
+        # F-P4-07: only cards the customer actually received become "shown".
+        repos_summary.record_shown_products(
+            conn, tenant_id=plan.tenant_id, conversation_id=conv.id,
+            platform_product_ids=list(action.shown_product_ids),
+        )
     if outcome.ok:
         metrics.outbox_written_total.labels("service").inc()
         if action.kind is not None:
