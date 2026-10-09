@@ -1,0 +1,65 @@
+# ops/proxy/Caddyfile - P4 Task 17: the public TLS front door of sharwa_ai.
+#
+# Installed on the VPS HOST (not in docker-compose): Caddy obtains and renews
+# the Let's Encrypt certificate for the domain by itself (ports 80 + 443 open,
+# an A/AAAA record pointing at the VPS). The api container stays bound to
+# 127.0.0.1 only (docker-compose.yml `api.ports`); this file is the only way
+# in from the internet. Guide: docs/VPS_DEPLOYMENT_PLAYBOOK.md section 12.
+#
+# Allow-list, never deny-list: only the paths below reach the api; every other
+# path (including /metrics, /readyz, /docs, /redoc, /openapi.json) gets 404 here.
+#
+# Placeholders (environment of the caddy service, with safe defaults):
+#   SHARWA_API_DOMAIN  public host name        (default ai.sharwaah.com)
+#   SHARWA_API_UPSTREAM  loopback api address  (default 127.0.0.1:8100 = API_HOST_PORT)
+#
+# Optional: a Let's Encrypt contact e-mail - add a global block at the top:
+#   { email you@example.com }
+
+{$SHARWA_API_DOMAIN:ai.sharwaah.com} {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+
+	# Platform webhooks (Sharwa -> engine). The api enforces its own 256 KiB
+	# limit (PLATFORM_WEBHOOK_BODY_MAX_BYTES) and HMAC; the proxy caps a bit
+	# above it so the api still answers with its own error code.
+	@webhooks path /webhooks/platform/catalog /webhooks/platform/cart /webhooks/platform/gift-cart
+	handle @webhooks {
+		request_body {
+			max_size 512KB
+		}
+		reverse_proxy {$SHARWA_API_UPSTREAM:127.0.0.1:8100}
+	}
+
+	# The console (static, same origin), the REST API, the live WebSocket
+	# (/v1/ws - Caddy proxies the Upgrade itself) and the liveness probe.
+	redir /console /console/ 308
+	@app path /console/* /v1/* /healthz
+	handle @app {
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy {$SHARWA_API_UPSTREAM:127.0.0.1:8100}
+	}
+
+	handle {
+		respond 404
+	}
+
+	# JSON access log. Caddy never logs Authorization/Cookie values; the
+	# one-time WebSocket ticket is stripped from the logged query string too.
+	log {
+		output file /var/log/caddy/sharwa-api.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+		format filter {
+			request>uri query {
+				delete ticket
+			}
+			wrap json
+		}
+	}
+}

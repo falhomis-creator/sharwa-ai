@@ -17,7 +17,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app.llm.breaker import BreakerState, CircuitBreaker
-from app.llm.port import LlmJsonResult, LlmProvider, LlmProviderError
+from app.llm.port import LlmJsonResult, LlmProvider, LlmProviderError, LlmUsage
 from app.obs import metrics
 from app.text.redact import mask_phones  # noqa: F401 - re-exported for H21 back-compat (P1.6 C6)
 
@@ -87,7 +87,9 @@ def parse_router_json(data: Any) -> RouterDecision:
 class RouteResult:
     status: str  # ok | error | timeout | breaker_open
     decision: RouterDecision
-    usage: LlmJsonResult | None
+    # F-P4-09: the provider's LlmUsage itself (what turn._account reads), never
+    # the whole LlmJsonResult wrapper - that mismatch crashed every routed turn.
+    usage: LlmUsage | None
 
 
 def _state_int(breaker: CircuitBreaker) -> int:
@@ -148,4 +150,4 @@ def run_router(
         metrics.router_low_confidence_total.inc()
         decision = _OTHER
     metrics.router_intents_total.labels(decision.intent).inc()
-    return RouteResult(status="ok", decision=decision, usage=result)
+    return RouteResult(status="ok", decision=decision, usage=result.usage)

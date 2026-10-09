@@ -36,3 +36,6 @@ Thumbs.db
 
 # P3.5 local console demo secrets/keys (dev only)
 .dev-console/
+
+# Redis RDB snapshot (never commit - a local redis-server dump when run from the repo)
+dump.rdb

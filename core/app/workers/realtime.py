@@ -185,7 +185,11 @@ class RealtimeWorker:
         )
         if self.settings.commerce_base_url:
             self.commerce_port = SharwaCommerceAdapter(
-                CommerceClient(self.settings.commerce_base_url, timeout_s=self.settings.commerce_timeout_s)
+                CommerceClient(
+                    self.settings.commerce_base_url,
+                    secret=self.settings.commerce_api_secret,
+                    timeout_s=self.settings.commerce_timeout_s,
+                )
             )
         else:
             obs_logging.log_event(

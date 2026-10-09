@@ -55,6 +55,40 @@ TEMPLATES: dict[str, str] = {
     "stock_cancelled": "تم إلغاء تسجيلك من قائمة الانتظار.",
     "stock_already_waiting": "أنت مسجّل مسبقاً في قائمة الانتظار لهذا المنتج. سنُشعرك فور توفره.",
     "stock_unavailable": "هذا المنتج غير متوفر حالياً. هل تريد أن أسجّلك في قائمة الانتظار ليصل لك تنبيه فور توفره؟",
+    # P4 Task 14 gift baskets. Texts APPROVED by the owner (OQ-P4-24,
+    # 2026-10-09) as the production baseline. The feature stays dark
+    # (GIFT_ENABLED=false) until the platform's /checkout/gift/{id} route exists.
+    # No price or total ever (the platform prices the basket at checkout, §5.2).
+    "gift_need_budget": (
+        "يسعدني أساعدك في اختيار هدية 🎁 أرسل لي كلمة «هدية» مع ميزانيتك، "
+        "مثال: هدية بـ 20000 ريال."
+    ),
+    "gift_no_basket": (
+        "لم أجد مجموعة هدايا مناسبة ضمن هذه الميزانية حالياً، وقد حوّلت محادثتك "
+        "لأحد ممثلي خدمة العملاء ليساعدك في الاختيار. 🎁"
+    ),
+    "gift_currency": (
+        "لأقترح هدية بدقة أحتاج الميزانية بعملة المتجر، وقد حوّلت محادثتك لأحد "
+        "ممثلي خدمة العملاء ليساعدك. 🎁"
+    ),
+    # P4 Task 18b-1 size advice (SizeAdvisor §5.1). PROPOSED texts (OQ-P4-21) kept
+    # VERBATIM until the owner approves or edits them. Contract (OQ-P4-15/16): a
+    # size label is ALWAYS written right after the word «مقاس» (so the Verifier
+    # captures it) and filled from the advice only (compose_size_reply); no
+    # size-ish words (صغير/وسط/كبير/small/medium/large) anywhere; one line each.
+    "size_recommend": "المقاس المناسب لك: مقاس «size» ✅",
+    "size_recommend_alt": "المقاس المناسب لك: مقاس «size»، ويمكنك أيضاً تجربة مقاس «alt». ✅",
+    "size_nearest_out_of_range": (
+        "أقرب مقاس لك في جدول هذا المنتج هو مقاس «size»، لكن قياساتك خارج نطاق الجدول، "
+        "لذا قد لا يكون مناسباً تماماً."
+    ),
+    "size_need_inputs": "لأقترح عليك المقاس المناسب، أرسل لي طولك بالسنتيمتر ووزنك بالكيلو من فضلك. 📏",
+    "size_no_chart": (
+        "لا يتوفر جدول مقاسات لهذا المنتج حالياً. سأحوّل محادثتك لأحد ممثلي خدمة العملاء لمساعدتك."
+    ),
+    "size_no_fit": (
+        "لا يوجد في جدول هذا المنتج مقاس يناسب قياساتك. سأحوّل محادثتك لأحد ممثلي خدمة العملاء لمساعدتك."
+    ),
 }
 
 

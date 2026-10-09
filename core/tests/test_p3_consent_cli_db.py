@@ -57,10 +57,18 @@ def test_rejoin_after_stop_restores_the_availability_notice(c_ctx):
 
     # ...then explicitly joins the waitlist through the REAL coordinator: the
     # conversation carries the last-shown product slot the pure tool reads.
+    # F-P4-07 (owner decision, Task 18b-2a): the slot holds the PRODUCT id; the
+    # coordinator resolves its single variant VAR-REJOIN.
+    db_testsupport.seed_catalog_product(
+        dsn, tenant_id=tid, platform_product_id="PROD-REJOIN", category=None,
+    )
+    db_testsupport.seed_catalog_variant(
+        dsn, tenant_id=tid, platform_product_id="PROD-REJOIN", platform_variant_id="VAR-REJOIN",
+    )
     db_testsupport.exec_sql_autocommit(
         dsn,
         "UPDATE conversations SET slots = slots || "
-        "jsonb_build_object('last_shown_product_ids', jsonb_build_array('VAR-REJOIN')) "
+        "jsonb_build_object('last_shown_product_ids', jsonb_build_array('PROD-REJOIN')) "
         "WHERE id = '%s'" % conv,
     )
     settings = SimpleNamespace(stock_max_waitlist_per_customer=10)

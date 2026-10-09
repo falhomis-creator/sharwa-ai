@@ -301,6 +301,13 @@ services:
       GATEWAY_API_KEY: ${SHARWA_AI_GATEWAY_API_KEY:?SHARWA_AI_GATEWAY_API_KEY is required (see .env)}
       METRICS_TOKEN: ${METRICS_TOKEN:?METRICS_TOKEN is required - the api service refuses to start without it (see .env)}
       SSO_LOGIN_URL: ${SSO_LOGIN_URL:?SSO_LOGIN_URL is required (see .env)}
+      # P4 Task 17 (F-P4-11): passed through so the public domain works. Empty
+      # (the default) = exactly today's behaviour. CONSOLE_ALLOWED_ORIGINS is the
+      # console's own public origin (https://ai.sharwaah.com): the /v1/ws handshake
+      # checks the browser Origin against it (api/ws.py). CONSOLE_SSO_PLATFORM_ORIGINS
+      # = the Sharwa store origins allowed to hand the console a token (Task 6b).
+      CONSOLE_ALLOWED_ORIGINS: ${CONSOLE_ALLOWED_ORIGINS:-}
+      CONSOLE_SSO_PLATFORM_ORIGINS: ${CONSOLE_SSO_PLATFORM_ORIGINS:-}
       # P1.4 catalog webhook HMAC secret (app/config.py _required - empty refuses boot, H5).
       PLATFORM_WEBHOOK_SECRET: ${PLATFORM_WEBHOOK_SECRET:?PLATFORM_WEBHOOK_SECRET is required (see .env)}
     networks: [data, app]                  # data: postgres/pgbouncer/redis-cache. app: gateway + outbound (JWKS_URL)
@@ -380,6 +387,15 @@ services:
       # DeepSeek exposes no embeddings endpoint; `local` is the deterministic
       # no-network provider (production-safe; `fake` still refuses to boot).
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
+      # P4 Task 15: semantic search. EMBEDDING_PROVIDER=openai needs OPENAI_API_KEY
+      # (the worker refuses to boot without it, H5); the default stays `local`
+      # (dark by default). Switching re-embeds the catalog automatically (F-P4-13).
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      # P4 Task 14: gift baskets with a checkout link - texts approved (OQ-P4-24);
+      # OFF until the platform's /checkout/gift/{id} route exists.
+      GIFT_ENABLED: ${GIFT_ENABLED:-false}
+      GIFT_CHECKOUT_BASE_URL: ${GIFT_CHECKOUT_BASE_URL:-https://sharwaah.com/checkout/gift/}
       MARKETING_FOOTER_AR: ${MARKETING_FOOTER_AR:-}
       MARKETING_MIN_WARMUP_DAYS: ${MARKETING_MIN_WARMUP_DAYS:-3}
     networks: [data, app]                  # data: pg/pgbouncer/redis-durable/redis-cache. app: prometheus scrape target

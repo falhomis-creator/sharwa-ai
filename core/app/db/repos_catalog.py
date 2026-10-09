@@ -159,14 +159,37 @@ def _vector_literal(embedding: list[float]) -> str:
     return "[" + ",".join(repr(float(x)) for x in embedding) + "]"
 
 
+# F-P4-15: the vector source's relevance floor (cosine distance, 0 = same
+# direction, 1 = unrelated, 2 = opposite). Without it the vector list always
+# returns up to SEARCH_CANDIDATE_K products, so a query for something the store
+# does not sell ("a pencil") came back with 8 unrelated cards. 0.99 drops only
+# vectors with essentially no overlap; a semantic model is calibrated per model
+# through SEARCH_VECTOR_MAX_DISTANCE (tests/test_search_golden_db.py prints the
+# distances to choose it).
+VECTOR_MAX_DISTANCE_DEFAULT = 0.99
+
+
+@dataclass(frozen=True)
+class QueryVector:
+    """A query embedding together with the model that produced it (F-P4-13):
+    the vector source only compares it with catalog vectors of the SAME model -
+    vectors from two embedding models live in unrelated spaces - and only keeps
+    products closer than max_distance (F-P4-15)."""
+
+    model: str
+    values: list[float]
+    max_distance: float = VECTOR_MAX_DISTANCE_DEFAULT
+
+
 def list_products_needing_embedding(
-    conn: psycopg.Connection, *, limit: int,
+    conn: psycopg.Connection, *, limit: int, model: str,
 ) -> list[tuple[uuid.UUID, uuid.UUID]]:
     """Cross-tenant candidates via the SECURITY DEFINER
-    app.list_products_needing_embedding() (0009) - pointers only
+    app.list_products_needing_embedding(limit, model) (0020; 0009 + F-P4-13:
+    a vector written by another model also needs re-embedding) - pointers only
     (tenant_id, product_id), never any tenant content. Called on a system_tx()."""
     rows = conn.execute(
-        "SELECT * FROM app.list_products_needing_embedding(%s)", (limit,),
+        "SELECT * FROM app.list_products_needing_embedding(%s, %s)", (limit, model),
     ).fetchall()
     return [(r[0], r[1]) for r in rows]
 
@@ -202,6 +225,56 @@ def upsert_catalog_embedding(
         "  embedding = EXCLUDED.embedding, updated_at = now()",
         (tenant_id, product_id, content_hash, model, _vector_literal(embedding)),
     )
+
+
+@dataclass(frozen=True)
+class GiftCandidateRow:
+    """One product the gift curator may pick (P4 Task 14): its cheapest in-budget
+    variant's price HINT, used only inside the solver - never shown (H35)."""
+
+    product_id: str
+    platform_product_id: str
+    title: str
+    category: str
+    platform_variant_id: str
+    price_minor: int
+    currency: str
+
+
+def list_priced_currencies(conn: psycopg.Connection, *, tenant_id: uuid.UUID) -> set[str]:
+    """The currencies the store's active, priced variants are in (P4 Task 14)."""
+    rows = conn.execute(
+        "SELECT DISTINCT cv.currency FROM catalog_variants cv "
+        "JOIN catalog_products cp ON cp.tenant_id = cv.tenant_id AND cp.id = cv.product_id "
+        "WHERE cv.tenant_id = %s AND cp.active = true AND cv.price_hint_minor > 0 "
+        "AND cv.currency IS NOT NULL",
+        (tenant_id,),
+    ).fetchall()
+    return {str(r[0]) for r in rows}
+
+
+def list_gift_candidates(
+    conn: psycopg.Connection, *, tenant_id: uuid.UUID, currency: str, max_price_minor: int,
+    limit: int = 500,
+) -> list[GiftCandidateRow]:
+    """Active products with a priced, not-known-out-of-stock variant at or under
+    the budget (stock_hint NULL = unknown => allowed; the platform checks live at
+    checkout). One row per product: its cheapest such variant."""
+    rows = conn.execute(
+        "SELECT DISTINCT ON (cp.id) cp.id, cp.platform_product_id, cp.title, "
+        "  coalesce(cp.category, ''), cv.platform_variant_id, cv.price_hint_minor, cv.currency "
+        "FROM catalog_products cp "
+        "JOIN catalog_variants cv ON cv.tenant_id = cp.tenant_id AND cv.product_id = cp.id "
+        "WHERE cp.tenant_id = %s AND cp.active = true "
+        "AND cv.price_hint_minor > 0 AND cv.price_hint_minor <= %s AND cv.currency = %s "
+        "AND (cv.stock_hint IS NULL OR cv.stock_hint > 0) "
+        "ORDER BY cp.id, cv.price_hint_minor ASC, cv.platform_variant_id ASC LIMIT %s",
+        (tenant_id, max_price_minor, currency, limit),
+    ).fetchall()
+    return [
+        GiftCandidateRow(str(r[0]), str(r[1]), str(r[2]), str(r[3]), str(r[4]), int(r[5]), str(r[6]))
+        for r in rows
+    ]
 
 
 # H35: the ONLY keys a search card may carry. price_hint_minor / stock_hint /
@@ -512,30 +585,33 @@ def _trgm_product_ids(
 
 
 def _vector_product_ids(
-    conn: psycopg.Connection, *, tenant_id: uuid.UUID, query_vector: list[float],
+    conn: psycopg.Connection, *, tenant_id: uuid.UUID, query_vector: QueryVector,
     category: str | None, limit: int,
 ) -> list[str]:
     """P1.5b V4: the third source. An exact scan inside the tenant's hash
     partition (RLS + `<=>` L2 distance, NO ANN index - the architecture defers
     HNSW until real data can size it). Joins catalog_embeddings so a product with
     no vector yet simply does not appear here (the other two sources still cover
-    it - H42)."""
-    literal = _vector_literal(query_vector)
+    it - H42). F-P4-13: only vectors of the query's own model are compared, so a
+    provider switch never mixes two embedding spaces while re-embedding runs."""
+    literal = _vector_literal(query_vector.values)
     if category:
         rows = conn.execute(
             "SELECT cp.id FROM catalog_products cp "
             "JOIN catalog_embeddings ce ON ce.tenant_id = cp.tenant_id AND ce.product_id = cp.id "
             "WHERE cp.tenant_id = %s AND cp.active = true AND cp.category = %s "
+            "AND ce.model = %s AND (ce.embedding <=> %s::vector) < %s "
             "ORDER BY ce.embedding <=> %s::vector LIMIT %s",
-            (tenant_id, category, literal, limit),
+            (tenant_id, category, query_vector.model, literal, query_vector.max_distance, literal, limit),
         ).fetchall()
     else:
         rows = conn.execute(
             "SELECT cp.id FROM catalog_products cp "
             "JOIN catalog_embeddings ce ON ce.tenant_id = cp.tenant_id AND ce.product_id = cp.id "
             "WHERE cp.tenant_id = %s AND cp.active = true "
+            "AND ce.model = %s AND (ce.embedding <=> %s::vector) < %s "
             "ORDER BY ce.embedding <=> %s::vector LIMIT %s",
-            (tenant_id, literal, limit),
+            (tenant_id, query_vector.model, literal, query_vector.max_distance, literal, limit),
         ).fetchall()
     return [str(r[0]) for r in rows]
 
@@ -600,7 +676,7 @@ def _product_cards(
 def search_products(
     conn: psycopg.Connection, *, tenant_id: uuid.UUID, query: str,
     filters: dict[str, Any] | None = None, limit: int = SEARCH_RESULT_MAX,
-    query_vector: list[float] | None = None,
+    query_vector: QueryVector | None = None,
 ) -> list[dict[str, Any]]:
     """Hybrid search: FTS (arabic) + pg_trgm + (optionally) vector, merged by RRF
     (C4). H42: the vector list is an OPTIONAL third source - when query_vector is

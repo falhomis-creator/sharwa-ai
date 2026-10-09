@@ -57,16 +57,22 @@ def build_embed(settings: WorkerSettings) -> EmbedHandle:
     return EmbedHandle(
         provider=provider, breaker=breaker,
         provider_name=settings.embedding_provider,
-        model_name=f"{settings.embedding_provider}-embedding",
+        # F-P4-13: the provider's own model identity (adapters expose
+        # model_name; the test fake keeps the historical "<name>-embedding").
+        model_name=str(getattr(provider, "model_name", f"{settings.embedding_provider}-embedding")),
     )
 
 
 # --- query embedding (V5): pure helpers + the H42 fail-open caller ------------
 
 
-def query_cache_key(query: str) -> str:
-    """Key = fingerprint of the NORMALIZED query (never the raw text, H20)."""
-    return "emb:q:" + hashlib.sha256(normalize(query).encode("utf-8")).hexdigest()
+def query_cache_key(query: str, model: str | None = None) -> str:
+    """Key = fingerprint of the NORMALIZED query (never the raw text, H20).
+    F-P4-13: query_vector() always passes the model, which becomes part of the
+    key, so a cached vector of the previous model is never served after a
+    provider switch (the model-less form is kept for the codec tests)."""
+    digest = hashlib.sha256(normalize(query).encode("utf-8")).hexdigest()
+    return f"emb:q:{model}:{digest}" if model else "emb:q:" + digest
 
 
 def encode_vector(vec: list[float]) -> str:
@@ -94,7 +100,7 @@ def _skip(reason: str) -> None:
 def query_vector(
     *, settings: WorkerSettings, handle: EmbedHandle, query: str,
     tenant_id: uuid.UUID, cache_client: Any,
-) -> list[float] | None:
+) -> repos_catalog.QueryVector | None:
     """Obtain a query vector, or return None (search falls back to two lists).
 
     H42: never raises to the search caller. Cache-first (governance: no paid call
@@ -104,7 +110,7 @@ def query_vector(
     from app.llm import budget
     from app.llm.port import EmbeddingProviderError
 
-    key = query_cache_key(query)
+    key = query_cache_key(query, handle.model_name)
 
     # 1. cache hit -> free, no paid call, no budget (V5: cache loss = new call).
     raw: Any = None
@@ -116,7 +122,10 @@ def query_vector(
         vec = decode_vector(raw)
         if vec is not None and len(vec) == settings.embedding_dim:
             metrics.embed_query_cache_total.labels("hit").inc()
-            return vec
+            return repos_catalog.QueryVector(
+                model=handle.model_name, values=vec,
+                max_distance=settings.search_vector_max_distance,
+            )
         metrics.embed_query_cache_total.labels("miss").inc()
 
     # 2. budget check (short tx; creates the month row so the later account works).
@@ -191,7 +200,9 @@ def query_vector(
         obs_logging.log_event(_log, event="embed.account_failed", component="embed",
                               level=logging.WARNING, error=str(exc))
 
-    return vec
+    return repos_catalog.QueryVector(
+        model=handle.model_name, values=vec, max_distance=settings.search_vector_max_distance,
+    )
 
 
 # --- batch product embedding (V2/V3) ------------------------------------------
@@ -199,22 +210,32 @@ def query_vector(
 
 def _record_embedding_calls(
     settings: WorkerSettings, items: list[tuple[uuid.UUID, uuid.UUID, str, str]],
-    provider: str, model: str, latency_ms: int,
+    provider: str, model: str, latency_ms: int, input_tokens: int = 0,
 ) -> None:
-    """One llm_calls row per tenant per batch (purpose='embedding', cost 0 for the
-    fake). Product embedding is cross-tenant infrastructure, so it is recorded for
-    governance (V8/V13) but NOT gated by the per-tenant monthly budget - the
-    budget governs QUERY embedding (V5) where attribution is unambiguous."""
+    """One llm_calls row per tenant per batch (purpose='embedding'). Product
+    embedding is cross-tenant infrastructure, so it is recorded for governance
+    (V8/V13) but NOT gated by the per-tenant monthly budget - the budget governs
+    QUERY embedding (V5) where attribution is unambiguous. P4 Task 15: a paid
+    provider reports real tokens; they are split across tenants by text length
+    and priced from the price table (fake/local: no tokens/no entry => cost 0,
+    and the historical chars//4 estimate is kept)."""
+    from app.llm import budget
+
     per_tenant: dict[uuid.UUID, int] = {}
     for tenant_id, _pid, text, _ch in items:
         per_tenant[tenant_id] = per_tenant.get(tenant_id, 0) + len(text)
+    total_chars = sum(per_tenant.values()) or 1
     for tenant_id, chars in per_tenant.items():
+        tokens = input_tokens * chars // total_chars if input_tokens else chars // 4
+        cost = budget.compute_cost_micro_usd(
+            tokens, 0, settings.llm_price_table, provider, model,
+        ) if input_tokens else 0
         try:
             with core_db.tenant_tx(tenant_id) as conn:
                 repos_llm.record_llm_call(
                     conn, tenant_id=tenant_id, conversation_id=None, purpose="embedding",
-                    provider=provider, model=model, input_tokens=chars // 4,
-                    output_tokens=0, cost_micro_usd=0, latency_ms=latency_ms, status="ok",
+                    provider=provider, model=model, input_tokens=tokens,
+                    output_tokens=0, cost_micro_usd=cost, latency_ms=latency_ms, status="ok",
                 )
             metrics.llm_calls_total.labels("embedding", provider, "ok").inc()
         except Exception as exc:  # noqa: BLE001 - accounting is best-effort
@@ -230,7 +251,7 @@ def embed_once(*, settings: WorkerSettings, handle: EmbedHandle) -> str:
     try:
         with core_db.system_tx() as conn:
             candidates = repos_catalog.list_products_needing_embedding(
-                conn, limit=settings.embed_max_products_per_cycle,
+                conn, limit=settings.embed_max_products_per_cycle, model=handle.model_name,
             )
     except Exception as exc:  # noqa: BLE001 - a transient DB error must not crash the thread
         obs_logging.log_event(_log, event="embed.list_failed", component="embed",
@@ -304,7 +325,7 @@ def embed_once(*, settings: WorkerSettings, handle: EmbedHandle) -> str:
                 with core_db.tenant_tx(tenant_id) as conn:
                     repos_catalog.upsert_catalog_embedding(
                         conn, tenant_id=tenant_id, product_id=product_id,
-                        content_hash=ch, model=result.usage.model, embedding=vec,
+                        content_hash=ch, model=handle.model_name, embedding=vec,
                     )
                 embedded += 1
             except Exception as exc:  # noqa: BLE001 - one write failure must not stop the batch
@@ -313,6 +334,7 @@ def embed_once(*, settings: WorkerSettings, handle: EmbedHandle) -> str:
 
         _record_embedding_calls(
             settings, items, result.usage.provider, result.usage.model, result.usage.latency_ms,
+            input_tokens=result.usage.input_tokens,
         )
 
     metrics.embed_products_total.labels("ok").inc(embedded)

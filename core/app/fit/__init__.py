@@ -1,0 +1,1 @@
+"""P4 (G2): deterministic fit helpers. Pure - no DB, no network, no model, no clock."""

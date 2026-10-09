@@ -130,14 +130,25 @@ PGBOUNCER_DEFAULT_POOL_SIZE = 25
 # P4.2: deepseek rates from the official pricing page (api-docs.deepseek.com,
 # PEAK column - the higher one, so the tenant budget never under-counts):
 # deepseek-flash and the deepseek-chat alias are $0.30/M in + $1.20/M out;
-# deepseek-v4-pro is $1.32/M in + $3.96/M out. Per 1k tokens that is
-# 0.3/1.2 and 1.32/3.96 micro-USD. 'local' embeddings are free (no entry).
+# deepseek-v4-pro is $1.32/M in + $3.96/M out. Unit = micro-USD per 1k tokens
+# ($1 = 1,000,000 micro-USD): $0.30/M = 300 per 1k, $1.20/M = 1200 per 1k.
+# F-P4-14 (owner decision 2026-10-09): P4.2 wrote these 1000x too low
+# (0.3/1.2/1.32/3.96), so the $20 monthly budget practically never filled.
+# 'local' embeddings are free (no entry).
 DEFAULT_LLM_PRICE_TABLE: dict[str, Any] = {
     "fake": {"fake-router": {"input": 0, "output": 0}},
     "deepseek": {
-        "deepseek-chat": {"input": 0.3, "output": 1.2},
-        "deepseek-flash": {"input": 0.3, "output": 1.2},
-        "deepseek-v4-pro": {"input": 1.32, "output": 3.96},
+        "deepseek-chat": {"input": 300, "output": 1200},
+        "deepseek-flash": {"input": 300, "output": 1200},
+        "deepseek-v4-pro": {"input": 1320, "output": 3960},
+    },
+    # P4 Task 15: OpenAI EMBEDDINGS only (OpenAI stays excluded as the LLM).
+    # Unit = micro-USD per 1k tokens (budget.compute_cost_micro_usd):
+    # $0.02/M tokens = 20 micro-USD per 1k (-small); $0.13/M = 130 (-large).
+    # Owner-overridable via LLM_PRICE_TABLE.
+    "openai": {
+        "text-embedding-3-small": {"input": 20, "output": 0},
+        "text-embedding-3-large": {"input": 130, "output": 0},
     },
 }
 
@@ -281,6 +292,12 @@ def validate_llm_provider(env: str, provider: str) -> None:
         )
 
 
+# P4 Task 15 (owner decision 2026-10-09): the paid semantic embedding provider
+# (app/llm/adapters/openai_embedding.py). Selecting it requires OPENAI_API_KEY
+# at boot (H5). 'local' needs no key; 'fake' never runs in production.
+REAL_EMBEDDING_PROVIDERS = frozenset({"openai"})
+
+
 def validate_embedding_provider(env: str, provider: str) -> None:
     """P1.5b V1: the fake embedding provider is a test approximation, so it must
     never run against real customers either (same H-safety as the fake LLM).
@@ -363,11 +380,10 @@ class WorkerSettings:
     dedupe_done_ttl_s: int
     metrics_token: str
     env: str
-    # P1.4 catalog reconciliation (PROMPT §5.4/§5.5). commerce_base_url is OPTIONAL
-    # (empty => the worker boots but skips catalog reconciliation with a warning);
-    # outbound commerce is not an H5 "refuse-boot" secret and the platform is not
-    # implemented yet.
+    # P1.4 catalog reconciliation (PROMPT §5.4/§5.5). commerce_base_url is OPTIONAL;
+    # when set it requires commerce_api_secret (OQ-P4-03, H60).
     commerce_base_url: str = ""
+    commerce_api_secret: str = ""
     commerce_timeout_s: float = 3.0
     catalog_reconcile_interval_s: int = 900
     catalog_reconcile_max_tenants: int = 100
@@ -393,6 +409,12 @@ class WorkerSettings:
     # P1.5b embedding + vector search (PROMPT §5.1-§5.3). All defaults written (H4).
     embedding_provider: str = "fake"
     embedding_dim: int = 1024
+    # F-P4-15: the vector search relevance floor (cosine distance, 0 < x <= 2).
+    search_vector_max_distance: float = 0.99
+    # P4 Task 15: the paid provider's model/credentials (unused by fake/local).
+    embedding_model: str = "text-embedding-3-small"
+    embedding_api_key: str = ""
+    embedding_base_url: str = "https://api.openai.com/v1"
     embed_interval_s: int = 300
     embed_batch: int = 32
     embed_max_products_per_cycle: int = 200
@@ -424,6 +446,14 @@ class WorkerSettings:
     # P1.7 order tracking (PROMPT §7). All defaults written (H4) except the HMAC
     # key (order_ref_hash_key), which is _required at load (H5/H54).
     tools_enabled: bool = True
+    # P4 Task 18b-2b: the size advisor in the conversation turn. ON by default
+    # (owner decision 2026-10-09, after F-P4-09 and F-P4-10); SIZE_ADVICE_ENABLED=false
+    # turns it off and the turn then behaves byte-for-byte as before.
+    size_advice_enabled: bool = True
+    # P4 Task 14: gift baskets with a checkout link. OFF by default: the texts are
+    # approved (OQ-P4-24); it stays dark until the platform route exists.
+    gift_enabled: bool = False
+    gift_checkout_base_url: str = "https://sharwaah.com/checkout/gift/"
     order_ref_pattern: Any = None  # compiled at load (re.Pattern) - no static default
     order_lookup_timeout_s: float = 4.0
     order_lookup_max_phone_candidates: int = 3
@@ -568,6 +598,23 @@ class WorkerSettings:
         validate_embedding_provider(env, embedding_provider)
         embedding_dim = _int("EMBEDDING_DIM", 1024)
         validate_embedding_dim(embedding_dim)
+        gift_checkout_base_url = _optional("GIFT_CHECKOUT_BASE_URL", "https://sharwaah.com/checkout/gift/")
+        if not (gift_checkout_base_url.startswith("https://") and gift_checkout_base_url.endswith("/")):
+            raise ConfigError(
+                "GIFT_CHECKOUT_BASE_URL must be an https:// URL ending with '/', "
+                f"got {gift_checkout_base_url!r}"
+            )
+        search_vector_max_distance = _float("SEARCH_VECTOR_MAX_DISTANCE", 0.99)
+        if not 0.0 < search_vector_max_distance <= 2.0:
+            raise ConfigError(
+                "SEARCH_VECTOR_MAX_DISTANCE must be in (0, 2] (cosine distance), "
+                f"got {search_vector_max_distance}"
+            )
+        embedding_api_key = _optional("OPENAI_API_KEY", "")
+        if embedding_provider in REAL_EMBEDDING_PROVIDERS and not embedding_api_key:
+            raise ConfigError(
+                f"OPENAI_API_KEY is required when EMBEDDING_PROVIDER={embedding_provider} (see .env)"
+            )
 
         verify_safe_template_id = _optional("VERIFY_SAFE_TEMPLATE_ID", "handoff_notice")
         validate_safe_template_id(verify_safe_template_id)
@@ -647,6 +694,13 @@ class WorkerSettings:
         if sched_backoff_cap < sched_backoff_base:
             raise ConfigError("SCHEDULER_BACKOFF_CAP_S must be >= SCHEDULER_BACKOFF_BASE_S")
 
+        commerce_base_url = _optional("COMMERCE_BASE_URL", "")
+        commerce_api_secret = _optional("COMMERCE_API_SECRET", "")
+        if commerce_base_url and not commerce_api_secret:
+            raise ConfigError(
+                "COMMERCE_API_SECRET is required when COMMERCE_BASE_URL is set (see .env)"
+            )
+
         return WorkerSettings(
             db=db,
             system_pool_max=system_pool_max,
@@ -701,7 +755,8 @@ class WorkerSettings:
             ),
             dedupe_done_ttl_s=_int("DEDUPE_DONE_TTL_S", 172800),
             metrics_token=metrics_token,
-            commerce_base_url=_optional("COMMERCE_BASE_URL", ""),
+            commerce_base_url=commerce_base_url,
+            commerce_api_secret=commerce_api_secret,
             commerce_timeout_s=float(_optional("COMMERCE_TIMEOUT_S", "3.0")),
             catalog_reconcile_interval_s=_int("CATALOG_RECONCILE_INTERVAL_S", 900),
             catalog_reconcile_max_tenants=_int("CATALOG_RECONCILE_MAX_TENANTS", 100),
@@ -722,6 +777,10 @@ class WorkerSettings:
             llm_router_max_output_tokens=_int("LLM_ROUTER_MAX_OUTPUT_TOKENS", 64),
             embedding_provider=embedding_provider,
             embedding_dim=embedding_dim,
+            embedding_model=_optional("EMBEDDING_MODEL", "text-embedding-3-small"),
+            search_vector_max_distance=search_vector_max_distance,
+            embedding_api_key=embedding_api_key,
+            embedding_base_url=_optional("OPENAI_BASE_URL", "https://api.openai.com/v1"),
             embed_interval_s=_int("EMBED_INTERVAL_S", 300),
             embed_batch=_int("EMBED_BATCH", 32),
             embed_max_products_per_cycle=_int("EMBED_MAX_PRODUCTS_PER_CYCLE", 200),
@@ -747,6 +806,9 @@ class WorkerSettings:
             verify_disclosure=_csv("VERIFY_DISCLOSURE", ",".join(DEFAULT_VERIFY_DISCLOSURE)),
             verify_join_window_max=_int("VERIFY_JOIN_WINDOW_MAX", 6),
             tools_enabled=_bool("TOOLS_ENABLED", True),
+            size_advice_enabled=_bool("SIZE_ADVICE_ENABLED", True),
+            gift_enabled=_bool("GIFT_ENABLED", False),
+            gift_checkout_base_url=gift_checkout_base_url,
             order_ref_pattern=order_ref_pattern,
             order_lookup_timeout_s=_float("ORDER_LOOKUP_TIMEOUT_S", 4.0),
             order_lookup_max_phone_candidates=_int("ORDER_LOOKUP_MAX_PHONE_CANDIDATES", 3),

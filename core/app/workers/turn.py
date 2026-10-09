@@ -23,14 +23,18 @@ from app import ws_publish
 from app.db import repos_catalog
 from app.db import repos_inbox
 from app.db import repos_outbox
+from app.db import repos_summary
 from app.obs import metrics
 from app.workers import address
 from app.workers import compose
 from app.workers import optout
 from app.workers import orders
+from app.workers import gift
+from app.workers import size
 from app.workers import stock
 from app.workers import templates
 from app.workers import verify
+from app.workers import verify_rules
 from app.workers.config import WorkerSettings
 from app.workers.stream import TransientError
 
@@ -138,6 +142,12 @@ class _TurnPlan:
     decision: TurnDecision
     bodies: tuple[str, ...]
     should_route: bool
+    # P4 Task 18b-2b: a size question answered by the deterministic size path
+    # (only ever True when settings.size_advice_enabled).
+    size_turn: bool = False
+    # P4 Task 14: a gift request answered by the deterministic gift path
+    # (only ever True when settings.gift_enabled).
+    gift_turn: bool = False
 
 
 @dataclass(frozen=True)
@@ -148,6 +158,10 @@ class _Action:
     handoff_reason: str | None
     kind: str | None
     outcome: str
+    # F-P4-07: the platform_product_id of the cards a product_list reply shows.
+    shown_product_ids: tuple[str, ...] = ()
+    # P4 Task 18b-2b: the advice the Verifier checks every size label against.
+    size_context: Any = None
 
 
 def build_router(settings: WorkerSettings) -> LlmRouterHandle:
@@ -235,13 +249,66 @@ def _address_action(settings: WorkerSettings, decision: Any) -> _Action:
     return _Action("handoff_notice", templates.template_text("handoff_notice"), True, "address_accepted", "template", "handoff_notice")
 
 
+# Size templates that end the bot's turn with a human hand-off (their text says so).
+_SIZE_HANDOFF_TEMPLATES = {
+    "size_no_chart": "size_no_chart",
+    "size_no_fit": "size_no_fit",
+    "handoff_notice": "size_unknown",
+}
+
+
+def _size_action(conn: Any, plan: _TurnPlan) -> _Action:
+    """P4 Task 18b-2b: the deterministic size reply. No single shown product =>
+    hand off (never guess the product); otherwise the approved size template for
+    the advice, verified against the advice's own labels (SizeContext)."""
+    turn = size.advise_for_turn(
+        conn, tenant_id=plan.tenant_id, conversation_id=plan.conversation_id, bodies=plan.bodies,
+    )
+    if turn.advice is None:
+        return _Action("handoff_notice", templates.template_text("handoff_notice"), True,
+                       "size_no_product", "template", "size_no_product")
+    template_id, text = compose.compose_size_reply(turn.advice)
+    reason = _SIZE_HANDOFF_TEMPLATES.get(template_id)
+    return _Action(
+        template_id, text, reason is not None, reason, "template", template_id,
+        size_context=verify_rules.SizeContext(turn.advice.size, turn.advice.alt_size, turn.labels),
+    )
+
+
+# Gift outcomes that end the bot's turn with a human hand-off (their text says so).
+_GIFT_HANDOFF = {"no_basket": "gift_no_basket", "currency_mismatch": "gift_currency"}
+
+
+def _gift_action(conn: Any, settings: WorkerSettings, plan: _TurnPlan) -> _Action:
+    """P4 Task 14: baskets within the customer's budget, each with its checkout
+    link - or a question for the budget, or a hand-off. Deterministic."""
+    turn = gift.curate_for_turn(
+        conn, tenant_id=plan.tenant_id, conversation_id=plan.conversation_id, bodies=plan.bodies,
+    )
+    if turn.status == "baskets":
+        text = compose.compose_gift_baskets(
+            [(str(o.cart_id), o.titles) for o in turn.offers], settings.gift_checkout_base_url,
+        )
+        return _Action("gift_baskets", text, False, None, "template", "gift_baskets")
+    if turn.status == "need_budget":
+        return _Action("gift_need_budget", templates.template_text("gift_need_budget"), False, None,
+                       "template", "gift_need_budget")
+    template_id = _GIFT_HANDOFF.get(turn.status, "gift_no_basket")
+    return _Action(template_id, templates.template_text(template_id), True, template_id,
+                   "template", template_id)
+
+
 def _resolve_action(
     conn: Any, settings: WorkerSettings, plan: _TurnPlan, router_result: Any,
-    query_vector: list[float] | None = None,
+    query_vector: repos_catalog.QueryVector | None = None,
     order_lookup: Any = None,
 ) -> _Action:
     if order_lookup is not None:
         return _order_action(settings, order_lookup)
+    if plan.size_turn:
+        return _size_action(conn, plan)
+    if plan.gift_turn:
+        return _gift_action(conn, settings, plan)
     intent = router_result.decision.intent if router_result is not None else "other"
     if intent == "product_search":
         query = router_result.decision.query if router_result is not None else ""
@@ -249,7 +316,11 @@ def _resolve_action(
             conn, tenant_id=plan.tenant_id, query=query, query_vector=query_vector,
         ) if query else []
         if cards:
-            return _Action("product_list", compose.compose_product_list(cards), False, None, "product_list", "product_list")
+            shown = tuple(str(c["platform_product_id"]) for c in cards[:repos_summary.MAX_SHOWN_PRODUCTS])
+            return _Action(
+                "product_list", compose.compose_product_list(cards), False, None,
+                "product_list", "product_list", shown_product_ids=shown,
+            )
         return _deterministic_action(plan.decision)
     if intent == "policy_question":
         question = router_result.decision.query if router_result is not None else ""
@@ -339,6 +410,22 @@ def process_turn(
 
         # The router runs ONLY when no deterministic path took over.
         route = decision.decision == Decision.HANDOFF and decision.handoff_reason == "bot_cannot_answer"
+        # P4 Task 18b-2b: a size question is a deterministic path (code rule, no
+        # model) - checked only when the owner switched it on; off => no change.
+        size_turn = bool(
+            route and settings.size_advice_enabled
+            and size.is_size_question(tuple(b for _, b in bodies if b))
+        )
+        if size_turn:
+            route = False
+        # P4 Task 14: a gift request is a deterministic path too (code rule);
+        # checked only when the owner switched it on (GIFT_ENABLED).
+        gift_turn = bool(
+            route and settings.gift_enabled
+            and gift.is_gift_request(tuple(b for _, b in bodies if b))
+        )
+        if gift_turn:
+            route = False
         if route and router is not None:
             from app.llm import budget
             budget_state = budget.ensure_and_check(
@@ -353,6 +440,7 @@ def process_turn(
             conversation_id=conversation_id, tenant_id=tenant_id,
             channel_id=channel_id, decision=decision,
             bodies=tuple(b for _, b in bodies if b), should_route=route,
+            size_turn=size_turn, gift_turn=gift_turn,
         )
 
     # ---- Phase 2: router call + query embedding, OUTSIDE any transaction (H40) ----
@@ -365,7 +453,7 @@ def process_turn(
     # H42: the query vector is an OPTIMIZATION. Only product-search turns need it,
     # and any failure to obtain it (breaker/budget/timeout/dim) yields None so the
     # search falls back to two lexical lists - never an exception to the caller.
-    query_vector: list[float] | None = None
+    query_vector: repos_catalog.QueryVector | None = None
     if (
         router_result is not None
         and router_result.decision.intent == "product_search"
@@ -410,7 +498,7 @@ def process_turn(
 def _write_phase(
     conn: Any, settings: WorkerSettings, plan: _TurnPlan,
     router: LlmRouterHandle | None, router_result: Any,
-    query_vector: list[float] | None = None,
+    query_vector: repos_catalog.QueryVector | None = None,
     rules: Any = None,
     order_lookup: Any = None,
 ) -> str:
@@ -471,11 +559,18 @@ def _write_phase(
         idempotency_key=f"{conv.id}:{turn_seq}:1",
         message_class="service", expected_epoch=expected_epoch,
         to_wa_id=wa_id, template_id=action.template_id, text=action.text,
+        size_context=action.size_context,
     )
     repos_outbox.mark_turn_processed(
         conn, conversation_id=conv.id, last_processed_seq=conv.last_inbound_seq,
     )
     metrics.turn_processed_total.labels(action.outcome).inc()
+    if outcome.ok and action.shown_product_ids:
+        # F-P4-07: only cards the customer actually received become "shown".
+        repos_summary.record_shown_products(
+            conn, tenant_id=plan.tenant_id, conversation_id=conv.id,
+            platform_product_ids=list(action.shown_product_ids),
+        )
     if outcome.ok:
         metrics.outbox_written_total.labels("service").inc()
         if action.kind is not None:

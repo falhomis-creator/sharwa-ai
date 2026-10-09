@@ -8,6 +8,10 @@ Imports are CLOSED to exactly: re, dataclasses, typing, enum, __future__,
 app.text.arabic (S10-b). The blocklist vocabulary itself never lives here - it is
 policy data owned by the merchant/owner and arrives pre-built via build_rules()
 from app.workers.config (H45 + S8 rule 3).
+
+Task 11 adds the size_mismatch rule under the same discipline: regex + lists
+only, fed the SizeAdvice outcome as a frozen SizeContext (plain strings - never
+the model, never app.fit/app.tools; lint-imports guards both directions).
 """
 from __future__ import annotations
 
@@ -125,6 +129,16 @@ class RuleVerdict:
     category: str | None
 
 
+# The CLOSED rule_id list (H20/H4). size_mismatch (Task 11) is the newest
+# member - category "size", evaluated only when the coordinator hands the
+# SizeAdvice outcome in as a frozen SizeContext.
+CLOSED_RULE_IDS: frozenset[str] = frozenset({
+    "empty", "oversize", "control_chars", "placeholder",
+    "profanity", "competitor", "disclosure", "verifier_error",
+    "size_mismatch",
+})
+
+
 @dataclass(frozen=True)
 class VerifiedText:
     """Text that passed check_text. Built ONLY via approve() - S10-e makes any
@@ -169,10 +183,139 @@ def _violation(rule_id: str, category: str) -> RuleVerdict:
     return RuleVerdict(ok=False, rule_id=rule_id, category=category)
 
 
-def check_text(text: str, *, rules: BlocklistSet, max_chars: int, window_max: int = 6) -> RuleVerdict:
+# --- size_mismatch (Task 11): the advice arrives as plain frozen data (H45) ---
+
+@dataclass(frozen=True)
+class SizeContext:
+    """The SizeAdvice outcome the coordinator froze for THIS reply: the
+    recommended size, the acceptable alternative, and the chart's labels. Plain
+    strings only - verify_rules never imports app.fit nor app.tools (guarded by
+    lint-imports); a context of any other shape is a violation (fail closed)."""
+    size: str | None
+    alt_size: str | None
+    all_labels: tuple[str, ...] = ()
+
+
+# Raw -> canonical size token: the Arabic words map to their Latin letter so a
+# reply in Arabic compares against a Latin label and vice versa. 2XL/3XL are
+# the SAME garments as XXL/XXXL (two names, one size) and fold onto them - NOT
+# onto XL (R5: XL and XXL are different sizes); 4XL/5XL are standalone labels.
+_CANON_RAW = {
+    "سمول": "s", "ميديوم": "m", "مديوم": "m", "لارج": "l",
+    "اكسترا سمول": "xs", "اكس سمول": "xs",
+    "اكسترا لارج": "xl", "اكس لارج": "xl",
+    "2xl": "xxl", "3xl": "xxxl",
+}
+_CANON = {arabic.normalize(k): v for k, v in _CANON_RAW.items()}
+# The joined form matches the pair path exactly: tokens joined WITHOUT a space,
+# then squeezed - same discipline as _Phrase.joined for the blocklists.
+_JOINED = {squeeze(arabic.normalize(k).replace(" ", "")): v
+           for k, v in _CANON_RAW.items() if " " in k}
+
+# The closed general vocabulary, stored in canonical form (post-fold); any
+# reply token canonicalizing into this set is a size mention wherever it stands.
+_SIZE_GENERAL = frozenset({"s", "m", "l", "xs", "xl", "xxl", "xxxl", "4xl", "5xl"})
+
+# A PURE-NUMERIC label ("42") binds only within the two tokens after one of
+# these size words - so "175 سم" never matches a numeric chart label. The size
+# word is matched AFTER stripping the common Arabic clitics (R4): prefixes
+# (و ف ب ل ال وال بال لل) and one possessive suffix (ها نا ي ك ه), else
+# "بمقاس 44"/"مقاساتك 44" slip through.
+_SIZE_WORDS = frozenset({"مقاس", "مقاسات", "مقاسك", "قياس", "size", "sizes"})
+_SIZE_PREFIXES = ("وال", "بال", "لل", "ال", "و", "ف", "ب", "ل")
+_SIZE_SUFFIXES = ("ها", "نا", "ي", "ك", "ه")
+
+
+def _is_size_word(word: str) -> bool:
+    """A size word after stripping Arabic clitics ("ولمقاس", "مقاساتك", ...).
+    The input is already arabic.normalize output; over-stripping is harmless -
+    only an exact member of _SIZE_WORDS counts."""
+    w = word
+    changed = True
+    while changed:
+        changed = False
+        for prefix in _SIZE_PREFIXES:
+            if w.startswith(prefix) and len(w) > len(prefix):
+                w = w[len(prefix):]
+                changed = True
+                break
+    for suffix in _SIZE_SUFFIXES:
+        if w.endswith(suffix) and len(w) > len(suffix):
+            w = w[: -len(suffix)]
+            break
+    return w in _SIZE_WORDS
+
+
+def _canon(text: str) -> str:
+    """Normalize (idempotent) and map the Arabic size words to their letter."""
+    norm = arabic.normalize(text)
+    return _CANON.get(norm, norm)
+
+
+def _captured_size_tokens(tokens: list[str], labels: set[str]) -> set[str]:
+    """Canonical size tokens in the reply: chart labels and the general
+    vocabulary match by TOKEN EQUALITY after normalization (never substring -
+    the M inside a word is not a size, H49); a pure-numeric label only within
+    two tokens after a size word. A matched two-word compound ("اكسترا لارج")
+    consumes its two tokens, so its head word is not ALSO read as a standalone
+    mention ("لارج" -> "l")."""
+    words = [t for t in tokens if t]
+    word_labels = {label for label in labels if label and not label.isdigit()}
+    numeric_labels = {label for label in labels if label.isdigit()}
+    consumed: set[int] = set()
+    captured: set[str] = set()
+    for i in range(len(words) - 1):
+        joined = squeeze(words[i] + words[i + 1])
+        if joined in _JOINED:
+            captured.add(_JOINED[joined])
+            consumed.add(i)
+            consumed.add(i + 1)
+    for i, token in enumerate(words):
+        if i in consumed:
+            continue
+        canon = _canon(token)
+        if (canon in word_labels or canon in _SIZE_GENERAL) or (
+            canon in numeric_labels and any(
+                _is_size_word(words[j]) for j in (i - 1, i - 2) if j >= 0
+            )
+        ):
+            captured.add(canon)
+    return captured
+
+
+def _check_size_mismatch(tokens: list[str], sc: SizeContext) -> RuleVerdict:
+    """The deterministic size rule (H45): every captured size token must equal
+    the advice's size or alt_size; with no advice (size is None) ANY captured
+    size token violates. A malformed context is itself a violation (H47)."""
+    if not isinstance(sc, SizeContext):
+        return _violation("size_mismatch", "size")
+    if (sc.size is not None and not isinstance(sc.size, str)) \
+            or (sc.alt_size is not None and not isinstance(sc.alt_size, str)) \
+            or not isinstance(sc.all_labels, tuple) \
+            or any(not isinstance(label, str) for label in sc.all_labels):
+        return _violation("size_mismatch", "size")
+    captured = _captured_size_tokens(tokens, {_canon(label) for label in sc.all_labels})
+    if not captured:
+        return RuleVerdict(ok=True, rule_id=None, category=None)
+    if sc.size is None:
+        return _violation("size_mismatch", "size")
+    allowed = {_canon(sc.size)}
+    if sc.alt_size is not None:
+        allowed.add(_canon(sc.alt_size))
+    if captured - allowed:
+        return _violation("size_mismatch", "size")
+    return RuleVerdict(ok=True, rule_id=None, category=None)
+
+
+def check_text(
+    text: str, *, rules: BlocklistSet, max_chars: int, window_max: int = 6,
+    size_context: SizeContext | None = None,
+) -> RuleVerdict:
     """The single pure entry point. Structure checks first (empty -> oversize ->
     control_chars -> placeholder), then blocklists (profanity -> competitor ->
-    disclosure). The FIRST violation wins - order is fixed and written (H45)."""
+    disclosure), then the size rule ONLY when the coordinator passed the advice
+    context (Task 11). The FIRST violation wins - order is fixed and written
+    (H45). size_context=None keeps every legacy verdict byte-identical."""
     if not text.strip():
         return _violation("empty", "structure")
     if len(text) > max_chars:
@@ -194,12 +337,25 @@ def check_text(text: str, *, rules: BlocklistSet, max_chars: int, window_max: in
                 return _violation(rule_id, "blocklist")
         if _match_joined(tokens, phrases, window_max):
             return _violation(rule_id, "blocklist")
+    if size_context is not None:
+        try:
+            verdict = _check_size_mismatch(tokens, size_context)
+        except Exception:  # noqa: BLE001 - H47: any failure inside the size rule is a violation
+            return _violation("size_mismatch", "size")
+        if not verdict.ok:
+            return verdict
     return RuleVerdict(ok=True, rule_id=None, category=None)
 
 
-def approve(text: str, *, rules: BlocklistSet, max_chars: int, window_max: int = 6) -> VerifiedText | RuleVerdict:
+def approve(
+    text: str, *, rules: BlocklistSet, max_chars: int,
+    window_max: int = 6, size_context: SizeContext | None = None,
+) -> VerifiedText | RuleVerdict:
     """The ONLY constructor of VerifiedText: check_text first, then approve."""
-    verdict = check_text(text, rules=rules, max_chars=max_chars, window_max=window_max)
+    verdict = check_text(
+        text, rules=rules, max_chars=max_chars, window_max=window_max,
+        size_context=size_context,
+    )
     if verdict.ok:
         return VerifiedText(value=text)
     return verdict

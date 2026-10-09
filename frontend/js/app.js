@@ -1,6 +1,7 @@
 import { api, ApiError, claims, getToken, setToken } from "./api.js";
 import { h, clear, num, pct, when } from "./dom.js";
 import { barChart, hBars } from "./charts.js";
+import { startSsoHandoff } from "./sso.js";
 
 const $app = document.getElementById("app");
 
@@ -313,4 +314,16 @@ async function render() {
   } catch (e) { handle(e); }
 }
 window.addEventListener("hashchange", render);
-render();
+// P4 Task 6b: with no token yet, try the platform hand-off first (paste login stays).
+async function boot() {
+  if (!getToken()) {
+    let origins = [];
+    try {
+      const r = await fetch("/console/sso-config.json", { cache: "no-store" });
+      if (r.ok) origins = ((await r.json()) || {}).platform_origins || [];
+    } catch { /* no config => paste login only */ }
+    startSsoHandoff({ win: window, patterns: origins, onToken: (t) => { setToken(t); location.hash = "#/"; render(); } });
+  }
+  render();
+}
+boot();

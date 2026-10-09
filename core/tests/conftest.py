@@ -23,6 +23,7 @@ os.environ.setdefault("METRICS_TOKEN", "test-metrics-token")
 os.environ.setdefault("SSO_LOGIN_URL", "https://sso.sharwa.test/login")
 os.environ.setdefault("PLATFORM_WEBHOOK_SECRET", "test-platform-webhook-secret")
 os.environ.setdefault("COMMERCE_BASE_URL", "http://127.0.0.1:4100")
+os.environ.setdefault("COMMERCE_API_SECRET", "test-commerce-api-secret")
 os.environ.setdefault("LLM_PROVIDER", "fake")
 
 from app.config import Settings

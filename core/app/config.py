@@ -8,6 +8,7 @@ time, before uvicorn ever binds a port - never a silent "accept all" mode.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 
 
@@ -43,6 +44,27 @@ def _csv(name: str, default: str) -> tuple[str, ...]:
         raw = default
     parts = [p.strip() for p in raw.split(",")]
     return tuple(p for p in parts if p)
+
+
+# P4 Task 6b: which platform origins may hand the console an SSO token by
+# postMessage. Exact origins, or ONE wildcard label under a parent domain
+# (Sharwa serves each store on its own subdomain). http only for localhost.
+# Anything else - a bare "*", a path, a trailing slash, upper case - refuses boot.
+_PLATFORM_ORIGIN_RES = (
+    re.compile(r"https://(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)+(:[0-9]{1,5})?"),
+    re.compile(r"http://(localhost|127\.0\.0\.1|\*\.localhost)(:[0-9]{1,5})?"),
+)
+
+
+def parse_platform_origins(raw: str) -> tuple[str, ...]:
+    origins = tuple(p.strip() for p in raw.split(",") if p.strip())
+    for origin in origins:
+        if not any(r.fullmatch(origin) for r in _PLATFORM_ORIGIN_RES):
+            raise ConfigError(
+                f"CONSOLE_SSO_PLATFORM_ORIGINS entry {origin!r} is not an exact origin "
+                "(https://host[:port] or https://*.parent.domain[:port]; http only for localhost)"
+            )
+    return origins
 
 
 # H36 / S7 (PROMPT_P1_04 §4.1): the field names that signal a cost/wholesale/
@@ -149,6 +171,7 @@ class Settings:
     console_rate_limit_write: int = 60
     console_rate_limit_ticket: int = 10
     console_rate_limit_window_s: float = 60.0
+    console_sso_platform_origins: tuple[str, ...] = ()
     # P3.2 cart webhook: the SAME env keys the realtime worker reads - the API
     # process needs them to schedule the reminder job while applying cart
     # events (single source of truth = the environment, never a second copy).
@@ -206,6 +229,7 @@ class Settings:
             console_rate_limit_write=_int("CONSOLE_RATE_LIMIT_WRITE", 60),
             console_rate_limit_ticket=_int("CONSOLE_RATE_LIMIT_TICKET", 10),
             console_rate_limit_window_s=float(_optional("CONSOLE_RATE_LIMIT_WINDOW_S", "60.0")),
+            console_sso_platform_origins=parse_platform_origins(os.environ.get("CONSOLE_SSO_PLATFORM_ORIGINS", "")),
             cart_reminder_delay_h=_int("CART_REMINDER_DELAY_H", 24),
             cart_reminder_max_late_h=_int("CART_REMINDER_MAX_LATE_H", 12),
             cart_item_title_max=_int("CART_ITEM_TITLE_MAX", 60),

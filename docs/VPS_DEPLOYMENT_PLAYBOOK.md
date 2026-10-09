@@ -160,17 +160,8 @@ ssh -N -L 8000:127.0.0.1:8000 <USER>@<VPS_IP>      # إن كان API_HOST_PORT=8
 ```
 ثم افتح `http://127.0.0.1:8000/console/` والصق التوكن. (يعمل كأنه `http://<VPS_IP>:8000/console/` لكن مشفّراً.)
 
-**اختياري — نطاق + TLS تلقائي (Caddy على المضيف):** يلزم نطاق يشير A-record إلى الـVPS ومنفذا 80/443 مفتوحان.
-```bash
-sudo apt-get install -y caddy
-sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
-console.<دومينك> {
-    reverse_proxy 127.0.0.1:8000
-}
-EOF
-sudo systemctl reload caddy
-sudo ufw allow 80,443/tcp
-```
+**الدائم — نطاق + TLS:** راجع §12 (`ai.sharwaah.com`، P4 Task 17).
+
 **لا تفتح 8000/8100 في الجدار الناري مباشرة:** التوكن سيعبر الشبكة بنصّ صريح.
 
 ## 8. تشغيل/إيقاف/رجوع
@@ -229,6 +220,25 @@ docker compose logs worker-realtime --tail 30   # لا يجب أن يظهر أي
 - **`DEEPSEEK_MODEL`**: الافتراضي `deepseek-chat` (قرار المالك). التشكيلة الحالية في وثائق DeepSeek تضم أيضاً `deepseek-flash` و`deepseek-v4-pro`؛ التبديل متغيّر بيئة واحد بلا نشر جديد.
 - كل مبادئ الحماية باقية: ميزانية شهرية للمستأجر (20$ افتراضياً، `TENANT_MONTHLY_BUDGET_MICRO_USD`)، قاطع + إعادة محاولة واحدة (H39)، «النموذج يصنّف والكود يكتب» (H38) — لا نصّ من إخراج النموذج يصل عميلاً أبداً.
 
+## 8.6 البحث الدلالي — OpenAI embeddings (P4 Task 15)
+
+> قرار المالك 2026-10-09: التضمين الدلالي عبر OpenAI (`text-embedding-3-small`)؛ DeepSeek يبقى نموذج اللغة الوحيد. الافتراضي يبقى `local` (مُظلم) حتى تُضيف المفتاح.
+
+```bash
+cd ~/sharwa_ai && export COMPOSE_ENV_FILES=.env.prod && umask 077
+bash scripts/migrate.sh                       # يطبّق 0020_p4_embedding_model (بعد docker compose build api)
+read -rs OA_KEY && printf '\n'
+sed -i '/^OPENAI_API_KEY=/d;/^EMBEDDING_PROVIDER=/d' .env.prod
+printf 'OPENAI_API_KEY=%s\nEMBEDDING_PROVIDER=openai\n' "$OA_KEY" >> .env.prod; unset OA_KEY
+chmod 600 .env.prod
+docker compose --profile engine up -d --no-deps worker-realtime
+docker compose logs worker-realtime --tail 30 | grep -iE 'embed|ConfigError'
+```
+- بلا مفتاح ⇐ `OPENAI_API_KEY is required` ويرفض العامل الإقلاع (H5).
+- عند التبديل يُعاد تضمين الكتالوج تلقائياً على دفعات (`EMBED_MAX_PRODUCTS_PER_CYCLE` كل `EMBED_INTERVAL_S`)؛ أثناء ذلك يقارن البحث المتجهي متجهات النموذج نفسه فقط، والمنتج غير المُعاد تضمينه يبقى مغطّى بالبحث المعجمي (H42).
+- الرجوع: `EMBEDDING_PROVIDER=local` ثم إعادة تشغيل العامل (يُعاد التضمين محلياً بلا تكلفة).
+- التكلفة: 20 micro-USD لكل 1k رمز (‎$0.02/M)؛ استعلامات البحث تُحتسب على ميزانية المستأجر، وتضمين الكتالوج يُسجَّل بتكلفته (حوكمة) دون أن يُحجَب بالميزانية.
+
 ## 9. ما يبقى مقفلاً (لا تغيّره في هذا النشر)
 
 - **لا مستأجر مُفعَّل للتسويق** وكل شيء الافتراضي OFF. التفعيل لاحقاً من اللوحة (عبارة تأكيد حرفية) أو CLI، وبقرارك.
@@ -262,3 +272,127 @@ docker compose logs worker-realtime --tail 30   # لا يجب أن يظهر أي
 8. **العامل:** `docker compose --profile engine up -d --no-deps worker-realtime` كي لا تُعاد إنشاء بقية الخدمات. تحذير `shard_stale:0` عند الإقلاع الأول عابر.
 9. **ويندوز:** أوامر المفاتيح تُنفَّذ في CMD أو PowerShell على جهازك لا في bash على الـVPS؛ لا تلصق أحدهما في الآخر.
 10. **قبل الترحيل دائماً:** `pg_dump` احتياطي. الترحيلات للأمام فقط عبر `scripts/migrate.sh` ولا تعمل تلقائياً (H62).
+
+## 12. الدومين وTLS — `ai.sharwaah.com` (P4 Task 17؛ النطاق الإنتاجي منذ 2026-10-09 — F-P4-12)
+
+**الحالة:** الملفات مكتوبة ومُختبَرة محلياً (Caddy 2.10.2 وnginx 1.24 أمام خادم بديل، 20/20 فحصاً لكلٍّ منهما)؛ **لم يُنفَّذ شيء على الـVPS** — التنفيذ هو Task 18 بيدك، وكل أمر هنا UNVERIFIED على الخادم حتى تلصق مخرجاته.
+
+**القرار:** المحرك على نطاق فرعي مخصّص **`ai.sharwaah.com`**. السبب: `sharwaah.com` و`*.sharwaah.com` لمتاجر شروه (Django)، ولوحة المحرك تُفتح من صفحة إطلاق على نطاق المتجر. الـAPI يبقى مربوطاً على `127.0.0.1` فقط؛ البروكسي على المضيف هو الباب الوحيد من الإنترنت.
+
+| المسار العام | يصل إلى الـAPI؟ |
+|---|---|
+| `/console/` (و`/console` ⇐ 308 إلى `/console/`) | نعم — اللوحة |
+| `/v1/*` ومنها `/v1/ws` (WebSocket) | نعم |
+| `/webhooks/platform/catalog`، `/webhooks/platform/cart` | نعم — سقف الجسم 512 KB في البروكسي (والـAPI يفرض 256 KB + HMAC) |
+| `/webhooks/platform/gift-cart` (P4 Task 14) | نعم — شروه يقرأ سلة الهدية الموقّعة (HMAC نفسه، جسم ≤ 1 KB) |
+| `/healthz` | نعم |
+| كل ما عداه، ومنه `/metrics` `/readyz` `/docs` `/redoc` `/openapi.json` | **لا — 404 من البروكسي** |
+
+الملفات: `ops/proxy/Caddyfile` (الموصى به: شهادة تلقائية وتجديد تلقائي)، `ops/proxy/nginx-ai.sharwaah.com.conf` (بديل فقط إن كان nginx يملك 80/443 أصلاً)، `ops/proxy/check_proxy.sh` (فحص بعد التشغيل، قراءة فقط).
+
+### 12.0 من يملك المنفذين 80/443 على الـVPS؟
+
+```bash
+sudo ss -ltnp '( sport = :80 or sport = :443 )'
+```
+| النتيجة | الطريق |
+|---|---|
+| لا شيء | **12.3-أ Caddy** |
+| `nginx` | **12.3-ب nginx** (لا تثبّت Caddy: لا يملك المنفذين برنامجان) |
+| `caddy` (لموقع آخر) | أضف كتلة `ai.sharwaah.com {...}` من `ops/proxy/Caddyfile` إلى ملفه الحالي بدل استبداله |
+
+### 12.1 DNS (عند مسجّل النطاق — بيدك)
+
+- سجل **A**: الاسم `ai` (في نطاق `sharwaah.com`) ⇐ عنوان IPv4 للـVPS. **AAAA** فقط إن كان للخادم IPv6 يعمل فعلاً (سجل AAAA خاطئ يُفشل إصدار الشهادة).
+- إن وُجد سجل `*.sharwaah.com` (wildcard) فالسجل الصريح `ai` يتقدّم عليه — لكن **يجب ألّا يُسمح لمتجر بالاسمين `ai` و`api`** (قرار المالك، أسماء البنية التحتية محجوزة) في شروه (OQ-P4-22).
+- إن كان على `sharwaah.com` سجلات CAA فيجب أن تسمح بـ`letsencrypt.org`.
+
+```bash
+dig +short ai.sharwaah.com A        # يجب أن يطابق عنوان الخادم
+curl -4 -s https://ifconfig.me ; echo   # (على الـVPS) عنوان الخادم للمقارنة
+```
+
+### 12.2 الجدار الناري
+
+```bash
+sudo ufw allow 80/tcp && sudo ufw allow 443/tcp
+sudo ufw status | grep -E '80|443|8000|8100'   # 8000/8100 يجب ألّا يظهرا مفتوحين
+```
+وافتح 80/443 أيضاً في جدار مزوّد الاستضافة إن وُجد. **لا تفتح 8000/8100 أبداً.**
+
+### 12.3-أ Caddy (الموصى به)
+
+```bash
+sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt-get update && sudo apt-get install -y caddy
+caddy version                                   # اختُبر الملف على 2.10.2
+
+cd ~/sharwa_ai
+PORT=$(grep '^API_HOST_PORT=' .env.prod | cut -d= -f2); echo "API port: ${PORT:-8000}"
+sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.$(date +%s) 2>/dev/null
+sudo install -m 644 ops/proxy/Caddyfile /etc/caddy/Caddyfile
+sudo sed -i "s/127.0.0.1:8100/127.0.0.1:${PORT:-8000}/g" /etc/caddy/Caddyfile
+sudo install -d -o caddy -g caddy /var/log/caddy
+sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile   # يجب: Valid configuration
+sudo systemctl reload caddy || sudo systemctl restart caddy
+sudo journalctl -u caddy --since "5 min ago" --no-pager | grep -iE 'certificate obtained|error' | tail -5
+```
+الشهادة تُصدَر في أول دقيقة وتُجدَّد تلقائياً. إن ظهر خطأ ACME: راجع DNS (12.1) والجدار (12.2).
+
+### 12.3-ب nginx (بديل، فقط إن كان nginx موجوداً)
+
+الكتلة 443 تشير إلى شهادة غير موجودة بعد، لذا على مرحلتين:
+```bash
+cd ~/sharwa_ai
+PORT=$(grep '^API_HOST_PORT=' .env.prod | cut -d= -f2)
+sudo apt-get install -y certbot
+sudo mkdir -p /var/www/certbot
+# (1) المنفذ 80 فقط لإصدار الشهادة
+sed '/^# --- port 443/,$d' ops/proxy/nginx-ai.sharwaah.com.conf | sed "s/127.0.0.1:8100/127.0.0.1:${PORT:-8000}/" | sudo tee /etc/nginx/conf.d/sharwa-ai.conf >/dev/null
+sudo nginx -t && sudo systemctl reload nginx
+sudo certbot certonly --webroot -w /var/www/certbot -d ai.sharwaah.com --deploy-hook "systemctl reload nginx"
+# (2) الملف كاملاً
+sed "s/127.0.0.1:8100/127.0.0.1:${PORT:-8000}/" ops/proxy/nginx-ai.sharwaah.com.conf | sudo tee /etc/nginx/conf.d/sharwa-ai.conf >/dev/null
+sudo nginx -t && sudo systemctl reload nginx
+systemctl list-timers | grep -i certbot        # التجديد التلقائي
+```
+ملاحظات: nginx ≥ 1.25.1 يطبع تحذير `listen ... http2 is deprecated` — غير ضار. إن لم يكن للخادم IPv6 فاحذف سطري `listen [::]` (وإلا يفشل `nginx -t`). nginx يرسل `Server: nginx` بلا رقم إصدار.
+
+### 12.4 متغيّرات `.env.prod` الخاصة بالنطاق
+
+يتطلب هذا آخر نسخة من المستودع (compose صار يمرّر المتغيّرين — F-P4-11):
+```bash
+cd ~/sharwa_ai && export COMPOSE_ENV_FILES=.env.prod && umask 077
+sed -i '/^CONSOLE_ALLOWED_ORIGINS=/d' .env.prod
+printf 'CONSOLE_ALLOWED_ORIGINS=https://ai.sharwaah.com\n' >> .env.prod
+# فقط حين تجهز صفحة الإطلاق في شروه (Task 6ب) — وإلا اتركه فارغاً:
+# sed -i '/^CONSOLE_SSO_PLATFORM_ORIGINS=/d' .env.prod && printf 'CONSOLE_SSO_PLATFORM_ORIGINS=https://*.sharwaah.com\n' >> .env.prod
+chmod 600 .env.prod
+docker compose config --quiet && docker compose up -d --no-deps api
+docker compose exec api env | grep -E '^CONSOLE_(ALLOWED|SSO)'
+```
+بدون `CONSOLE_ALLOWED_ORIGINS` يرفض الـAPI مصافحة `/v1/ws` من المتصفح عبر النطاق (Origin غير مسموح) ويخسر صندوق الوارد التحديث الحيّ.
+
+### 12.5 التحقّق
+
+```bash
+cd ~/sharwa_ai && bash ops/proxy/check_proxy.sh
+```
+المتوقّع: `N passed, 0 failed` (مع الـAPI الحقيقي: `/v1/me` ⇐ 401 و`GET` على الـwebhook ⇐ 405؛ كلاهما يعني «وصل الـAPI»). ثم افتح `https://ai.sharwaah.com/console/` من متصفحك.
+
+### 12.6 ما يأتي في Task 18 (بيدك)
+
+- روابط الـwebhook في شروه: `https://ai.sharwaah.com/webhooks/platform/catalog` و`https://ai.sharwaah.com/webhooks/platform/cart` (السر نفسه `PLATFORM_WEBHOOK_SECRET`)، و(P4 Task 14) قراءة سلة الهدية `https://ai.sharwaah.com/webhooks/platform/gift-cart`. **بعد سحب هذا الإصدار على الخادم: انسخ `ops/proxy/Caddyfile` من جديد إلى `/etc/caddy/Caddyfile` وأعد تحميل Caddy** (أُضيف المسار إلى قائمة السماح).
+- إغلاق نفق SSH المؤقت بعد نجاح 12.5.
+
+### 12.7 الرجوع
+
+`sudo systemctl stop caddy` (أو حذف `/etc/nginx/conf.d/sharwa-ai.conf` ثم `reload`) يعيدك إلى الوصول بالنفق وحده؛ الـAPI لا يتغيّر (ما زال على 127.0.0.1).
+
+### 12.8 قرارات مقصودة
+
+- **HSTS** سنة واحدة **بلا** `includeSubDomains`/`preload`: بقية `*.sharwaah.com` قرار شروه لا المحرك.
+- **سجل الوصول بلا query string** (Caddy يحذف `ticket`؛ nginx يسجّل `$uri`): تذكرة الـWebSocket لا تصل ملف سجل. Caddy لا يسجّل قيم `Authorization`.
+- **عنوان العميل الحقيقي:** الـAPI يرى عنوان جسر Docker لا عنوان الزائر، ولا يثق بـ`X-Forwarded-For` (`FORWARDED_ALLOW_IPS=127.0.0.1`). لا ميزة اليوم تعتمد على IP (حدود المعدّل لكل مستأجر/موظف).

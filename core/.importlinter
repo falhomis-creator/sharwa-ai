@@ -45,3 +45,59 @@ source_modules =
 forbidden_modules =
     httpx
 allow_indirect_imports = True
+
+[importlinter:contract:fit-is-pure]
+name = app.fit is pure (no DB, network, model or HTTP layers)
+type = forbidden
+source_modules =
+    app.fit
+forbidden_modules =
+    psycopg
+    httpx
+    app.db
+    app.llm
+    app.api
+    app.workers
+    app.channels
+allow_indirect_imports = False
+
+[importlinter:contract:tools-are-pure]
+name = app.tools is pure (no DB, network, model, channel or worker layers)
+type = forbidden
+source_modules =
+    app.tools
+forbidden_modules =
+    psycopg
+    httpx
+    redis
+    app.db
+    app.llm
+    app.channels
+    app.workers
+allow_indirect_imports = False
+
+[importlinter:contract:verify-rules-stays-lexical]
+name = verify_rules never imports app.fit or app.tools (the advice arrives as data)
+type = forbidden
+source_modules =
+    app.workers.verify_rules
+forbidden_modules =
+    app.fit
+    app.tools
+allow_indirect_imports = False
+
+[importlinter:contract:gift-is-pure]
+name = app.gift is pure (no DB, network, model or HTTP layers)
+type = forbidden
+source_modules =
+    app.gift
+forbidden_modules =
+    psycopg
+    httpx
+    redis
+    app.db
+    app.llm
+    app.api
+    app.workers
+    app.channels
+allow_indirect_imports = False

@@ -22,7 +22,9 @@ CORE_DIR = Path(__file__).resolve().parent.parent
 # The actual console-script entry point (a click command, not runnable via
 # `python -m importlinter.cli`) - resolved relative to the running
 # interpreter so this works in whatever venv pytest itself is using.
-_LINT_IMPORTS = str(Path(sys.executable).parent / "lint-imports")
+# shutil.which resolves the Windows console script (lint-imports.exe) too; the
+# bare sibling path stays as the fallback.
+_LINT_IMPORTS = shutil.which("lint-imports") or str(Path(sys.executable).parent / "lint-imports")
 
 
 def test_import_linter_contracts_are_kept():
@@ -50,3 +52,33 @@ def test_contract_actually_detects_a_real_violation(tmp_path):
     )
     assert result.returncode != 0
     assert "app.api.routes_health -> psycopg" in result.stdout
+
+
+def test_tools_purity_contract_detects_an_httpx_import(tmp_path):
+    """Task 11 teeth: the tools-are-pure contract rejects an httpx import inside
+    app/tools (a scratch-tree copy, never the real files)."""
+    scratch = tmp_path / "core"
+    shutil.copytree(CORE_DIR, scratch, ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache"))
+    tool = scratch / "app" / "tools" / "size_advise.py"
+    tool.write_text(tool.read_text() + "\nimport httpx\n")
+
+    result = subprocess.run(
+        [_LINT_IMPORTS], cwd=scratch, capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "app.tools.size_advise -> httpx" in result.stdout
+
+
+def test_verify_rules_guard_contract_detects_an_app_fit_import(tmp_path):
+    """Task 11 teeth: verify_rules must never import app.fit - the advice always
+    arrives as plain data (SizeContext), checked on a scratch-tree copy."""
+    scratch = tmp_path / "core"
+    shutil.copytree(CORE_DIR, scratch, ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache"))
+    rules = scratch / "app" / "workers" / "verify_rules.py"
+    rules.write_text(rules.read_text() + "\nimport app.fit.size_advisor\n")
+
+    result = subprocess.run(
+        [_LINT_IMPORTS], cwd=scratch, capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "app.workers.verify_rules -> app.fit.size_advisor" in result.stdout

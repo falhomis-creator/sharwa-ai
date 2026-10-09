@@ -34,6 +34,7 @@ from app.api.errors import ApiError, api_error_handler, unhandled_exception_hand
 from app.api.routes_carts import router as carts_router
 from app.api.routes_catalog import router as catalog_router
 from app.api.routes_channels import router as channels_router
+from app.api.routes_gift import router as gift_router
 from app.api.routes_health import router as health_router
 from app.api.routes_inbox import router as inbox_router
 from app.api.routes_killswitches import router as killswitches_router
@@ -164,6 +165,7 @@ def create_app() -> FastAPI:
     app.include_router(inbox_router)
     app.include_router(catalog_router)
     app.include_router(carts_router)
+    app.include_router(gift_router)
     app.include_router(channels_router)
     app.include_router(marketing_admin_router)
     app.include_router(ws_router)
@@ -172,6 +174,15 @@ def create_app() -> FastAPI:
     # points at a real directory - absent by default, so nothing is served unasked.
     static_dir = os.environ.get("CONSOLE_STATIC_DIR", "").strip()
     if static_dir and Path(static_dir).is_dir():
+        # P4 Task 6b: the console reads which platform origins may hand it a token
+        # (postMessage). Public by design - origins are not secrets. Registered
+        # BEFORE the mount so the static files never shadow it.
+        sso_origins = list(settings.console_sso_platform_origins)
+
+        @app.get("/console/sso-config.json", include_in_schema=False)
+        async def console_sso_config() -> dict[str, list[str]]:
+            return {"platform_origins": sso_origins}
+
         app.mount("/console", StaticFiles(directory=static_dir, html=True), name="console")
 
     return app
