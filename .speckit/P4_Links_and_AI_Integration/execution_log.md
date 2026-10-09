@@ -1023,3 +1023,33 @@ app.cli migrate -> applied: 0021_p4_gift_carts
 - **OQ-P4-25:** منزلتان عشريتان في قاعدة البيانات لـ YER/SAR/USD/AED معتمدة (حتى لو عُرض الريال اليمني بلا كسور في الواجهة).
 - **الحلّال داخل المعاملة:** مقبول؛ حدّ الخطوات الثابت يحدّ الزمن.
 - **مسار شروه `/checkout/gift/{id}`:** ينفّذه فريق شروه منفصلاً؛ `GIFT_ENABLED` يبقى false حتى ذلك.
+
+## Tasks 16 و14 — commit (2026-10-09)
+`8810d04 feat(p4): search golden set with vector relevance floor (Task 16, F-P4-15) and gift baskets with checkout links (Task 14)` — بأمر المالك.
+
+## Task 9 — اختبارات ذهبية وخاصية لمستشار المقاسات + F-P4-16 (المعماري منفّذاً، 2026-10-09)
+**الملف:** `core/tests/test_size_advisor_golden.py` — 17 حالة ذهبية على جدول مرجعي (S/M/L/XL) منها مثال الكارثة «95 كغ لا يحصل على M» بكل الأطوال 165–178، وحدّ تسامح الوزن (90 مقبول / 91 مرفوض بلا XL)، ومسار القياسات؛ وخصائص بمسح شبكي حتمي (بلا مولّد عشوائي): رتابة الوزن (طول 150–200 × وزن 40–105 × 3 تفضيلات × جدولين)، رتابة الطول، رتابة الصدر، الحارس الصلب على كل مقاس مقترح (والبديل)، اتساق out_of_range مع أسبابه، المجموعة المغلقة للأسباب، الحتمية.
+**أول تشغيل (حرفياً):** `9 failed, 25 passed` — الحالات الذهبية كلها ناجحة؛ الفشل كله في الرتابة: `AssertionError: (176, 47, 'fitted')` … `(151, 64, …)`.
+**F-P4-16 (اكتُشف هنا):** فرع «أقرب مقاس» (nearest_out_of_range) جمع مسافتين مطبّعتين بعرض المدى، فلا رتابة: طول 176 ووزن 40–46 ⇒ M، ثم 47–50 ⇒ S، ثم 51 ⇒ M (كلها out_of_range). يخالف §5.1 صراحةً («زيادة الوزن لا تُنزل المقاس»).
+**الإصلاح (قرار المعماري، للمراجعة):** الأقرب يُختار بالوزن أولاً (كغ خارج المدى)، ثم الطول لكسر التعادل (سم)، ثم الأكبر — الوزن يقود لأنه ما يحميه الحارس الصلب؛ الناتج يبقى مُعلَّماً out_of_range. التغيير في فرع واحد (`app/fit/size_advisor.py`، دالة `_outside_kg_cm`). بعده: `54 passed` (الجديد + `test_size_advisor.py` المعتمد كما هو).
+**فحص التحوّل:** تعطيل الحارس ⇒ `4 failed, 30 passed`؛ العودة للمسافة المطبّعة ⇒ `9 failed, 25 passed`؛ تسامح 3 كغ ⇒ `1 failed, 33 passed` (g10). ملاحظة: إعادة التشغيل الأولى بعد الاستعادة أظهرت فشلاً من ملف bytecode قديم (نفس الحجم والثانية) — حُذف `__pycache__` ⇒ `54 passed`.
+
+## Task 19 — الحزمة الكاملة مرّتين (2026-10-09، الحاوية Linux PG16)
+```
+[run 1] 521 passed, 1 skipped, 686 deselected, 2 warnings in 269.78s (0:04:29)
+[run 2] 521 passed, 1 skipped, 686 deselected, 2 warnings in 272.22s (0:04:32)
+DB SUITE: STABLE (521 passed twice)
+pure run 1: 682 passed, 526 deselected in 6.68s
+pure run 2: 682 passed, 526 deselected in 6.41s
+-m tools: 4 passed ; node --test tests/js/console_sso.test.mjs: pass 9 fail 0
+static_gate PASSED 0 ; check_env PASSED ; lint-imports 8 kept 0 broken ; ruff 302 ; mypy 103 ; tenants = 0
+```
+لا انحدار: المرجع القديم 471 (P3 Gate G) ⇒ 521؛ لم يُحذف أي اختبار. التخطّي الوحيد: الاختبار الحي لـOpenAI. UNVERIFIED: PG18 لدى المالك.
+
+## Task 20 — التوثيق (2026-10-09)
+جديد `docs/P4_SPECKIT_CLOSEOUT.md`؛ `docs/PHASE_GATE.md` (P4: BUILT & PARTLY DEPLOYED)؛ `MASTER_ROADMAP_AND_GAPS.md` (صف P4 + تحديث 2026-10-09، حظر P5/P6 قائم)؛ `docs/SPECKIT_PROTOCOL.md` §6 (صف P4)؛ tasks.md: 9/19/20 [x].
+**توقّف:** Task 9 (إصلاح F-P4-16) ووثائق الإغلاق غير ملتزمة — بانتظار اعتماد المالك، ثم دمج `p4-links-ai` إلى `main` بيد المالك.
+
+## إغلاق P4 النهائي (أمر المالك، 2026-10-09)
+- Task 9 وإصلاح F-P4-16 (الوزن قبل الطول في المقاس الأقرب خارج المدى) معتمدان؛ Task 19 (521 ×2) مُقَرّ؛ Task 20 معتمد.
+- يتوقّف كل تنفيذ في P4. الدمج إلى `main` والنشر على الخادم بيد المالك.

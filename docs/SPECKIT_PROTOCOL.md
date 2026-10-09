@@ -68,3 +68,4 @@
 |---|---|---|
 | P2.3 Back-in-Stock (تحصين وإغلاق) | `.speckit/P2_3_BackInStock/` | تحصين مكتمل جزئياً: Task 1–8 و10 معتمدة، Task 9 جزئي (F-P2-11 ⇒ P2.4) |
 | P3 Marketing Automation (إغلاق النواقص) | `.speckit/P3_MarketingAutomation/` | مُغلَق هندسياً: T1–T21 عدا بنود المالك؛ 462 passed ×2 (PG18)؛ التفعيل للمالك |
+| P4 Links & AI Integration | `.speckit/P4_Links_and_AI_Integration/` | مُغلَق هندسياً 2026-10-09: T1–T20 (+6ب، 18ب)؛ 521 passed ×2 (Linux PG16)؛ F-P4-01..16؛ منشور على ai.sharwaah.com (docs/P4_SPECKIT_CLOSEOUT.md) |

@@ -119,6 +119,11 @@ def _outside(x: Decimal, rng: Range) -> Decimal:
     return Decimal("0")
 
 
+def _outside_kg_cm(x: Decimal, rng: Range) -> Decimal:
+    """Raw distance outside a range, in the range's own unit (kg or cm)."""
+    return max(rng[0] - x, x - rng[1], Decimal("0"))
+
+
 def _from_mid(x: Decimal, rng: Range) -> Decimal:
     return abs(x - (rng[0] + rng[1]) / 2) / _width(rng)
 
@@ -228,6 +233,13 @@ def advise(
             ordered = _best(in_range, mid)
         return SizeAdvice(ordered[0].label, ordered[1].label, "medium", ("multiple_matches_fit_pref",), False)
 
-    dist = {r.label: _outside(height_cm, _hw(r)[0]) + _outside(weight_kg, _hw(r)[1]) for r in hw_rows}
-    nearest = _best(hw_rows, dist)[0]
+    # F-P4-16 (Task 9 property test): the nearest size is chosen by WEIGHT first
+    # (kg outside the range), height only breaking a tie (cm outside), then the
+    # larger size. The earlier sum of width-normalised distances was not monotonic:
+    # a 40 kg / 176 cm customer got M while a 47 kg one got S (§5.1: more weight
+    # must never give a smaller size). Weight leads because it is what the hard
+    # guard protects; the answer stays flagged out_of_range either way.
+    nearest = sorted(hw_rows, key=lambda r: (
+        _outside_kg_cm(weight_kg, _hw(r)[1]), _outside_kg_cm(height_cm, _hw(r)[0]), -r.sort_order,
+    ))[0]
     return SizeAdvice(nearest.label, None, "low", ("nearest_out_of_range",), True)
