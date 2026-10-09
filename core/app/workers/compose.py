@@ -50,6 +50,23 @@ def compose_product_list(cards: list[dict[str, Any]]) -> str:
     return PRODUCT_LIST_TEMPLATE.format(items="\n".join(f"• {t}" for t in titles))
 
 
+GIFT_BASKETS_TEMPLATE = (
+    "اقترحت لك هذه المجموعات ضمن ميزانيتك 🎁\n\n{baskets}\n\n"
+    "اختر المجموعة التي تعجبك وافتح رابطها؛ السعر النهائي يظهر لك في صفحة الدفع."
+)
+
+
+def compose_gift_baskets(offers: list[tuple[str, tuple[str, ...]]], base_url: str) -> str:
+    """P4 Task 14: up to 3 baskets, each = the merchant's own titles verbatim +
+    its checkout link (base_url + cart id). No price, no total, no generated
+    sentence (H35, §5.2: the platform prices the basket)."""
+    blocks = [
+        f"{n}) " + " + ".join(titles) + f"\n{base_url}{cart_id}"
+        for n, (cart_id, titles) in enumerate(offers[:3], start=1)
+    ]
+    return GIFT_BASKETS_TEMPLATE.format(baskets="\n\n".join(blocks))
+
+
 def compose_policy_answer(content: str) -> str:
     """The merchant's own policy text, verbatim, truncated at the written cap."""
     return content[:MAX_POLICY_CHARS]

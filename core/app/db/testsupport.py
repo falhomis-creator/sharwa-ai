@@ -138,6 +138,7 @@ def delete_tenant_full(dsn: str, tenant_id: uuid.UUID) -> None:
             "DELETE FROM order_lookup_attempts WHERE tenant_id = %s",
             "DELETE FROM address_resolutions WHERE tenant_id = %s",
             "DELETE FROM checkout_sessions WHERE tenant_id = %s",
+            "DELETE FROM gift_carts WHERE tenant_id = %s",
             "DELETE FROM verifier_blocks WHERE tenant_id = %s",
             "DELETE FROM llm_calls WHERE tenant_id = %s",
             # proactive_ledger references outbox + customers + channel_accounts,

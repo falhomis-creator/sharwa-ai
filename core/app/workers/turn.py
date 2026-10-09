@@ -29,6 +29,7 @@ from app.workers import address
 from app.workers import compose
 from app.workers import optout
 from app.workers import orders
+from app.workers import gift
 from app.workers import size
 from app.workers import stock
 from app.workers import templates
@@ -144,6 +145,9 @@ class _TurnPlan:
     # P4 Task 18b-2b: a size question answered by the deterministic size path
     # (only ever True when settings.size_advice_enabled).
     size_turn: bool = False
+    # P4 Task 14: a gift request answered by the deterministic gift path
+    # (only ever True when settings.gift_enabled).
+    gift_turn: bool = False
 
 
 @dataclass(frozen=True)
@@ -271,6 +275,29 @@ def _size_action(conn: Any, plan: _TurnPlan) -> _Action:
     )
 
 
+# Gift outcomes that end the bot's turn with a human hand-off (their text says so).
+_GIFT_HANDOFF = {"no_basket": "gift_no_basket", "currency_mismatch": "gift_currency"}
+
+
+def _gift_action(conn: Any, settings: WorkerSettings, plan: _TurnPlan) -> _Action:
+    """P4 Task 14: baskets within the customer's budget, each with its checkout
+    link - or a question for the budget, or a hand-off. Deterministic."""
+    turn = gift.curate_for_turn(
+        conn, tenant_id=plan.tenant_id, conversation_id=plan.conversation_id, bodies=plan.bodies,
+    )
+    if turn.status == "baskets":
+        text = compose.compose_gift_baskets(
+            [(str(o.cart_id), o.titles) for o in turn.offers], settings.gift_checkout_base_url,
+        )
+        return _Action("gift_baskets", text, False, None, "template", "gift_baskets")
+    if turn.status == "need_budget":
+        return _Action("gift_need_budget", templates.template_text("gift_need_budget"), False, None,
+                       "template", "gift_need_budget")
+    template_id = _GIFT_HANDOFF.get(turn.status, "gift_no_basket")
+    return _Action(template_id, templates.template_text(template_id), True, template_id,
+                   "template", template_id)
+
+
 def _resolve_action(
     conn: Any, settings: WorkerSettings, plan: _TurnPlan, router_result: Any,
     query_vector: repos_catalog.QueryVector | None = None,
@@ -280,6 +307,8 @@ def _resolve_action(
         return _order_action(settings, order_lookup)
     if plan.size_turn:
         return _size_action(conn, plan)
+    if plan.gift_turn:
+        return _gift_action(conn, settings, plan)
     intent = router_result.decision.intent if router_result is not None else "other"
     if intent == "product_search":
         query = router_result.decision.query if router_result is not None else ""
@@ -389,6 +418,14 @@ def process_turn(
         )
         if size_turn:
             route = False
+        # P4 Task 14: a gift request is a deterministic path too (code rule);
+        # checked only when the owner switched it on (GIFT_ENABLED).
+        gift_turn = bool(
+            route and settings.gift_enabled
+            and gift.is_gift_request(tuple(b for _, b in bodies if b))
+        )
+        if gift_turn:
+            route = False
         if route and router is not None:
             from app.llm import budget
             budget_state = budget.ensure_and_check(
@@ -403,7 +440,7 @@ def process_turn(
             conversation_id=conversation_id, tenant_id=tenant_id,
             channel_id=channel_id, decision=decision,
             bodies=tuple(b for _, b in bodies if b), should_route=route,
-            size_turn=size_turn,
+            size_turn=size_turn, gift_turn=gift_turn,
         )
 
     # ---- Phase 2: router call + query embedding, OUTSIDE any transaction (H40) ----

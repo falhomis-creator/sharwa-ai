@@ -409,6 +409,8 @@ class WorkerSettings:
     # P1.5b embedding + vector search (PROMPT §5.1-§5.3). All defaults written (H4).
     embedding_provider: str = "fake"
     embedding_dim: int = 1024
+    # F-P4-15: the vector search relevance floor (cosine distance, 0 < x <= 2).
+    search_vector_max_distance: float = 0.99
     # P4 Task 15: the paid provider's model/credentials (unused by fake/local).
     embedding_model: str = "text-embedding-3-small"
     embedding_api_key: str = ""
@@ -448,6 +450,10 @@ class WorkerSettings:
     # (owner decision 2026-10-09, after F-P4-09 and F-P4-10); SIZE_ADVICE_ENABLED=false
     # turns it off and the turn then behaves byte-for-byte as before.
     size_advice_enabled: bool = True
+    # P4 Task 14: gift baskets with a checkout link. OFF by default: the texts are
+    # approved (OQ-P4-24); it stays dark until the platform route exists.
+    gift_enabled: bool = False
+    gift_checkout_base_url: str = "https://sharwaah.com/checkout/gift/"
     order_ref_pattern: Any = None  # compiled at load (re.Pattern) - no static default
     order_lookup_timeout_s: float = 4.0
     order_lookup_max_phone_candidates: int = 3
@@ -592,6 +598,18 @@ class WorkerSettings:
         validate_embedding_provider(env, embedding_provider)
         embedding_dim = _int("EMBEDDING_DIM", 1024)
         validate_embedding_dim(embedding_dim)
+        gift_checkout_base_url = _optional("GIFT_CHECKOUT_BASE_URL", "https://sharwaah.com/checkout/gift/")
+        if not (gift_checkout_base_url.startswith("https://") and gift_checkout_base_url.endswith("/")):
+            raise ConfigError(
+                "GIFT_CHECKOUT_BASE_URL must be an https:// URL ending with '/', "
+                f"got {gift_checkout_base_url!r}"
+            )
+        search_vector_max_distance = _float("SEARCH_VECTOR_MAX_DISTANCE", 0.99)
+        if not 0.0 < search_vector_max_distance <= 2.0:
+            raise ConfigError(
+                "SEARCH_VECTOR_MAX_DISTANCE must be in (0, 2] (cosine distance), "
+                f"got {search_vector_max_distance}"
+            )
         embedding_api_key = _optional("OPENAI_API_KEY", "")
         if embedding_provider in REAL_EMBEDDING_PROVIDERS and not embedding_api_key:
             raise ConfigError(
@@ -760,6 +778,7 @@ class WorkerSettings:
             embedding_provider=embedding_provider,
             embedding_dim=embedding_dim,
             embedding_model=_optional("EMBEDDING_MODEL", "text-embedding-3-small"),
+            search_vector_max_distance=search_vector_max_distance,
             embedding_api_key=embedding_api_key,
             embedding_base_url=_optional("OPENAI_BASE_URL", "https://api.openai.com/v1"),
             embed_interval_s=_int("EMBED_INTERVAL_S", 300),
@@ -788,6 +807,8 @@ class WorkerSettings:
             verify_join_window_max=_int("VERIFY_JOIN_WINDOW_MAX", 6),
             tools_enabled=_bool("TOOLS_ENABLED", True),
             size_advice_enabled=_bool("SIZE_ADVICE_ENABLED", True),
+            gift_enabled=_bool("GIFT_ENABLED", False),
+            gift_checkout_base_url=gift_checkout_base_url,
             order_ref_pattern=order_ref_pattern,
             order_lookup_timeout_s=_float("ORDER_LOOKUP_TIMEOUT_S", 4.0),
             order_lookup_max_phone_candidates=_int("ORDER_LOOKUP_MAX_PHONE_CANDIDATES", 3),

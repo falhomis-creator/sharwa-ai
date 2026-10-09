@@ -57,6 +57,7 @@ def test_nginx_mirrors_the_allow_list_and_logs_no_query_string():
     assert re.search(r"    location / \{\n        return 404;\n    \}\n\}", NGINX)
     log_format = NGINX.split("log_format sharwa_ai_noquery", 1)[1].split(";", 1)[0]
     assert "$uri" in log_format and "$request_uri" not in log_format and "$args" not in log_format
-    for exact in ("/webhooks/platform/catalog", "/webhooks/platform/cart", "/v1/ws", "/healthz"):
+    for exact in ("/webhooks/platform/catalog", "/webhooks/platform/cart", "/webhooks/platform/gift-cart",
+                  "/v1/ws", "/healthz"):
         assert f"location = {exact} " in NGINX
     assert "location /metrics" not in NGINX and "location = /metrics" not in NGINX

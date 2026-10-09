@@ -25,7 +25,7 @@
 	# Platform webhooks (Sharwa -> engine). The api enforces its own 256 KiB
 	# limit (PLATFORM_WEBHOOK_BODY_MAX_BYTES) and HMAC; the proxy caps a bit
 	# above it so the api still answers with its own error code.
-	@webhooks path /webhooks/platform/catalog /webhooks/platform/cart
+	@webhooks path /webhooks/platform/catalog /webhooks/platform/cart /webhooks/platform/gift-cart
 	handle @webhooks {
 		request_body {
 			max_size 512KB

@@ -55,6 +55,22 @@ TEMPLATES: dict[str, str] = {
     "stock_cancelled": "تم إلغاء تسجيلك من قائمة الانتظار.",
     "stock_already_waiting": "أنت مسجّل مسبقاً في قائمة الانتظار لهذا المنتج. سنُشعرك فور توفره.",
     "stock_unavailable": "هذا المنتج غير متوفر حالياً. هل تريد أن أسجّلك في قائمة الانتظار ليصل لك تنبيه فور توفره؟",
+    # P4 Task 14 gift baskets. Texts APPROVED by the owner (OQ-P4-24,
+    # 2026-10-09) as the production baseline. The feature stays dark
+    # (GIFT_ENABLED=false) until the platform's /checkout/gift/{id} route exists.
+    # No price or total ever (the platform prices the basket at checkout, §5.2).
+    "gift_need_budget": (
+        "يسعدني أساعدك في اختيار هدية 🎁 أرسل لي كلمة «هدية» مع ميزانيتك، "
+        "مثال: هدية بـ 20000 ريال."
+    ),
+    "gift_no_basket": (
+        "لم أجد مجموعة هدايا مناسبة ضمن هذه الميزانية حالياً، وقد حوّلت محادثتك "
+        "لأحد ممثلي خدمة العملاء ليساعدك في الاختيار. 🎁"
+    ),
+    "gift_currency": (
+        "لأقترح هدية بدقة أحتاج الميزانية بعملة المتجر، وقد حوّلت محادثتك لأحد "
+        "ممثلي خدمة العملاء ليساعدك. 🎁"
+    ),
     # P4 Task 18b-1 size advice (SizeAdvisor §5.1). PROPOSED texts (OQ-P4-21) kept
     # VERBATIM until the owner approves or edits them. Contract (OQ-P4-15/16): a
     # size label is ALWAYS written right after the word «مقاس» (so the Verifier

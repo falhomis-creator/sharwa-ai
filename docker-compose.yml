@@ -392,6 +392,10 @@ services:
       # (dark by default). Switching re-embeds the catalog automatically (F-P4-13).
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      # P4 Task 14: gift baskets with a checkout link - texts approved (OQ-P4-24);
+      # OFF until the platform's /checkout/gift/{id} route exists.
+      GIFT_ENABLED: ${GIFT_ENABLED:-false}
+      GIFT_CHECKOUT_BASE_URL: ${GIFT_CHECKOUT_BASE_URL:-https://sharwaah.com/checkout/gift/}
       MARKETING_FOOTER_AR: ${MARKETING_FOOTER_AR:-}
       MARKETING_MIN_WARMUP_DAYS: ${MARKETING_MIN_WARMUP_DAYS:-3}
     networks: [data, app]                  # data: pg/pgbouncer/redis-durable/redis-cache. app: prometheus scrape target

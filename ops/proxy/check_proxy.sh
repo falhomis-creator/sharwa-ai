@@ -22,7 +22,7 @@ bad() { FAIL=$((FAIL + 1)); printf 'FAIL  %s (got %s)\n' "$1" "$2"; }
 code() { curl -s -o /dev/null -w '%{http_code}' --max-time 15 "${OPTS[@]}" "$@"; }
 
 # 1. paths that must reach the api (anything but a proxy 404 / 5xx)
-for p in /healthz /console/ /v1/me /webhooks/platform/catalog /webhooks/platform/cart; do
+for p in /healthz /console/ /v1/me /webhooks/platform/catalog /webhooks/platform/cart /webhooks/platform/gift-cart; do
     c=$(code "$BASE$p")
     case "$c" in 404|000|5??) bad "reaches api: GET $p" "$c" ;; *) ok "reaches api: GET $p -> $c" ;; esac
 done

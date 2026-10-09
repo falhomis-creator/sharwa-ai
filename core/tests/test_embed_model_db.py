@@ -124,7 +124,10 @@ def test_vector_search_compares_only_same_model_vectors(products):
     def vector_ids(model: str) -> list[str]:
         with core_db.tenant_tx(TENANT_A) as conn:
             return repos_catalog._vector_product_ids(
-                conn, tenant_id=TENANT_A, query_vector=repos_catalog.QueryVector(model, query),
+                # max_distance=2.0: no relevance floor (F-P4-15), so this test
+                # sees model scoping alone - the shoe shares no word with the query.
+                conn, tenant_id=TENANT_A,
+                query_vector=repos_catalog.QueryVector(model, query, max_distance=2.0),
                 category=None, limit=10,
             )
     assert vector_ids(OLD) == [str(ids["P-SHIRT"])]

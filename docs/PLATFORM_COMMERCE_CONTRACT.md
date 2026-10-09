@@ -102,6 +102,20 @@ class _HmacAuth(httpx.Auth):
 
 المعاملات: `tenant_ref`, `page` (اختياري). **محجوز — غير مطلوب من شروه تنفيذه الآن** (F-P4-01): لا ندّاء له في المحرك، يبقى في المنفذ للمستقبل.
 
+### 4.5 سلة الهدية — الاتجاه المعاكس: شروه ⇐ المحرك (P4 Task 14، 2026-10-09)
+
+**قرار المالك (OQ-P4-06):** رابط الدفع الذي يصل العميل بالصيغة `https://sharwaah.com/checkout/gift/{cart_id}` (`GIFT_CHECKOUT_BASE_URL`). `cart_id` معرّف UUID يولّده المحرك لكل سلة اقترحها منسّق الهدايا ويخزّنها (`gift_carts`، ترحيل 0021) — بلا سعر ولا إجمالي.
+
+**ما على شروه تنفيذه:** صفحة `/checkout/gift/{cart_id}` في نطاق المتجر تستدعي المحرك:
+
+- `POST https://ai.sharwaah.com/webhooks/platform/gift-cart`
+- الجسم `{"tenant_ref": "<schema المتجر>", "cart_id": "<uuid>"}` (≤ 1 KB)
+- التوقيع نفسه للـwebhooks: `X-Platform-Timestamp` + `X-Platform-Signature = HMAC-SHA256(PLATFORM_WEBHOOK_SECRET, "<ts>." + raw body)`، نافذة إعادة التشغيل نفسها.
+- 200 ⇐ `{"status":"ok","cart":{"cart_id","currency","expires_at","items":[{"platform_product_id","platform_variant_id","qty":1}]}}` — معرّفات فقط.
+- 404 `NOT_FOUND` ⇐ متجر غير معروف/موقوف، أو سلة لمتجر آخر، أو رابط منتهٍ (7 أيام)؛ 401 توقيع/وقت؛ 422 جسم غير صالح.
+
+ثم تسعّر شروه العناصر حياً وتتحقق من التوفر وتنشئ الدفع بنفسها (المحرك لا يحسب إجمالياً، §5.2). **غير منفّذ في شروه بعد** — الميزة مطفأة في المحرك (`GIFT_ENABLED=false`) حتى ذلك.
+
 ## 5. الصفحات والمؤشر (F-P4-01 وF-P4-03)
 
 - `/changes` بلا `since` = من أول التاريخ: يعيد الكتالوج الحالي **كاملاً** كأحداث upsert مُقسَّمة صفحات (F-P4-01).

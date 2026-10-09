@@ -122,7 +122,10 @@ def query_vector(
         vec = decode_vector(raw)
         if vec is not None and len(vec) == settings.embedding_dim:
             metrics.embed_query_cache_total.labels("hit").inc()
-            return repos_catalog.QueryVector(model=handle.model_name, values=vec)
+            return repos_catalog.QueryVector(
+                model=handle.model_name, values=vec,
+                max_distance=settings.search_vector_max_distance,
+            )
         metrics.embed_query_cache_total.labels("miss").inc()
 
     # 2. budget check (short tx; creates the month row so the later account works).
@@ -197,7 +200,9 @@ def query_vector(
         obs_logging.log_event(_log, event="embed.account_failed", component="embed",
                               level=logging.WARNING, error=str(exc))
 
-    return repos_catalog.QueryVector(model=handle.model_name, values=vec)
+    return repos_catalog.QueryVector(
+        model=handle.model_name, values=vec, max_distance=settings.search_vector_max_distance,
+    )
 
 
 # --- batch product embedding (V2/V3) ------------------------------------------

@@ -958,3 +958,68 @@ pytest -q        -> 617 passed, 515 deselected
 pytest -q -m db  -> 511 passed, 621 deselected, 2 warnings in 272.91s   (بعد إعادة تشغيل PG في الحاوية؛ أول محاولة: 511 errors = PG متوقف، لا فشل اختبار)
 static_gate -> PASSED 0 ; lint-imports -> 8 kept ; ruff 302 ; mypy 103
 ```
+
+## Task 15 + F-P4-14 — commit (2026-10-09)
+`509a0b9 feat(p4): OpenAI embedding adapter with model-scoped vectors (Task 15, F-P4-13) and real DeepSeek budget prices (F-P4-14)` — بأمر المالك.
+
+## Task 16 — المجموعة الذهبية للبحث (دلالي مقابل معجمي) + F-P4-15 (المعماري منفّذاً، 2026-10-09)
+
+**الملفات:** `core/tests/search_golden.py` (كتالوج عربي 13 منتجاً، 21 استعلاماً في 4 فئات: exact 6، morph 5، synonym 6 (جزمة/شنطة/جوال/برفان/لبس)، english 4؛ + 3 استعلامات لمنتجات غير موجودة ABSENT)؛ `tests/test_search_golden_db.py` (يمرّ عبر `search_products` الإنتاجية)؛ `tests/test_search_golden.py` (نقي).
+**المقياس المعلن (قبل أي تشغيل):** Recall@3 لكل فئة (الدور يعرض ≤ 3 منتجات) + MRR@8. شروط النجاح للمزوّد الدلالي الحقيقي: لا انحدار (exact = 1.0 ولا يُفقد أي استعلام يجيبه المعجمي في أعلى 3) + Recall@3 على synonym+english ≥ 0.70 وأعلى من المعجمي.
+**النتيجة دون اتصال (حرفياً):**
+```
+mode                  class      n  recall@3   mrr@8
+lexical               exact      6      1.00   1.000
+lexical               morph      5      0.80   0.800
+lexical               synonym    6      0.17   0.167
+lexical               english    4      0.00   0.000
+hybrid/local          exact      6      1.00   1.000
+hybrid/local          morph      5      0.80   0.800
+hybrid/local          synonym    6      0.50   0.500
+hybrid/local          english    4      0.00   0.000
+hybrid/oracle         exact      6      1.00   1.000
+hybrid/oracle         morph      5      1.00   1.000
+hybrid/oracle         synonym    6      1.00   1.000
+hybrid/oracle         english    4      1.00   1.000
+absent-empty-rate local-embedding: 1.00 ; golden-oracle: 1.00
+```
+`oracle` = مزوّد حتمي يتصرّف دلالياً بالبناء (مرادفات/جمع/إنجليزي ⇒ مفهوم واحد) — **ليس ادعاء جودة**؛ يثبت السباكة: متجهات النموذج نفسه + دمج RRF ترفع الاسترجاع بلا انحدار. **قياس OpenAI الحقيقي:** `test_golden_set_live_openai` يعمل فقط مع `OPENAI_API_KEY` (تخطّي هنا: لا مفتاح) — UNVERIFIED؛ يطبع الجدول ومسافات المعايرة.
+
+**F-P4-15 (اكتُشف هنا، أُصلح):** مصدر المتجهات بلا حدّ أدنى للصلة: يعيد دائماً حتى 50 منتجاً مرتّبة بالمسافة ⇒ استعلام عن شيء لا يبيعه المتجر يعود بـ8 بطاقات عشوائية بدل «لا نتائج». مسبار حرفي قبل الإصلاح (local): `قلم رصاص lexical: 0 hybrid: 8 ['P-SHOE','P-HEEL','P-SHIRT']`، `ثلاجة كبيرة … hybrid: 8`، `xyz … hybrid: 8`. **حيّ اليوم** على الخادم إن كان العامل يضمّن الكتالوج (EMBEDDING_PROVIDER=local افتراضياً). الإصلاح: `QueryVector.max_distance` (افتراضي 0.99 = يسقط ما لا تداخل فيه) و`AND (ce.embedding <=> q) < max_distance` في الاستعلامين؛ `SEARCH_VECTOR_MAX_DISTANCE` (0 < x ≤ 2) يُعايَر لكل نموذج دلالي من مخرجات الاختبار الحي. أثر جانبي مُعلَن: `hybrid/local` كان 1.00 morph و0.25 english بفضل نتائج عشوائية محظوظة؛ بعد الحدّ صارت الأرقام صادقة (0.80/0.00).
+**تعديل اختبار معتمد (مُعلَن):** `test_embed_model_db.py::test_vector_search_compares_only_same_model_vectors` صار يمرّر `max_distance=2.0` صراحةً — نيته (عزل النموذج) لم تتغير، لكن استعلامه لا يشارك الحذاء أي كلمة فكان سيسقطه الحدّ الجديد.
+
+## Task 14 — سلات الهدايا ورابط الدفع (المعماري منفّذاً، 2026-10-09)
+
+**قرار المالك (OQ-P4-06):** الرابط `https://sharwaah.com/checkout/gift/{cart_id}`؛ شروه يتولّى المسار.
+**التصميم (قرارات المعماري، للمراجعة):**
+- `cart_id` = UUID يولّده المحرك لكل سلة ويخزّنها في `gift_carts` (ترحيل `0021`، RLS صريحة، إلحاق فقط، صلاحية 7 أيام) — معرّفات المنتج/المتغيّر فقط، بلا سعر.
+- شروه يحلّ المعرّف عبر `POST /webhooks/platform/gift-cart` موقّعاً بنفس HMAC الـwebhooks (`routes_gift.py`)؛ 404 للمتجر الآخر/المجهول/المنتهي. أُضيف المسار إلى قائمة سماح Caddy وnginx و`check_proxy.sh` والعقد §4.5.
+- الكشف قاعدة كود (مثل المقاس): كلمة هدية + `GIFT_ENABLED` (افتراضي **false**)؛ `app/tools/gift_extract.py` نقي يقرأ الميزانية («20 الف»، «50,000»، أرقام عربية، يتجاهل الأعمار) والعملة المذكورة.
+- لا تحويل عملة: العملة المذكورة يجب أن تكون عملة المتجر؛ «ريال» مجرّد يطابق YER أو SAR فقط إن كان المتجر بواحدة منهما؛ متجر مختلط بلا ذكر عملة ⇒ تسليم بشري. الوحدات الصغرى: افتراض منزلتين (YER/SAR/USD/AED) — OQ-P4-25.
+- المرشّحون: أرخص متغيّر مسعّر لكل منتج ≤ الميزانية و`stock_hint` غير صفري (NULL = غير معروف ⇒ مسموح)؛ الصلة من ترتيب بحث المتجر لكلمات الاهتمام؛ ≤ K_MAX=60؛ الحلّال يعمل داخل المعاملة (محدود بـMAX_STEPS، يُسجَّل زمنه) — **بلا process pool** (انحراف عن §5.2 مُعلَن).
+- الرد: ≤ 3 سلات = عناوين التاجر حرفياً + رابط لكل سلة؛ **لا رقم** (الإجمالي من المنصة). نصوص القوالب الأربعة **مقترحة** — OQ-P4-24.
+**التحقق (حرفياً):**
+```
+pytest tests/test_gift_extract.py          -> 23 passed
+pytest -m db tests/test_gift_turn_db.py     -> 7 passed
+caddy validate -> Valid configuration ; nginx -t -> test is successful
+check_proxy (Caddy / nginx، المسار الجديد ضمن قائمة الوصول) -> 21 passed, 0 failed / 21 passed, 0 failed
+```
+**فحص التحوّل:** حذف فلتر المخزون، التحويل الضمني للعملة، تجاهل GIFT_ENABLED، تعطيل التوقيع، تجاهل الصلاحية، قراءة العمر كميزانية، أكثر من 3 سلات ⇒ كل واحد: 1 failed؛ بعد الاستعادة 7 passed / 23 passed.
+
+**الحزم بعد Task 16 + 14 (الحاوية، PG16):**
+```
+pytest -q        -> 648 passed, 526 deselected
+pytest -q -m db  -> 521 passed, 1 skipped, 652 deselected in 264.15s ; tenants بعدها = 0
+pytest -q -m tools -> 4 passed
+static_gate -> PASSED 0 ; lint-imports -> 8 kept ; ruff -> 302 ; mypy -> 103 ; check_env -> PASSED
+app.cli migrate -> applied: 0021_p4_gift_carts
+```
+**UNVERIFIED:** قياس OpenAI الحي؛ PG18؛ الترحيلان 0020/0021 على الخادم؛ مسار شروه `/checkout/gift/{id}` غير موجود بعد.
+**توقّف:** Task 16 وTask 14 غير ملتزمتين، بانتظار مراجعة المالك.
+
+## Tasks 16 و14 معتمدتان (أمر المالك، 2026-10-09)
+- **OQ-P4-24:** نصوص قوالب الهدايا الأربعة معتمدة كأساس إنتاجي (تحديث تعليقات templates/config/compose فقط — لا تغيير نص).
+- **OQ-P4-25:** منزلتان عشريتان في قاعدة البيانات لـ YER/SAR/USD/AED معتمدة (حتى لو عُرض الريال اليمني بلا كسور في الواجهة).
+- **الحلّال داخل المعاملة:** مقبول؛ حدّ الخطوات الثابت يحدّ الزمن.
+- **مسار شروه `/checkout/gift/{id}`:** ينفّذه فريق شروه منفصلاً؛ `GIFT_ENABLED` يبقى false حتى ذلك.

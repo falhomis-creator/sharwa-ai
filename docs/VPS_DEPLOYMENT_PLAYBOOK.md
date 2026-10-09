@@ -284,6 +284,7 @@ docker compose logs worker-realtime --tail 30 | grep -iE 'embed|ConfigError'
 | `/console/` (و`/console` ⇐ 308 إلى `/console/`) | نعم — اللوحة |
 | `/v1/*` ومنها `/v1/ws` (WebSocket) | نعم |
 | `/webhooks/platform/catalog`، `/webhooks/platform/cart` | نعم — سقف الجسم 512 KB في البروكسي (والـAPI يفرض 256 KB + HMAC) |
+| `/webhooks/platform/gift-cart` (P4 Task 14) | نعم — شروه يقرأ سلة الهدية الموقّعة (HMAC نفسه، جسم ≤ 1 KB) |
 | `/healthz` | نعم |
 | كل ما عداه، ومنه `/metrics` `/readyz` `/docs` `/redoc` `/openapi.json` | **لا — 404 من البروكسي** |
 
@@ -383,7 +384,7 @@ cd ~/sharwa_ai && bash ops/proxy/check_proxy.sh
 
 ### 12.6 ما يأتي في Task 18 (بيدك)
 
-- روابط الـwebhook في شروه: `https://ai.sharwaah.com/webhooks/platform/catalog` و`https://ai.sharwaah.com/webhooks/platform/cart` (السر نفسه `PLATFORM_WEBHOOK_SECRET`).
+- روابط الـwebhook في شروه: `https://ai.sharwaah.com/webhooks/platform/catalog` و`https://ai.sharwaah.com/webhooks/platform/cart` (السر نفسه `PLATFORM_WEBHOOK_SECRET`)، و(P4 Task 14) قراءة سلة الهدية `https://ai.sharwaah.com/webhooks/platform/gift-cart`. **بعد سحب هذا الإصدار على الخادم: انسخ `ops/proxy/Caddyfile` من جديد إلى `/etc/caddy/Caddyfile` وأعد تحميل Caddy** (أُضيف المسار إلى قائمة السماح).
 - إغلاق نفق SSH المؤقت بعد نجاح 12.5.
 
 ### 12.7 الرجوع
