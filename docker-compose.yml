@@ -387,6 +387,11 @@ services:
       # DeepSeek exposes no embeddings endpoint; `local` is the deterministic
       # no-network provider (production-safe; `fake` still refuses to boot).
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
+      # P4 Task 15: semantic search. EMBEDDING_PROVIDER=openai needs OPENAI_API_KEY
+      # (the worker refuses to boot without it, H5); the default stays `local`
+      # (dark by default). Switching re-embeds the catalog automatically (F-P4-13).
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
       MARKETING_FOOTER_AR: ${MARKETING_FOOTER_AR:-}
       MARKETING_MIN_WARMUP_DAYS: ${MARKETING_MIN_WARMUP_DAYS:-3}
     networks: [data, app]                  # data: pg/pgbouncer/redis-durable/redis-cache. app: prometheus scrape target

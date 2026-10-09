@@ -42,9 +42,9 @@ def compute_cost_micro_usd(
 ) -> int:
     """micro-USD from the (provider, model) price table: micro-USD per 1k tokens
     in and out. Unknown provider/model => 0 (fake/local providers are free by
-    default). P4.2: real providers have SUB-micro-USD rates (see
-    DEFAULT_LLM_PRICE_TABLE in app/workers/config.py), so rates may be floats;
-    the result is still an int (floor, same as the previous integer-only math)."""
+    default). Rates may be floats; the result is an int (floor). F-P4-14: $X per
+    1M tokens = X*1000 micro-USD per 1k (DEFAULT_LLM_PRICE_TABLE in
+    app/workers/config.py)."""
     entry = price_table.get(provider, {}).get(model)
     if entry is None:
         return 0

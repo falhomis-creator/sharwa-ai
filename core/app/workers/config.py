@@ -130,14 +130,25 @@ PGBOUNCER_DEFAULT_POOL_SIZE = 25
 # P4.2: deepseek rates from the official pricing page (api-docs.deepseek.com,
 # PEAK column - the higher one, so the tenant budget never under-counts):
 # deepseek-flash and the deepseek-chat alias are $0.30/M in + $1.20/M out;
-# deepseek-v4-pro is $1.32/M in + $3.96/M out. Per 1k tokens that is
-# 0.3/1.2 and 1.32/3.96 micro-USD. 'local' embeddings are free (no entry).
+# deepseek-v4-pro is $1.32/M in + $3.96/M out. Unit = micro-USD per 1k tokens
+# ($1 = 1,000,000 micro-USD): $0.30/M = 300 per 1k, $1.20/M = 1200 per 1k.
+# F-P4-14 (owner decision 2026-10-09): P4.2 wrote these 1000x too low
+# (0.3/1.2/1.32/3.96), so the $20 monthly budget practically never filled.
+# 'local' embeddings are free (no entry).
 DEFAULT_LLM_PRICE_TABLE: dict[str, Any] = {
     "fake": {"fake-router": {"input": 0, "output": 0}},
     "deepseek": {
-        "deepseek-chat": {"input": 0.3, "output": 1.2},
-        "deepseek-flash": {"input": 0.3, "output": 1.2},
-        "deepseek-v4-pro": {"input": 1.32, "output": 3.96},
+        "deepseek-chat": {"input": 300, "output": 1200},
+        "deepseek-flash": {"input": 300, "output": 1200},
+        "deepseek-v4-pro": {"input": 1320, "output": 3960},
+    },
+    # P4 Task 15: OpenAI EMBEDDINGS only (OpenAI stays excluded as the LLM).
+    # Unit = micro-USD per 1k tokens (budget.compute_cost_micro_usd):
+    # $0.02/M tokens = 20 micro-USD per 1k (-small); $0.13/M = 130 (-large).
+    # Owner-overridable via LLM_PRICE_TABLE.
+    "openai": {
+        "text-embedding-3-small": {"input": 20, "output": 0},
+        "text-embedding-3-large": {"input": 130, "output": 0},
     },
 }
 
@@ -281,6 +292,12 @@ def validate_llm_provider(env: str, provider: str) -> None:
         )
 
 
+# P4 Task 15 (owner decision 2026-10-09): the paid semantic embedding provider
+# (app/llm/adapters/openai_embedding.py). Selecting it requires OPENAI_API_KEY
+# at boot (H5). 'local' needs no key; 'fake' never runs in production.
+REAL_EMBEDDING_PROVIDERS = frozenset({"openai"})
+
+
 def validate_embedding_provider(env: str, provider: str) -> None:
     """P1.5b V1: the fake embedding provider is a test approximation, so it must
     never run against real customers either (same H-safety as the fake LLM).
@@ -392,6 +409,10 @@ class WorkerSettings:
     # P1.5b embedding + vector search (PROMPT §5.1-§5.3). All defaults written (H4).
     embedding_provider: str = "fake"
     embedding_dim: int = 1024
+    # P4 Task 15: the paid provider's model/credentials (unused by fake/local).
+    embedding_model: str = "text-embedding-3-small"
+    embedding_api_key: str = ""
+    embedding_base_url: str = "https://api.openai.com/v1"
     embed_interval_s: int = 300
     embed_batch: int = 32
     embed_max_products_per_cycle: int = 200
@@ -571,6 +592,11 @@ class WorkerSettings:
         validate_embedding_provider(env, embedding_provider)
         embedding_dim = _int("EMBEDDING_DIM", 1024)
         validate_embedding_dim(embedding_dim)
+        embedding_api_key = _optional("OPENAI_API_KEY", "")
+        if embedding_provider in REAL_EMBEDDING_PROVIDERS and not embedding_api_key:
+            raise ConfigError(
+                f"OPENAI_API_KEY is required when EMBEDDING_PROVIDER={embedding_provider} (see .env)"
+            )
 
         verify_safe_template_id = _optional("VERIFY_SAFE_TEMPLATE_ID", "handoff_notice")
         validate_safe_template_id(verify_safe_template_id)
@@ -733,6 +759,9 @@ class WorkerSettings:
             llm_router_max_output_tokens=_int("LLM_ROUTER_MAX_OUTPUT_TOKENS", 64),
             embedding_provider=embedding_provider,
             embedding_dim=embedding_dim,
+            embedding_model=_optional("EMBEDDING_MODEL", "text-embedding-3-small"),
+            embedding_api_key=embedding_api_key,
+            embedding_base_url=_optional("OPENAI_BASE_URL", "https://api.openai.com/v1"),
             embed_interval_s=_int("EMBED_INTERVAL_S", 300),
             embed_batch=_int("EMBED_BATCH", 32),
             embed_max_products_per_cycle=_int("EMBED_MAX_PRODUCTS_PER_CYCLE", 200),

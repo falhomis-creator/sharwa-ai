@@ -273,7 +273,7 @@ def _size_action(conn: Any, plan: _TurnPlan) -> _Action:
 
 def _resolve_action(
     conn: Any, settings: WorkerSettings, plan: _TurnPlan, router_result: Any,
-    query_vector: list[float] | None = None,
+    query_vector: repos_catalog.QueryVector | None = None,
     order_lookup: Any = None,
 ) -> _Action:
     if order_lookup is not None:
@@ -416,7 +416,7 @@ def process_turn(
     # H42: the query vector is an OPTIMIZATION. Only product-search turns need it,
     # and any failure to obtain it (breaker/budget/timeout/dim) yields None so the
     # search falls back to two lexical lists - never an exception to the caller.
-    query_vector: list[float] | None = None
+    query_vector: repos_catalog.QueryVector | None = None
     if (
         router_result is not None
         and router_result.decision.intent == "product_search"
@@ -461,7 +461,7 @@ def process_turn(
 def _write_phase(
     conn: Any, settings: WorkerSettings, plan: _TurnPlan,
     router: LlmRouterHandle | None, router_result: Any,
-    query_vector: list[float] | None = None,
+    query_vector: repos_catalog.QueryVector | None = None,
     rules: Any = None,
     order_lookup: Any = None,
 ) -> str:

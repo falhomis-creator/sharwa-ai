@@ -220,6 +220,25 @@ docker compose logs worker-realtime --tail 30   # لا يجب أن يظهر أي
 - **`DEEPSEEK_MODEL`**: الافتراضي `deepseek-chat` (قرار المالك). التشكيلة الحالية في وثائق DeepSeek تضم أيضاً `deepseek-flash` و`deepseek-v4-pro`؛ التبديل متغيّر بيئة واحد بلا نشر جديد.
 - كل مبادئ الحماية باقية: ميزانية شهرية للمستأجر (20$ افتراضياً، `TENANT_MONTHLY_BUDGET_MICRO_USD`)، قاطع + إعادة محاولة واحدة (H39)، «النموذج يصنّف والكود يكتب» (H38) — لا نصّ من إخراج النموذج يصل عميلاً أبداً.
 
+## 8.6 البحث الدلالي — OpenAI embeddings (P4 Task 15)
+
+> قرار المالك 2026-10-09: التضمين الدلالي عبر OpenAI (`text-embedding-3-small`)؛ DeepSeek يبقى نموذج اللغة الوحيد. الافتراضي يبقى `local` (مُظلم) حتى تُضيف المفتاح.
+
+```bash
+cd ~/sharwa_ai && export COMPOSE_ENV_FILES=.env.prod && umask 077
+bash scripts/migrate.sh                       # يطبّق 0020_p4_embedding_model (بعد docker compose build api)
+read -rs OA_KEY && printf '\n'
+sed -i '/^OPENAI_API_KEY=/d;/^EMBEDDING_PROVIDER=/d' .env.prod
+printf 'OPENAI_API_KEY=%s\nEMBEDDING_PROVIDER=openai\n' "$OA_KEY" >> .env.prod; unset OA_KEY
+chmod 600 .env.prod
+docker compose --profile engine up -d --no-deps worker-realtime
+docker compose logs worker-realtime --tail 30 | grep -iE 'embed|ConfigError'
+```
+- بلا مفتاح ⇐ `OPENAI_API_KEY is required` ويرفض العامل الإقلاع (H5).
+- عند التبديل يُعاد تضمين الكتالوج تلقائياً على دفعات (`EMBED_MAX_PRODUCTS_PER_CYCLE` كل `EMBED_INTERVAL_S`)؛ أثناء ذلك يقارن البحث المتجهي متجهات النموذج نفسه فقط، والمنتج غير المُعاد تضمينه يبقى مغطّى بالبحث المعجمي (H42).
+- الرجوع: `EMBEDDING_PROVIDER=local` ثم إعادة تشغيل العامل (يُعاد التضمين محلياً بلا تكلفة).
+- التكلفة: 20 micro-USD لكل 1k رمز (‎$0.02/M)؛ استعلامات البحث تُحتسب على ميزانية المستأجر، وتضمين الكتالوج يُسجَّل بتكلفته (حوكمة) دون أن يُحجَب بالميزانية.
+
 ## 9. ما يبقى مقفلاً (لا تغيّره في هذا النشر)
 
 - **لا مستأجر مُفعَّل للتسويق** وكل شيء الافتراضي OFF. التفعيل لاحقاً من اللوحة (عبارة تأكيد حرفية) أو CLI، وبقرارك.

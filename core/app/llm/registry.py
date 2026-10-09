@@ -38,15 +38,24 @@ def build_provider(llm_provider: str, settings: Any) -> LlmProvider:
 
 
 def build_embedding_provider(embedding_provider: str, settings: Any) -> EmbeddingProvider:
-    """Return the embedding provider (P1.5b V1, amended P4.2): 'fake'
-    (dev/tests only), or 'local' - the deterministic, no-network, no-cost
-    provider in app/llm/adapters/local_embedding.py (the LLM vendor exposes no
-    embeddings endpoint). Anything else refuses to boot."""
+    """Return the embedding provider (P1.5b V1, amended P4.2 and P4 Task 15):
+    'fake' (dev/tests only), or a real adapter module
+    app/llm/adapters/<name>_embedding.py exposing ``build(settings)`` - today
+    'local' (deterministic, no network, no cost) and the paid semantic
+    provider. Imported by name, like build_provider, so this file never names
+    a vendor (S8 rule 3). Anything else refuses to boot."""
     if embedding_provider == "fake":
         from tests.fake_embedding import FakeEmbeddingProvider
         return FakeEmbeddingProvider()
-    if embedding_provider == "local":
-        from app.llm.adapters import local_embedding
-        return local_embedding.build(settings)
-    raise RuntimeError(f"unknown EMBEDDING_PROVIDER {embedding_provider!r}")
+    if not embedding_provider.isidentifier():
+        raise RuntimeError(f"unknown EMBEDDING_PROVIDER {embedding_provider!r}")
+    try:
+        adapter = importlib.import_module(f"app.llm.adapters.{embedding_provider}_embedding")
+    except ImportError as exc:
+        raise RuntimeError(
+            f"unknown EMBEDDING_PROVIDER {embedding_provider!r} "
+            f"(no app/llm/adapters/{embedding_provider}_embedding.py)"
+        ) from exc
+    provider: EmbeddingProvider = adapter.build(settings)
+    return provider
 

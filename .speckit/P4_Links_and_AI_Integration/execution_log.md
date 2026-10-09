@@ -901,3 +901,60 @@ bash -n check_proxy.sh -> SH_OK
 توجيه حيّ أمام الخادم البديل بالنطاق الجديد: Caddy 20 passed, 0 failed ; nginx 20 passed, 0 failed
 ```
 **مستمر بعد الـcommit:** النسخة المعدّلة يدوياً على الخادم يمكن الآن استبدالها بـ`ops/proxy/Caddyfile` من المستودع (مطابقة). UNVERIFIED على الخادم.
+
+## Task 15 — محوّل التضمين الدلالي (OpenAI) + F-P4-13 (المعماري منفّذاً، 2026-10-09)
+
+**قرار المالك (يحسم OQ-P4-02):** لا تأجيل. مزوّد التضمين = OpenAI بالنموذج `text-embedding-3-small`، مع بقاء `local` بديلاً. DeepSeek يبقى نموذج اللغة الوحيد (استبعاد OpenAI في P4.2 يخصّ الـLLM فقط).
+
+**الكود:**
+- جديد `core/app/llm/adapters/openai_embedding.py`: `OpenAIEmbeddingProvider` عبر الـSDK الرسمي (`max_retries=0`، H39)؛ يطلب دائماً `dimensions=EMBEDDING_DIM` (1024، H44 — العرض الأصلي 1536)؛ يعيد ترتيب المتجهات حسب `index`؛ النص الفارغ ⇐ متجه صفري بلا استدعاء مدفوع؛ نقص متجه ⇐ `EmbeddingProviderError`؛ أخطاء الـSDK ⇐ `EmbeddingTimeoutError`/`EmbeddingProviderError` (القاطع + الفشل المفتوح H42 يبقيان المتحكّمَين)؛ `model_name`.
+- `app/llm/registry.py`: `build_embedding_provider` صار يستورد `app/llm/adapters/<name>_embedding.py` بالاسم (مثل `build_provider`) ⇒ السجلّ لا يسمّي مزوّداً (S8).
+- `app/workers/config.py`: `REAL_EMBEDDING_PROVIDERS={"openai"}`؛ `OPENAI_API_KEY` إلزامي عند اختياره (H5)؛ `EMBEDDING_MODEL` (افتراضي text-embedding-3-small)، `OPENAI_BASE_URL`؛ سطر سعر بوحدة الجدول (20 micro-USD/1k = ‎$0.02/M؛ ‎-large 130).
+- `docker-compose.yml` (worker-realtime): `OPENAI_API_KEY`، `EMBEDDING_MODEL`؛ الافتراضي يبقى `EMBEDDING_PROVIDER=local` (مُظلم، المادة 11). `.env.example` + الدليل §8.6.
+- تكلفة تضمين الكتالوج: كانت تُسجَّل 0 دائماً؛ الآن الرموز الحقيقية مقسومة على المستأجرين بطول النص ومسعّرة (fake/local يبقيان 0 و`chars//4`).
+
+**F-P4-13 (اكتُشف هنا، أُصلح):** نموذج التضمين لم يكن جزءاً من أي شيء: (1) المرشِّح `app.list_products_needing_embedding` يعيد التضمين عند تغيّر المحتوى فقط ⇒ بعد تبديل المزوّد تبقى متجهات `local` للأبد؛ (2) البحث المتجهي يقارن متجه الاستعلام بكل المتجهات دون النظر للنموذج ⇒ مقارنة فضاءين لا علاقة بينهما؛ (3) مفتاح كاش الاستعلام بلا نموذج ⇒ متجه النموذج السابق يُعاد ساعة كاملة. الإصلاح: ترحيل جديد `0020_p4_embedding_model.sql` (الدالة تأخذ `p_model` وتعيد ما كُتب بنموذج آخر؛ حُذفت نسخة المعامل الواحد)، `repos_catalog.QueryVector(model, values)` والبحث يرشّح `ce.model = <نموذج الاستعلام>`، الكتابة بـ`handle.model_name`، ومفتاح الكاش `emb:q:<model>:<sha>`. (اختبار الكاش المعتمد في test_vector.py لم يُعدَّل: المعامل `model` اختياري.)
+
+**F-P4-14 (سُجّل، لم يُغيَّر — قرار المالك):** أسعار DeepSeek في `DEFAULT_LLM_PRICE_TABLE` أقل بـ1000 مرة من وحدة الجدول: الوحدة micro-USD لكل 1k رمز، و‎$0.30/M = 300 لا 0.3. الأثر: 1000 رمز ⇒ `int(1000*0.3//1000)=0`؛ ميزانية المستأجر (20$) لا تكاد تُستهلك فلا تحمي. التصحيح يغيّر سلوك الإنتاج (الميزانية ستعمل فعلاً) ⇒ بانتظار قرار.
+
+**التحقق (حرفياً، الحاوية Linux، PG16):**
+```
+pytest tests/test_openai_embedding.py        -> 20 passed
+pytest -m db tests/test_embed_model_db.py     -> 4 passed
+pytest -q                                     -> 616 passed, 515 deselected   (596 + 20)
+pytest -q -m tools                            -> 4 passed
+pytest -q -m db (كاملة)                       -> 511 passed, 620 deselected in 277.20s   (507 + 4)؛ tenants بعدها = 0
+static_gate.py -> STATIC GATE PASSED — 0 violations.   (أول تشغيل: S9 ×2 لأن تعليقَي المحوّلين ذكرا اسم الجدول — أُعيدت صياغتهما)
+lint-imports -> Contracts: 8 kept, 0 broken.
+ruff -> Found 302 errors (دون تغيير؛ B905 الجديد أُصلح بـ zip(strict=True))
+mypy app -> Found 103 errors (دون تغيير؛ no-any-return الجديد في registry أُصلح)
+check_env.py -> ENV CHECK PASSED
+app.cli migrate -> applied: 0020_p4_embedding_model
+```
+**فحص التحوّل:**
+```
+بحث بلا "ce.model = %s"            -> 1 failed, 3 passed
+مفتاح كاش بلا نموذج                 -> 1 failed, 3 passed
+الكتابة بـ result.usage.model       -> 1 failed, 3 passed
+الدالة SQL بلا شرط النموذج           -> 2 failed, 2 passed
+المحوّل بلا dimensions               -> 4 failed, 16 passed
+المحوّل بلا ترتيب index              -> 1 failed, 19 passed
+حارس المفتاح معطّل                   -> 1 failed, 19 passed
+تعيين المهلة معطّل                   -> 1 failed, 19 passed
+بعد الاستعادة                        -> 20 passed / 4 passed
+```
+**UNVERIFIED:** أي استدعاء حقيقي لـOpenAI (لا مفتاح في البيئة؛ الاختبارات بعميل SDK بديل)؛ جودة الدلالة للعربية (هي موضوع Task 16)؛ سعر ‎$0.02/M مأخوذ من المعرفة السابقة ولم يُتحقق منه من صفحة الأسعار الرسمية (قابل للتغيير عبر `LLM_PRICE_TABLE`)؛ PG18 على جهاز المالك؛ الترحيل 0020 على الـVPS.
+
+**توقّف:** لا commit لـTask 15. بانتظار مراجعة المالك قبل Task 16 ثم Task 14.
+
+## Task 15 معتمدة + F-P4-14 مُصلَح (أمر المالك، 2026-10-09)
+
+**قرار المالك:** اعتماد Task 15 والالتزام بها، وإصلاح F-P4-14 في الـcommit نفسه.
+**F-P4-14:** `DEFAULT_LLM_PRICE_TABLE` — deepseek-chat/flash ⇐ `input 300, output 1200`؛ deepseek-v4-pro ⇐ `1320, 3960` (micro-USD لكل 1k رمز؛ ‎$0.30/M = 300). تحديث مثال `LLM_PRICE_TABLE` في `.env.example` (+ سطرا openai) ووصف `budget.compute_cost_micro_usd`. اختبار جديد `test_default_deepseek_prices_are_in_the_budget_unit` (1k+1k ⇐ 1500؛ 1M flash ⇐ 300,000؛ 1M+1M v4-pro ⇐ 5,280,000). اختبار الرياضيات المعتمد `test_llm.py::test_cost_math_fractional_deepseek_rates` يستعمل جدوله الخاص فلم يُمسّ ويبقى أخضر.
+**أثر تشغيلي:** ميزانية المستأجر (20$/شهر) صارت تُستهلك بالتكلفة الحقيقية؛ عند بلوغها تصبح الحالة degraded (الموجّه/تضمين الاستعلام يُتخطّى ⇐ قوالب/بحث معجمي). إن كان `.env.prod` على الـVPS يحوي `LLM_PRICE_TABLE` فهو يتقدّم على الافتراضي — UNVERIFIED.
+**التحقق (حرفياً):**
+```
+pytest -q        -> 617 passed, 515 deselected
+pytest -q -m db  -> 511 passed, 621 deselected, 2 warnings in 272.91s   (بعد إعادة تشغيل PG في الحاوية؛ أول محاولة: 511 errors = PG متوقف، لا فشل اختبار)
+static_gate -> PASSED 0 ; lint-imports -> 8 kept ; ruff 302 ; mypy 103
+```

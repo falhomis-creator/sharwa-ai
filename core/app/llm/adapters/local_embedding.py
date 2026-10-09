@@ -53,6 +53,8 @@ def _embed_text(text: str, dim: int) -> list[float]:
 class LocalEmbeddingProvider(EmbeddingProvider):
     def __init__(self, dim: int = EMBED_DIM) -> None:
         self._dim = dim
+        # F-P4-13: the model identity stored with every product vector.
+        self.model_name = MODEL_NAME
 
     def embed(self, *, texts: list[str], timeout_s: float) -> EmbeddingResult:
         vectors = [_embed_text(t, self._dim) for t in texts]
