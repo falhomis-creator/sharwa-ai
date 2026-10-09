@@ -5,14 +5,14 @@
 # plus one oversized POST that the proxy itself must refuse (413) before it
 # reaches the api. Never sends a token, a webhook signature or a message.
 #
-#   bash ops/proxy/check_proxy.sh                       # https://api.sharwa.app
+#   bash ops/proxy/check_proxy.sh                       # https://ai.sharwaah.com
 #   bash ops/proxy/check_proxy.sh https://api.example   # another host
-#   CURL_OPTS="-k --resolve api.sharwa.app:443:127.0.0.1 --resolve api.sharwa.app:80:127.0.0.1" \
+#   CURL_OPTS="-k --resolve ai.sharwaah.com:443:127.0.0.1 --resolve ai.sharwaah.com:80:127.0.0.1" \
 #       bash ops/proxy/check_proxy.sh                   # local test (self-signed cert)
 #
 # Exit 0 = every check passed; 1 = at least one failed (each failure is printed).
 set -u
-BASE="${1:-https://api.sharwa.app}"
+BASE="${1:-https://ai.sharwaah.com}"
 HOST="${BASE#https://}"; HOST="${HOST%%/*}"
 read -r -a OPTS <<< "${CURL_OPTS:-}"
 PASS=0; FAIL=0

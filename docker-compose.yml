@@ -303,7 +303,7 @@ services:
       SSO_LOGIN_URL: ${SSO_LOGIN_URL:?SSO_LOGIN_URL is required (see .env)}
       # P4 Task 17 (F-P4-11): passed through so the public domain works. Empty
       # (the default) = exactly today's behaviour. CONSOLE_ALLOWED_ORIGINS is the
-      # console's own public origin (https://api.sharwa.app): the /v1/ws handshake
+      # console's own public origin (https://ai.sharwaah.com): the /v1/ws handshake
       # checks the browser Origin against it (api/ws.py). CONSOLE_SSO_PLATFORM_ORIGINS
       # = the Sharwa store origins allowed to hand the console a token (Task 6b).
       CONSOLE_ALLOWED_ORIGINS: ${CONSOLE_ALLOWED_ORIGINS:-}

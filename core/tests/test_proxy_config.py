@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 CADDY = (ROOT / "ops/proxy/Caddyfile").read_text(encoding="utf-8")
-NGINX = (ROOT / "ops/proxy/nginx-api.sharwa.app.conf").read_text(encoding="utf-8")
+NGINX = (ROOT / "ops/proxy/nginx-ai.sharwaah.com.conf").read_text(encoding="utf-8")
 
 
 def _api_service_block() -> str:
@@ -36,6 +36,16 @@ def test_caddy_is_an_allow_list_with_a_404_catch_all():
     assert "@webhooks path /webhooks/platform/catalog /webhooks/platform/cart" in CADDY
     assert re.search(r"\thandle \{\n\t\trespond 404\n\t\}", CADDY)
     assert "/metrics" not in CADDY.split("@app path", 1)[1].split("\n", 1)[0]
+
+
+def test_configs_name_the_production_domain():
+    # F-P4-12: the repo matches what runs on the VPS (ai.sharwaah.com).
+    assert "{$SHARWA_API_DOMAIN:ai.sharwaah.com} {" in CADDY
+    assert NGINX.count("server_name ai.sharwaah.com;") == 2
+    assert "/etc/letsencrypt/live/ai.sharwaah.com/fullchain.pem" in NGINX
+    check = (ROOT / "ops/proxy/check_proxy.sh").read_text(encoding="utf-8")
+    assert 'BASE="${1:-https://ai.sharwaah.com}"' in check
+    assert "sharwa.app" not in CADDY + NGINX + check
 
 
 def test_caddy_strips_the_ws_ticket_from_the_log_and_sends_hsts():

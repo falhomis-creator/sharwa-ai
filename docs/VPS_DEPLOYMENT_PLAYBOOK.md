@@ -160,7 +160,7 @@ ssh -N -L 8000:127.0.0.1:8000 <USER>@<VPS_IP>      # إن كان API_HOST_PORT=8
 ```
 ثم افتح `http://127.0.0.1:8000/console/` والصق التوكن. (يعمل كأنه `http://<VPS_IP>:8000/console/` لكن مشفّراً.)
 
-**الدائم — نطاق + TLS:** راجع §12 (`api.sharwa.app`، P4 Task 17).
+**الدائم — نطاق + TLS:** راجع §12 (`ai.sharwaah.com`، P4 Task 17).
 
 **لا تفتح 8000/8100 في الجدار الناري مباشرة:** التوكن سيعبر الشبكة بنصّ صريح.
 
@@ -254,11 +254,11 @@ docker compose logs worker-realtime --tail 30   # لا يجب أن يظهر أي
 9. **ويندوز:** أوامر المفاتيح تُنفَّذ في CMD أو PowerShell على جهازك لا في bash على الـVPS؛ لا تلصق أحدهما في الآخر.
 10. **قبل الترحيل دائماً:** `pg_dump` احتياطي. الترحيلات للأمام فقط عبر `scripts/migrate.sh` ولا تعمل تلقائياً (H62).
 
-## 12. الدومين وTLS — `api.sharwa.app` (P4 Task 17)
+## 12. الدومين وTLS — `ai.sharwaah.com` (P4 Task 17؛ النطاق الإنتاجي منذ 2026-10-09 — F-P4-12)
 
 **الحالة:** الملفات مكتوبة ومُختبَرة محلياً (Caddy 2.10.2 وnginx 1.24 أمام خادم بديل، 20/20 فحصاً لكلٍّ منهما)؛ **لم يُنفَّذ شيء على الـVPS** — التنفيذ هو Task 18 بيدك، وكل أمر هنا UNVERIFIED على الخادم حتى تلصق مخرجاته.
 
-**القرار:** المحرك على نطاق فرعي مخصّص **`api.sharwa.app`**. السبب: `sharwa.app` و`*.sharwa.app` لمتاجر شروه (Django)، ولوحة المحرك تُفتح من صفحة إطلاق على نطاق المتجر. الـAPI يبقى مربوطاً على `127.0.0.1` فقط؛ البروكسي على المضيف هو الباب الوحيد من الإنترنت.
+**القرار:** المحرك على نطاق فرعي مخصّص **`ai.sharwaah.com`**. السبب: `sharwaah.com` و`*.sharwaah.com` لمتاجر شروه (Django)، ولوحة المحرك تُفتح من صفحة إطلاق على نطاق المتجر. الـAPI يبقى مربوطاً على `127.0.0.1` فقط؛ البروكسي على المضيف هو الباب الوحيد من الإنترنت.
 
 | المسار العام | يصل إلى الـAPI؟ |
 |---|---|
@@ -268,7 +268,7 @@ docker compose logs worker-realtime --tail 30   # لا يجب أن يظهر أي
 | `/healthz` | نعم |
 | كل ما عداه، ومنه `/metrics` `/readyz` `/docs` `/redoc` `/openapi.json` | **لا — 404 من البروكسي** |
 
-الملفات: `ops/proxy/Caddyfile` (الموصى به: شهادة تلقائية وتجديد تلقائي)، `ops/proxy/nginx-api.sharwa.app.conf` (بديل فقط إن كان nginx يملك 80/443 أصلاً)، `ops/proxy/check_proxy.sh` (فحص بعد التشغيل، قراءة فقط).
+الملفات: `ops/proxy/Caddyfile` (الموصى به: شهادة تلقائية وتجديد تلقائي)، `ops/proxy/nginx-ai.sharwaah.com.conf` (بديل فقط إن كان nginx يملك 80/443 أصلاً)، `ops/proxy/check_proxy.sh` (فحص بعد التشغيل، قراءة فقط).
 
 ### 12.0 من يملك المنفذين 80/443 على الـVPS؟
 
@@ -279,16 +279,16 @@ sudo ss -ltnp '( sport = :80 or sport = :443 )'
 |---|---|
 | لا شيء | **12.3-أ Caddy** |
 | `nginx` | **12.3-ب nginx** (لا تثبّت Caddy: لا يملك المنفذين برنامجان) |
-| `caddy` (لموقع آخر) | أضف كتلة `api.sharwa.app {...}` من `ops/proxy/Caddyfile` إلى ملفه الحالي بدل استبداله |
+| `caddy` (لموقع آخر) | أضف كتلة `ai.sharwaah.com {...}` من `ops/proxy/Caddyfile` إلى ملفه الحالي بدل استبداله |
 
 ### 12.1 DNS (عند مسجّل النطاق — بيدك)
 
-- سجل **A**: الاسم `api` ⇐ عنوان IPv4 للـVPS. **AAAA** فقط إن كان للخادم IPv6 يعمل فعلاً (سجل AAAA خاطئ يُفشل إصدار الشهادة).
-- إن وُجد سجل `*.sharwa.app` (wildcard) فالسجل الصريح `api` يتقدّم عليه — لكن **يجب ألّا يُسمح لمتجر بالاسم `api`** في شروه (OQ-P4-22).
-- إن كان على `sharwa.app` سجلات CAA فيجب أن تسمح بـ`letsencrypt.org`.
+- سجل **A**: الاسم `ai` (في نطاق `sharwaah.com`) ⇐ عنوان IPv4 للـVPS. **AAAA** فقط إن كان للخادم IPv6 يعمل فعلاً (سجل AAAA خاطئ يُفشل إصدار الشهادة).
+- إن وُجد سجل `*.sharwaah.com` (wildcard) فالسجل الصريح `ai` يتقدّم عليه — لكن **يجب ألّا يُسمح لمتجر بالاسمين `ai` و`api`** (قرار المالك، أسماء البنية التحتية محجوزة) في شروه (OQ-P4-22).
+- إن كان على `sharwaah.com` سجلات CAA فيجب أن تسمح بـ`letsencrypt.org`.
 
 ```bash
-dig +short api.sharwa.app A        # يجب أن يطابق عنوان الخادم
+dig +short ai.sharwaah.com A        # يجب أن يطابق عنوان الخادم
 curl -4 -s https://ifconfig.me ; echo   # (على الـVPS) عنوان الخادم للمقارنة
 ```
 
@@ -330,11 +330,11 @@ PORT=$(grep '^API_HOST_PORT=' .env.prod | cut -d= -f2)
 sudo apt-get install -y certbot
 sudo mkdir -p /var/www/certbot
 # (1) المنفذ 80 فقط لإصدار الشهادة
-sed '/^# --- port 443/,$d' ops/proxy/nginx-api.sharwa.app.conf | sed "s/127.0.0.1:8100/127.0.0.1:${PORT:-8000}/" | sudo tee /etc/nginx/conf.d/sharwa-ai.conf >/dev/null
+sed '/^# --- port 443/,$d' ops/proxy/nginx-ai.sharwaah.com.conf | sed "s/127.0.0.1:8100/127.0.0.1:${PORT:-8000}/" | sudo tee /etc/nginx/conf.d/sharwa-ai.conf >/dev/null
 sudo nginx -t && sudo systemctl reload nginx
-sudo certbot certonly --webroot -w /var/www/certbot -d api.sharwa.app --deploy-hook "systemctl reload nginx"
+sudo certbot certonly --webroot -w /var/www/certbot -d ai.sharwaah.com --deploy-hook "systemctl reload nginx"
 # (2) الملف كاملاً
-sed "s/127.0.0.1:8100/127.0.0.1:${PORT:-8000}/" ops/proxy/nginx-api.sharwa.app.conf | sudo tee /etc/nginx/conf.d/sharwa-ai.conf >/dev/null
+sed "s/127.0.0.1:8100/127.0.0.1:${PORT:-8000}/" ops/proxy/nginx-ai.sharwaah.com.conf | sudo tee /etc/nginx/conf.d/sharwa-ai.conf >/dev/null
 sudo nginx -t && sudo systemctl reload nginx
 systemctl list-timers | grep -i certbot        # التجديد التلقائي
 ```
@@ -346,9 +346,9 @@ systemctl list-timers | grep -i certbot        # التجديد التلقائي
 ```bash
 cd ~/sharwa_ai && export COMPOSE_ENV_FILES=.env.prod && umask 077
 sed -i '/^CONSOLE_ALLOWED_ORIGINS=/d' .env.prod
-printf 'CONSOLE_ALLOWED_ORIGINS=https://api.sharwa.app\n' >> .env.prod
+printf 'CONSOLE_ALLOWED_ORIGINS=https://ai.sharwaah.com\n' >> .env.prod
 # فقط حين تجهز صفحة الإطلاق في شروه (Task 6ب) — وإلا اتركه فارغاً:
-# sed -i '/^CONSOLE_SSO_PLATFORM_ORIGINS=/d' .env.prod && printf 'CONSOLE_SSO_PLATFORM_ORIGINS=https://*.sharwa.app\n' >> .env.prod
+# sed -i '/^CONSOLE_SSO_PLATFORM_ORIGINS=/d' .env.prod && printf 'CONSOLE_SSO_PLATFORM_ORIGINS=https://*.sharwaah.com\n' >> .env.prod
 chmod 600 .env.prod
 docker compose config --quiet && docker compose up -d --no-deps api
 docker compose exec api env | grep -E '^CONSOLE_(ALLOWED|SSO)'
@@ -360,11 +360,11 @@ docker compose exec api env | grep -E '^CONSOLE_(ALLOWED|SSO)'
 ```bash
 cd ~/sharwa_ai && bash ops/proxy/check_proxy.sh
 ```
-المتوقّع: `N passed, 0 failed` (مع الـAPI الحقيقي: `/v1/me` ⇐ 401 و`GET` على الـwebhook ⇐ 405؛ كلاهما يعني «وصل الـAPI»). ثم افتح `https://api.sharwa.app/console/` من متصفحك.
+المتوقّع: `N passed, 0 failed` (مع الـAPI الحقيقي: `/v1/me` ⇐ 401 و`GET` على الـwebhook ⇐ 405؛ كلاهما يعني «وصل الـAPI»). ثم افتح `https://ai.sharwaah.com/console/` من متصفحك.
 
 ### 12.6 ما يأتي في Task 18 (بيدك)
 
-- روابط الـwebhook في شروه: `https://api.sharwa.app/webhooks/platform/catalog` و`https://api.sharwa.app/webhooks/platform/cart` (السر نفسه `PLATFORM_WEBHOOK_SECRET`).
+- روابط الـwebhook في شروه: `https://ai.sharwaah.com/webhooks/platform/catalog` و`https://ai.sharwaah.com/webhooks/platform/cart` (السر نفسه `PLATFORM_WEBHOOK_SECRET`).
 - إغلاق نفق SSH المؤقت بعد نجاح 12.5.
 
 ### 12.7 الرجوع
@@ -373,6 +373,6 @@ cd ~/sharwa_ai && bash ops/proxy/check_proxy.sh
 
 ### 12.8 قرارات مقصودة
 
-- **HSTS** سنة واحدة **بلا** `includeSubDomains`/`preload`: بقية `*.sharwa.app` قرار شروه لا المحرك.
+- **HSTS** سنة واحدة **بلا** `includeSubDomains`/`preload`: بقية `*.sharwaah.com` قرار شروه لا المحرك.
 - **سجل الوصول بلا query string** (Caddy يحذف `ticket`؛ nginx يسجّل `$uri`): تذكرة الـWebSocket لا تصل ملف سجل. Caddy لا يسجّل قيم `Authorization`.
 - **عنوان العميل الحقيقي:** الـAPI يرى عنوان جسر Docker لا عنوان الزائر، ولا يثق بـ`X-Forwarded-For` (`FORWARDED_ALLOW_IPS=127.0.0.1`). لا ميزة اليوم تعتمد على IP (حدود المعدّل لكل مستأجر/موظف).

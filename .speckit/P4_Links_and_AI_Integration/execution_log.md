@@ -859,3 +859,45 @@ scripts/check_env.py (الجهاز) -> ENV CHECK PASSED — 0 required keys miss
 **توقّف:** لا commit. بانتظار مراجعة المالك.
 
 **مراجعة المالك (2026-10-09):** Task 17 معتمدة، وإصلاح F-P4-11 معتمد. **قرار OQ-P4-22:** يُضاف `api` إلى قائمة أسماء المستأجرين/المتاجر المحجوزة — لا يُسمح لمتجر باستخدام نطاق فرعي للبنية التحتية. التنفيذ في مستودع شروه (Django، مُنشئ الـschema) لا في هذا المستودع؛ يبقى بنداً مفتوحاً هناك حتى يُنفَّذ. ضُمَّ `.env.example` و`tasks.md` إلى الـcommit لأنهما جزء من تغييرات Task 17 نفسها.
+
+## Task 18 — النشر على الـVPS (المالك ينفّذ، المعماري يراجع) — الجولة 1 (2026-10-09)
+
+مخرجات المالك من الخادم (Contabo، Ubuntu 24.04.5، `217.216.77.222`):
+- المنفذان 80/443: **لا مستمع** ⇒ الطريق Caddy (§12.3-أ).
+- `dig +short api.sharwa.app A` ⇒ **فارغ**: سجل DNS غير موجود/لم ينتشر بعد ⇒ لا تثبيت لـCaddy قبل ظهوره (إصدار الشهادة سيفشل).
+- IPv6 يعمل: `2407:3641:2359:5272::1` (`curl -6` أعاده) ⇒ سجل AAAA آمن.
+- ufw: active، 22/tcp فقط ⇒ 80/443 مغلقان.
+- نسخة احتياطية: `/root/backup_2026-10-09_0119.sql.gz` (27K) — لم يُتحقَّق من اكتمالها بعد.
+- الدمج: `master` c0a8e6e + `p4-links-ai` ⇒ `517c143` (106 ملفاً)؛ compose يحوي `CONSOLE_ALLOWED_ORIGINS` (سطر 309).
+- الحاويات تعمل **بالصور القديمة** (api منذ 4 أيام على 127.0.0.1:8100، worker-realtime منذ 3 أيام): كود P4 لم يُفعَّل بعد. الترحيل `0019_p3_cart_tombstones` جديد ⇒ يُطبَّق قبل إعادة البناء (وإلا يرفض entrypoint الإقلاع).
+- فحص المعماري لـ`origin/main..d79e2ec`: لا مفاتيح `_required` جديدة (فقط اختيارية: COMMERCE_BASE_URL، COMMERCE_API_SECRET، SIZE_ADVICE_ENABLED)، ولا تغيير في الاعتماديات/Dockerfile.
+
+## Task 18 — الجولة 2: النشر مكتمل (تقرير المالك، 2026-10-09)
+
+**بحسب تقرير المالك (لم يرَ المعماري مخرجات الخادم لهذه الجولة ⇒ مُسجَّل كما أُبلِغ):**
+- المرحلتان أ وب مكتملتان على Contabo (`217.216.77.222`).
+- **النطاق الإنتاجي الفعلي: `ai.sharwaah.com`** (لا `api.sharwa.app` الموثّق في Task 17) — قرار المالك.
+- Caddy مثبّت وأصدر شهادة Let's Encrypt بنجاح.
+- `check_proxy.sh` عُدِّل يدوياً على الخادم للنطاق الجديد ⇒ **21 passed, 0 failed** (20 فحصاً + فحص الشهادة الذي يُتخطّى محلياً مع `-k`).
+- حاويتا api وworker-realtime تعملان بالصورة الجديدة خلف البروكسي.
+
+**بنود مفتوحة ناتجة عن تغيير النطاق (لم تُنفَّذ؛ تُعرض على المالك):**
+- **F-P4-12 (توثيق/إعداد):** المستودع ما زال يذكر `api.sharwa.app` في `ops/proxy/nginx-api.sharwa.app.conf`، والقيمة الافتراضية في `ops/proxy/Caddyfile` و`check_proxy.sh`، و§12 من الدليل، و`test_proxy_config.py` (اسم الملف فقط). على الخادم يعمل Caddy بالنطاق الجديد (تعديل محلي أو `SHARWA_API_DOMAIN`) ⇒ نسخة الخادم تنحرف عن المستودع حتى يُوحَّد.
+- **تحقق مطلوب:** `CONSOLE_ALLOWED_ORIGINS` في `.env.prod` يجب أن يكون `https://ai.sharwaah.com` (لا `https://api.sharwa.app` من الجولة 1)، وإلا يرفض `/v1/ws` اللوحة. UNVERIFIED.
+- **OQ-P4-22 يتحوّل:** إن كانت متاجر شروه على `*.sharwaah.com` فالاسم المحجوز الواجب هو **`ai`** (إضافة إلى `api`).
+- **بقية Task 18 كما في tasks.md:** تحديث روابط الـwebhook في شروه إلى `https://ai.sharwaah.com/webhooks/platform/{catalog,cart}` وإغلاق نفق SSH — لم يُذكرا في التقرير. Task 18 عُلِّمت مكتملة بأمر المالك.
+- إعادة تشغيل الخادم المعلّقة (`System restart required`) لم تُنفَّذ بعد.
+
+## F-P4-12 — توحيد نطاق المستودع على `ai.sharwaah.com` (المعماري منفّذاً، 2026-10-09)
+
+**أمر المالك:** مطابقة المستودع لما يعمل على الـVPS. التغييرات: `ops/proxy/Caddyfile` (الافتراضي `{$SHARWA_API_DOMAIN:ai.sharwaah.com}`)، `check_proxy.sh` (الافتراضي `https://ai.sharwaah.com`)، `git mv ops/proxy/nginx-api.sharwa.app.conf ops/proxy/nginx-ai.sharwaah.com.conf` (server_name + مسار الشهادة)، §12 في الدليل (النطاق، DNS `ai`، روابط الـwebhook، `CONSOLE_ALLOWED_ORIGINS=https://ai.sharwaah.com`، `CONSOLE_SSO_PLATFORM_ORIGINS=https://*.sharwaah.com`، وحجز `ai` و`api` — OQ-P4-22)، تعليقات `.env.example` و`docker-compose.yml`، و`test_proxy_config.py` (+ اختبار سادس `test_configs_name_the_production_domain`، ويتأكد أن `sharwa.app` لم يبقَ في ملفات البروكسي).
+
+**التحقق (حرفياً، الحاوية):**
+```
+pytest tests/test_proxy_config.py -> 6 passed
+caddy validate -> Valid configuration ; caddy fmt --diff -> FMT_OK
+nginx -t (بلا listen [::]) -> configuration file /tmp/ngt/nginx.conf test is successful
+bash -n check_proxy.sh -> SH_OK
+توجيه حيّ أمام الخادم البديل بالنطاق الجديد: Caddy 20 passed, 0 failed ; nginx 20 passed, 0 failed
+```
+**مستمر بعد الـcommit:** النسخة المعدّلة يدوياً على الخادم يمكن الآن استبدالها بـ`ops/proxy/Caddyfile` من المستودع (مطابقة). UNVERIFIED على الخادم.
