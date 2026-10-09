@@ -20,13 +20,14 @@ constitution §3:
 from __future__ import annotations
 
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-from app.db import repos_catalog, repos_gift
+from app.db import repos, repos_catalog, repos_gift
 from app.gift import curator
 from app.obs import logging as obs_logging
 from app.tools.gift_extract import GiftRequest, extract_gift_request
@@ -50,9 +51,28 @@ class GiftOffer:
 
 @dataclass(frozen=True)
 class GiftTurn:
-    # baskets | need_budget | currency_mismatch | no_basket
+    # baskets | need_budget | currency_mismatch | no_basket | no_link
     status: str
     offers: tuple[GiftOffer, ...] = ()
+    link_base: str = ""
+
+
+# Owner decision (2026-10-09): the link is store-scoped -
+# https://<store>.sharwaah.com/checkout/gift/<cart_id> - so the platform knows
+# the store from the address and the basket lands in that store's session.
+# GIFT_CHECKOUT_BASE_URL carries the store as the {tenant_ref} placeholder.
+TENANT_REF_PLACEHOLDER = "{tenant_ref}"
+_STORE_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+
+
+def checkout_base_url(template: str, tenant_ref: str | None) -> str | None:
+    """The link base for this store, or None when the template needs a store
+    label and the tenant's platform_ref is not a valid DNS label."""
+    if TENANT_REF_PLACEHOLDER not in template:
+        return template
+    if not tenant_ref or not _STORE_LABEL_RE.fullmatch(tenant_ref):
+        return None
+    return template.replace(TENANT_REF_PLACEHOLDER, tenant_ref)
 
 
 def is_gift_request(bodies: tuple[str, ...]) -> bool:
@@ -82,10 +102,16 @@ def _relevance(conn: Any, tenant_id: uuid.UUID, query: str) -> dict[str, int]:
 
 def curate_for_turn(
     conn: Any, *, tenant_id: uuid.UUID, conversation_id: uuid.UUID, bodies: tuple[str, ...],
+    link_template: str,
 ) -> GiftTurn:
     req: GiftRequest = extract_gift_request(bodies)
     if req.budget_major is None:
         return GiftTurn("need_budget")
+    # Resolve the store's link base BEFORE any basket is stored: a basket the
+    # customer could never open is not proposed (=> hand off).
+    link_base = checkout_base_url(link_template, repos.platform_ref_for_tenant(conn, tenant_id))
+    if link_base is None:
+        return GiftTurn("no_link")
 
     present = repos_catalog.list_priced_currencies(conn, tenant_id=tenant_id)
     if not present:
@@ -129,4 +155,4 @@ def curate_for_turn(
             currency=currency, budget_minor=budget_minor,
         )
         offers.append(GiftOffer(cart_id, tuple(by_id[pid].title for pid in basket.product_ids)))
-    return GiftTurn("baskets", tuple(offers))
+    return GiftTurn("baskets", tuple(offers), link_base)

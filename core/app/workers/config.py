@@ -336,6 +336,22 @@ def validate_safe_template_id(template_id: str) -> None:
         )
 
 
+
+def validate_gift_checkout_base_url(value: str) -> None:
+    """GIFT_CHECKOUT_BASE_URL: an https:// URL ending with '/'. It may carry the
+    store as ONE `{tenant_ref}` placeholder (owner decision 2026-10-09: the link
+    is store-scoped, https://<store>.sharwaah.com/checkout/gift/<cart_id>); any
+    other brace is a typo that would reach customers verbatim."""
+    stripped = value.replace("{tenant_ref}", "", 1)
+    if not (
+        value.startswith("https://") and value.endswith("/")
+        and "{" not in stripped and "}" not in stripped
+    ):
+        raise ConfigError(
+            "GIFT_CHECKOUT_BASE_URL must be an https:// URL ending with '/', with at most one "
+            f"{{tenant_ref}} placeholder, got {value!r}"
+        )
+
 @dataclass(frozen=True)
 class WorkerSettings:
     db: DatabaseConfig
@@ -453,7 +469,7 @@ class WorkerSettings:
     # P4 Task 14: gift baskets with a checkout link. OFF by default: the texts are
     # approved (OQ-P4-24); it stays dark until the platform route exists.
     gift_enabled: bool = False
-    gift_checkout_base_url: str = "https://sharwaah.com/checkout/gift/"
+    gift_checkout_base_url: str = "https://{tenant_ref}.sharwaah.com/checkout/gift/"
     order_ref_pattern: Any = None  # compiled at load (re.Pattern) - no static default
     order_lookup_timeout_s: float = 4.0
     order_lookup_max_phone_candidates: int = 3
@@ -598,12 +614,10 @@ class WorkerSettings:
         validate_embedding_provider(env, embedding_provider)
         embedding_dim = _int("EMBEDDING_DIM", 1024)
         validate_embedding_dim(embedding_dim)
-        gift_checkout_base_url = _optional("GIFT_CHECKOUT_BASE_URL", "https://sharwaah.com/checkout/gift/")
-        if not (gift_checkout_base_url.startswith("https://") and gift_checkout_base_url.endswith("/")):
-            raise ConfigError(
-                "GIFT_CHECKOUT_BASE_URL must be an https:// URL ending with '/', "
-                f"got {gift_checkout_base_url!r}"
-            )
+        gift_checkout_base_url = _optional(
+            "GIFT_CHECKOUT_BASE_URL", "https://{tenant_ref}.sharwaah.com/checkout/gift/",
+        )
+        validate_gift_checkout_base_url(gift_checkout_base_url)
         search_vector_max_distance = _float("SEARCH_VECTOR_MAX_DISTANCE", 0.99)
         if not 0.0 < search_vector_max_distance <= 2.0:
             raise ConfigError(

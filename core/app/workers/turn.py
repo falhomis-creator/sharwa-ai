@@ -276,7 +276,8 @@ def _size_action(conn: Any, plan: _TurnPlan) -> _Action:
 
 
 # Gift outcomes that end the bot's turn with a human hand-off (their text says so).
-_GIFT_HANDOFF = {"no_basket": "gift_no_basket", "currency_mismatch": "gift_currency"}
+_GIFT_HANDOFF = {"no_basket": "gift_no_basket", "currency_mismatch": "gift_currency",
+                 "no_link": "gift_no_basket"}
 
 
 def _gift_action(conn: Any, settings: WorkerSettings, plan: _TurnPlan) -> _Action:
@@ -284,10 +285,11 @@ def _gift_action(conn: Any, settings: WorkerSettings, plan: _TurnPlan) -> _Actio
     link - or a question for the budget, or a hand-off. Deterministic."""
     turn = gift.curate_for_turn(
         conn, tenant_id=plan.tenant_id, conversation_id=plan.conversation_id, bodies=plan.bodies,
+        link_template=settings.gift_checkout_base_url,
     )
     if turn.status == "baskets":
         text = compose.compose_gift_baskets(
-            [(str(o.cart_id), o.titles) for o in turn.offers], settings.gift_checkout_base_url,
+            [(str(o.cart_id), o.titles) for o in turn.offers], turn.link_base,
         )
         return _Action("gift_baskets", text, False, None, "template", "gift_baskets")
     if turn.status == "need_budget":

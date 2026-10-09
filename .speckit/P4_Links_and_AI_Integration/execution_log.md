@@ -1053,3 +1053,41 @@ static_gate PASSED 0 ; check_env PASSED ; lint-imports 8 kept 0 broken ; ruff 30
 ## إغلاق P4 النهائي (أمر المالك، 2026-10-09)
 - Task 9 وإصلاح F-P4-16 (الوزن قبل الطول في المقاس الأقرب خارج المدى) معتمدان؛ Task 19 (521 ×2) مُقَرّ؛ Task 20 معتمد.
 - يتوقّف كل تنفيذ في P4. الدمج إلى `main` والنشر على الخادم بيد المالك.
+
+## INT-1 — رابط الهدية المقيّد بالمتجر `{tenant_ref}` (2026-10-09) — VERIFIED، بانتظار المراجعة، لا commit
+**قرار المالك:** الرابط `https://<store>.sharwaah.com/checkout/gift/{id}`؛ ينفَّذ في المحرك قالباً بعنصر نائب `{tenant_ref}`.
+
+**التغيير:**
+- `core/app/workers/gift.py`: `checkout_base_url(template, tenant_ref)` — يستبدل `{tenant_ref}` بـ`platform_ref` المتجر إن كان تسمية DNS (`[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?`) وإلا None؛ قالب بلا عنصر نائب يُستعمل كما هو. `curate_for_turn(..., link_template)` يحلّ الرابط **قبل أي كتابة**؛ تعذّره ⇒ `GiftTurn("no_link")`.
+- `core/app/workers/turn.py`: `no_link` ⇒ تحويل لموظف بقالب `gift_no_basket` (نص معتمد قائم، لا نص جديد)؛ الرابط من `turn.link_base`.
+- `core/app/workers/config.py`: الافتراضي `https://{tenant_ref}.sharwaah.com/checkout/gift/`؛ `validate_gift_checkout_base_url`: https، ينتهي بـ`/`، عنصر نائب واحد على الأكثر ولا أقواس غيره.
+- `docker-compose.yml`: `GIFT_CHECKOUT_BASE_URL: ${GIFT_CHECKOUT_BASE_URL:-}` (الفارغ ⇒ افتراضي التطبيق؛ `}` داخل قيمة compose الافتراضية تُنهي التعبير). `docker compose --profile '*' config` ⇒ `GIFT_CHECKOUT_BASE_URL: ""`.
+- `.env.example`، `docs/PLATFORM_COMMERCE_CONTRACT.md` §4.5.
+- **تعديل اختبارات معتمدة بقرار المالك (تغيّر الرابط نفسه):** `test_gift_turn_db.py` (`BASE` ⇒ `https://tenant-a.sharwaah.com/checkout/gift/` = `platform_ref` المزروع) و`test_gift_extract.py` (القيمة الافتراضية). بلا تغيير في أي تأكيد آخر.
+- جديد: `test_gift_link.py` (نقي، 27) و`test_gift_link_db.py` (db، 2).
+
+**المخرج:**
+```
+pytest -q tests/test_gift_link.py tests/test_gift_extract.py      -> 50 passed
+pytest -q -m db tests/test_gift_turn_db.py tests/test_gift_link_db.py -> 9 passed
+pytest -q (pure)          -> 709 passed, 528 deselected in 9.95s
+pytest -q -m db core/tests -> 523 passed, 1 skipped, 713 deselected, 2 warnings in 417.14s (0:06:57)
+static_gate.py            -> STATIC GATE PASSED — 0 violations.
+lint-imports              -> Contracts: 8 kept, 0 broken.
+ruff                      -> Found 302 errors. (الأساس)
+mypy app                  -> Found 103 errors in 33 files (الأساس)
+```
+(db 521 ⇒ 523: الاختباران الجديدان.)
+
+**فحوص التحوّل** (الاختبارات الأربعة، كل تحوّل ثم استعادة، مع مسح `__pycache__`):
+| التحوّل | النتيجة |
+|---|---|
+| حذف فحص تسمية DNS | 10 failed |
+| إرجاع القالب بلا استبدال | 9 failed |
+| استعمال القالب الخام بدل التحويل عند التعذّر | 1 failed |
+| `turn.py` يستعمل الإعداد بدل `turn.link_base` | 4 failed |
+| حذف فحص الأقواس في الإعداد | 5 failed |
+| إرجاع الافتراضي القديم | 2 failed |
+| بعد الاستعادة | 59 passed |
+
+**UNVERIFIED:** قيمة `GIFT_CHECKOUT_BASE_URL` في `.env.prod` على الـVPS (إن كانت مضبوطة بالقيمة القديمة فستتجاوز القالب — OQ-INT-04 في حزمة شروه)؛ متاجر قائمة `platform_ref` فيها ليس تسمية DNS (تُحوَّل لموظف).

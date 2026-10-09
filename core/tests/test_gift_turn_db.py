@@ -3,7 +3,8 @@ platform's signed gift-cart lookup, on PostgreSQL.
 
 Flag off => the turn is unchanged. Flag on => a gift request with a budget gets
 up to 3 baskets of the merchant's own titles, each with a checkout link
-https://sharwaah.com/checkout/gift/<cart_id> (owner decision for OQ-P4-06);
+https://<store>.sharwaah.com/checkout/gift/<cart_id> (owner decision for OQ-P4-06,
+made store-scoped 2026-10-09);
 the basket is stored and the platform resolves the id through
 POST /webhooks/platform/gift-cart. No price or total ever reaches the customer.
 """
@@ -31,7 +32,7 @@ pytestmark = pytest.mark.db
 
 TENANT_A = uuid.UUID("11111111-1111-1111-1111-111111111111")
 TENANT_B = uuid.UUID("22222222-2222-2222-2222-222222222222")
-BASE = "https://sharwaah.com/checkout/gift/"
+BASE = "https://tenant-a.sharwaah.com/checkout/gift/"  # {tenant_ref} = seeded platform_ref
 
 # platform_product_id -> (title, category, [(variant_id, price_minor, currency, stock_hint)])
 _CATALOG = {

@@ -70,7 +70,9 @@ def test_gift_is_off_by_default_and_the_link_base_is_validated(monkeypatch):
     monkeypatch.delenv("GIFT_ENABLED", raising=False)
     monkeypatch.delenv("GIFT_CHECKOUT_BASE_URL", raising=False)
     s = WorkerSettings.load()
-    assert (s.gift_enabled, s.gift_checkout_base_url) == (False, "https://sharwaah.com/checkout/gift/")
+    assert (s.gift_enabled, s.gift_checkout_base_url) == (
+        False, "https://{tenant_ref}.sharwaah.com/checkout/gift/",  # store-scoped (2026-10-09)
+    )
     for bad in ("http://sharwaah.com/checkout/gift/", "https://sharwaah.com/checkout/gift"):
         monkeypatch.setenv("GIFT_CHECKOUT_BASE_URL", bad)
         with pytest.raises(ConfigError, match="GIFT_CHECKOUT_BASE_URL"):
